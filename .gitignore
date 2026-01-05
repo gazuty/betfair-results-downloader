@@ -1,0 +1,65 @@
+# ------------------------------
+# Secrets / credentials (DO NOT COMMIT)
+# ------------------------------
+secrets/
+*.env
+.env
+
+# Allow templates (safe to commit)
+!secrets/credentials.template.json
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+
+# ------------------------------
+# Python artifacts
+# ------------------------------
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ------------------------------
+# Jupyter / IPython
+# ------------------------------
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# Notebook patch temp files (project-specific)
+tmp_cell_patch.py
+tmp_fix_customer_order_ref.patch
+
+# ------------------------------
+# Outputs / data (avoid leaking personal betting history)
+# ------------------------------
+outputs/
+data/
+*.csv
+*.parquet
+*.feather
+*.xlsx
+
+# Allow committing small, curated examples
+!examples/
+!examples/**
+
+# ------------------------------
+# Logs
+# ------------------------------
+*.log
+
+# ------------------------------
+# OS / IDE
+# ------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

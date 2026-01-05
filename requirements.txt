@@ -1,0 +1,7 @@
+﻿betfairlightweight
+pandas
+numpy
+pytz
+SQLAlchemy
+pyodbc
+ipykernel
