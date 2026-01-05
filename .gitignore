@@ -1,9 +1,11 @@
 # ------------------------------
-# Secrets / credentials (DO NOT COMMIT)
-# ------------------------------
-secrets/
-*.env
-.env
+# Secrets (do not commit real credentials)
+secrets/*
+!secrets/
+!secrets/credentials.template.json
+secrets/credentials.json
+
+
 
 # Allow templates (safe to commit)
 !secrets/credentials.template.json
