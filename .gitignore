@@ -5,11 +5,6 @@ secrets/*
 !secrets/credentials.template.json
 secrets/credentials.json
 
-
-
-# Allow templates (safe to commit)
-!secrets/credentials.template.json
-
 # ------------------------------
 # Virtual environments
 # ------------------------------
