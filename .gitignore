@@ -60,3 +60,19 @@ data/
 Thumbs.db
 .vscode/
 .idea/
+
+# Notebooks scratch
+notebooks/_scratch/
+.ipynb_checkpoints/
+
+# Python build / packaging
+*.egg-info/
+build/
+dist/
+
+# Local env + caches
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
