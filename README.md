@@ -2,7 +2,7 @@
 
 A production-ready Jupyter notebook that downloads **settled Betfair orders** using `betfairlightweight`, cleans them, writes a canonical CSV plus dated snapshots, and aggregates results to **market-level profit**.
 
-An **optional** Azure SQL publish step is included, but **disabled by default** and fully gated behind configuration + safety switches.
+An **optional** Azure SQL publish step is included, but it is **disabled by default** and gated behind configuration + safety switches.
 
 ---
 
@@ -19,18 +19,40 @@ An **optional** Azure SQL publish step is included, but **disabled by default** 
 
 ---
 
+## Azure publishing scope (current restriction)
+
+To reduce risk and keep the database focused, the Azure publish path is currently restricted to:
+
+- **Horse Racing** (`eventTypeId = 7`)
+- **Greyhound Racing** (`eventTypeId = 4339`)
+
+This is enforced in the notebook (Cell 9) by building a filtered dataset (`df_azure_upload`) from an **allow-list** of eventTypeIds. Other sports may still be downloaded and written to CSV, but they are **excluded from Azure uploads by design**.
+
+To expand scope later, update the allow-list in Cell 9.
+
+---
+
 ## Repository structure
 
-notebooks/ # main notebook lives here
+```
+src/
+  betfair_results_downloader/
+    __init__.py
+    csv_utils.py
+
+notebooks/
+  betfair_results_downloader.ipynb
+
 secrets/
-credentials.template.json # safe to commit (template only)
-credentials.json # local secrets (git-ignored)
-outputs/ # generated CSVs (git-ignored)
-examples/ # optional: small anonymised samples (committable)
+  credentials.template.json   # committed
+  credentials.json            # git-ignored
+
+outputs/                      # git-ignored
 requirements.txt
 README.md
 .gitignore
-
+.gitattributes
+```
 
 ---
 
@@ -49,96 +71,90 @@ Then fill in your Betfair credentials.
 ### 2) Install dependencies
 
 Create/activate a virtual environment, then:
-pip install -r requirements.txt
 
+```bash
+pip install -r requirements.txt
+```
 
 Notes:
-
-pyodbc and SQLAlchemy are only required if you enable Azure SQL publishing.
-
-The notebook still runs end-to-end for CSV generation without Azure enabled.
-
-Configuration
-
-The notebook reads secrets from:
-
-secrets/credentials.json
-
-Template fields
-
-betfair.* — Betfair credentials
-
-paths.results_csv_dir — output directory (recommended: outputs)
-
-user.enable_azure_sql — false by default (must be true to even attempt DB work)
-
-user.db_user_id — your database user identity (not hard-coded in the notebook)
-
-azure_sql.* — connection settings (only used if Azure SQL is enabled)
-
-Safety switches
-Azure SQL is optional and disabled by default
-
-Azure SQL publishing is controlled by:
-
-user.enable_azure_sql in secrets/credentials.json (default: false)
-
-When disabled:
-
-No DB connection is required
-
-No DB code is executed
-
-CSV outputs still work fully
-
-DRY_RUN prevents writes by default
-
-All DB writes are guarded by a notebook variable:
-
-DRY_RUN = True (default)
-
-To allow writes, you must explicitly set:
-
-DRY_RUN = False
-
-This is intentional “two-step safety”:
-
-user.enable_azure_sql must be true
-
-DRY_RUN must be False
-
-If either condition is not met, the notebook will not write to Azure SQL.
-
-Sharing with friends / comparing results
-
-This repo does not commit real outputs or secrets.
-
-If you want others to compare structures safely, put small anonymised samples in:
-
-examples/
-
-The .gitignore is designed to ignore outputs/ (real data) while allowing examples/.
-
-Disclaimer
-
-This project is for personal analytics and learning. You are responsible for compliance with Betfair’s terms and any local laws/regulations.
-
+- `pyodbc` is only required if you enable Azure SQL publishing.
+- The notebook runs end-to-end for CSV generation without Azure enabled.
 
 ---
 
-## 2) Critical `.gitignore` fix (template won’t commit otherwise)
+## Configuration
 
-Your current `.gitignore` ignores the whole `secrets/` directory, then tries to unignore the template. In Git, if a directory is ignored, you must unignore the directory itself as well, otherwise the exception often won’t work as expected.
+The notebook reads secrets from:
 
-Update the **secrets** section to this:
+- `secrets/credentials.json`
 
-```gitignore
-# ------------------------------
-# Secrets / credentials (DO NOT COMMIT)
-# ------------------------------
-secrets/*
-!secrets/
-!secrets/credentials.template.json
+### Key fields
 
-*.env
-.env
+- `betfair.*` — Betfair credentials
+- `paths.results_csv_dir` — CSV output directory
+- `user.enable_azure_sql` — **false by default** (must be true to even attempt DB work)
+- `user.db_user_id` — your database user identity (not hard-coded in the notebook)
+- `user.dry_run` — **true by default** (must be false to allow DB writes)
+- `azure_sql.*` — connection settings (only used if Azure SQL is enabled)
+
+---
+
+## Safety switches (Azure SQL)
+
+Azure SQL publishing is controlled by **two explicit switches** in `secrets/credentials.json`:
+
+1. `user.enable_azure_sql` must be **true** (otherwise no DB work is attempted)
+2. `user.dry_run` must be **false** (otherwise the notebook will refuse to write)
+
+This is intentional “two-step safety” to prevent accidental writes.
+
+Example configuration for a real publish:
+
+```json
+"user": {
+  "enable_azure_sql": true,
+  "db_user_id": "Gazuty",
+  "dry_run": false
+}
+```
+
+If either condition is not met, the notebook will not write to Azure SQL.
+
+---
+
+## Running the notebook (repeatable workflow)
+
+After a kernel restart, run cells in order:
+
+1. **Cell 0** — environment setup (repo root, secrets, safety switches)
+2. **Cell 1** — project imports (from `src/`)
+3. Continue top-to-bottom
+
+---
+
+## Sharing / examples
+
+This repo does not commit real outputs or secrets.
+
+If you want to share structure safely, place small anonymised samples in:
+
+- `examples/`
+
+The `.gitignore` is designed to ignore real outputs (e.g. `outputs/`, `*.csv`) while allowing curated examples under `examples/`.
+
+---
+
+## Notes on `.gitignore`
+
+This repo is configured so that:
+- `secrets/credentials.json` is **ignored**
+- `secrets/credentials.template.json` is **committed**
+- outputs and raw CSVs are **ignored**
+
+If you edit `.gitignore`, keep that behaviour intact.
+
+---
+
+## Disclaimer
+
+This project is for personal analytics and learning. You are responsible for compliance with Betfair’s terms and any local laws/regulations.
