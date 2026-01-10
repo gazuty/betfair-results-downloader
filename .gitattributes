@@ -1,0 +1,8 @@
+# Normalize line endings
+* text=auto
+
+# Jupyter notebooks: treat as text but keep consistent
+*.ipynb text eol=lf
+
+# Python
+*.py text eol=lf
