@@ -8,7 +8,7 @@ import threading
 import traceback
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from .config import DownloaderConfig
 from .run import run_downloader
@@ -19,18 +19,21 @@ from .secrets import (
     get_nested,
     set_nested,
     validate_credentials,
+    credentials_path,
+    set_credentials_path,
+    load_credentials_template,
 )
 
-CREDENTIALS_PATH = Path("secrets") / "credentials.json"
+DEFAULT_USER_ID = "YourUserName"
 
 
 class FirstRunWizard(tk.Toplevel):
     """
     Minimal modal wizard to gather credentials/settings on first run.
-    Saves to secrets/credentials.json via caller.
+    Allows choosing where to save the credentials file and where to store CSV outputs.
     """
 
-    def __init__(self, master: tk.Misc, initial: dict):
+    def __init__(self, master: tk.Misc, initial: dict, *, default_creds_path: Path):
         super().__init__(master)
         self.title("First run setup")
         self.resizable(False, False)
@@ -38,11 +41,14 @@ class FirstRunWizard(tk.Toplevel):
         self._result: dict | None = None
 
         # --- Vars ---
+        self.var_creds_path = tk.StringVar(value=str(default_creds_path))
+        self.var_results_dir = tk.StringVar(value=str(get_nested(initial, "paths.results_csv_dir", "")))
+
         self.var_bf_user = tk.StringVar(value=str(get_nested(initial, "betfair.username", "")))
         self.var_bf_pass = tk.StringVar(value=str(get_nested(initial, "betfair.password", "")))
         self.var_bf_appkey = tk.StringVar(value=str(get_nested(initial, "betfair.app_key", "")))
 
-        self.var_user_id = tk.StringVar(value=str(get_nested(initial, "user.user_id", "Gazuty")))
+        self.var_user_id = tk.StringVar(value=str(get_nested(initial, "user.user_id", DEFAULT_USER_ID)))
         self.var_days = tk.StringVar(value=str(get_nested(initial, "user.days", 7)))
         self.var_horses = tk.BooleanVar(value=bool(get_nested(initial, "user.include_horses", True)))
         self.var_greyhounds = tk.BooleanVar(value=bool(get_nested(initial, "user.include_greyhounds", True)))
@@ -82,6 +88,34 @@ class FirstRunWizard(tk.Toplevel):
     def result(self) -> dict | None:
         return self._result
 
+    def _choose_creds_file(self) -> None:
+        initial = self.var_creds_path.get().strip()
+        initial_dir = str(Path(initial).parent) if initial else str(Path.cwd())
+
+        filename = filedialog.asksaveasfilename(
+            parent=self,
+            title="Choose where to save credentials.json",
+            initialdir=initial_dir,
+            initialfile="credentials.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if filename:
+            self.var_creds_path.set(str(Path(filename)))
+
+    def _choose_results_dir(self) -> None:
+        initial = self.var_results_dir.get().strip()
+        initial_dir = initial if initial else str(Path.home())
+
+        folder = filedialog.askdirectory(
+            parent=self,
+            title="Choose where to store CSV results",
+            initialdir=initial_dir,
+            mustexist=False,
+        )
+        if folder:
+            self.var_results_dir.set(str(Path(folder)))
+
     def _build(self) -> None:
         frm = ttk.Frame(self, padding=12)
         frm.grid(row=0, column=0, sticky="nsew")
@@ -91,50 +125,63 @@ class FirstRunWizard(tk.Toplevel):
             frm,
             text=(
                 "Welcome! Let’s set up Betfair Results Downloader.\n"
-                "We’ll save these settings to secrets/credentials.json."
+                "Choose where to save your credentials and where to store CSV outputs."
             ),
             justify="left",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        # --- Paths ---
+        pf = ttk.LabelFrame(frm, text="Paths", padding=10)
+        pf.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        pf.columnconfigure(1, weight=1)
+
+        ttk.Label(pf, text="Credentials file").grid(row=0, column=0, sticky="w")
+        ttk.Entry(pf, textvariable=self.var_creds_path).grid(row=0, column=1, sticky="ew", padx=(10, 10))
+        ttk.Button(pf, text="Browse…", command=self._choose_creds_file).grid(row=0, column=2, sticky="e")
+
+        ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(pf, textvariable=self.var_results_dir).grid(row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0))
+        ttk.Button(pf, text="Browse…", command=self._choose_results_dir).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         # --- Betfair ---
         bf = ttk.LabelFrame(frm, text="Betfair", padding=10)
-        bf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        bf.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         bf.columnconfigure(1, weight=1)
 
         ttk.Label(bf, text="Username").grid(row=0, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="Password").grid(row=1, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="App Key").grid(row=2, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(row=2, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(row=2, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         # --- Run defaults ---
         rc = ttk.LabelFrame(frm, text="Run defaults", padding=10)
-        rc.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        rc.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         rc.columnconfigure(1, weight=1)
 
         ttk.Label(rc, text="User ID").grid(row=0, column=0, sticky="w")
-        ttk.Entry(rc, textvariable=self.var_user_id).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(rc, textvariable=self.var_user_id).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(rc, text="Days to download").grid(row=1, column=0, sticky="w")
         ttk.Entry(rc, textvariable=self.var_days, width=8).grid(row=1, column=1, sticky="w", padx=(10, 0))
 
         ttk.Checkbutton(rc, text="Include Horses (eventTypeId 7)", variable=self.var_horses).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
         ttk.Checkbutton(rc, text="Include Greyhounds (eventTypeId 4339)", variable=self.var_greyhounds).grid(
-            row=3, column=0, columnspan=2, sticky="w"
+            row=3, column=0, columnspan=3, sticky="w"
         )
 
         ttk.Checkbutton(rc, text="Dry run (recommended)", variable=self.var_dry_run).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         # --- Azure (optional) ---
         az = ttk.LabelFrame(frm, text="Azure SQL (optional)", padding=10)
-        az.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        az.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         az.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
@@ -142,31 +189,31 @@ class FirstRunWizard(tk.Toplevel):
             text="Enable Azure upload",
             variable=self.var_enable_azure,
             command=self._refresh_azure_state,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
 
         ttk.Label(az, text="Server").grid(row=1, column=0, sticky="w")
         self.ent_az_server = ttk.Entry(az, textvariable=self.var_az_server)
-        self.ent_az_server.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        self.ent_az_server.grid(row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="Database").grid(row=2, column=0, sticky="w")
         self.ent_az_db = ttk.Entry(az, textvariable=self.var_az_db)
-        self.ent_az_db.grid(row=2, column=1, sticky="ew", padx=(10, 0))
+        self.ent_az_db.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="Username").grid(row=3, column=0, sticky="w")
         self.ent_az_user = ttk.Entry(az, textvariable=self.var_az_user)
-        self.ent_az_user.grid(row=3, column=1, sticky="ew", padx=(10, 0))
+        self.ent_az_user.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="Password").grid(row=4, column=0, sticky="w")
         self.ent_az_pass = ttk.Entry(az, textvariable=self.var_az_pass, show="•")
-        self.ent_az_pass.grid(row=4, column=1, sticky="ew", padx=(10, 0))
+        self.ent_az_pass.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="ODBC Driver").grid(row=5, column=0, sticky="w")
         self.ent_az_driver = ttk.Entry(az, textvariable=self.var_az_driver)
-        self.ent_az_driver.grid(row=5, column=1, sticky="ew", padx=(10, 0))
+        self.ent_az_driver.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         # --- Buttons ---
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="ew")
+        btns.grid(row=5, column=0, columnspan=3, sticky="ew")
         btns.columnconfigure(0, weight=1)
 
         ttk.Button(btns, text="Cancel", command=self._cancel).grid(row=0, column=1, sticky="e", padx=(0, 8))
@@ -188,6 +235,14 @@ class FirstRunWizard(tk.Toplevel):
 
     def _save(self) -> None:
         # Lightweight validation
+        if not self.var_creds_path.get().strip():
+            messagebox.showerror("Missing field", "Credentials file path is required.", parent=self)
+            return
+
+        if not self.var_results_dir.get().strip():
+            messagebox.showerror("Missing field", "CSV results folder is required.", parent=self)
+            return
+
         if not self.var_bf_user.get().strip():
             messagebox.showerror("Missing field", "Betfair username is required.", parent=self)
             return
@@ -207,10 +262,12 @@ class FirstRunWizard(tk.Toplevel):
             return
 
         self._result = {
+            "__credentials_path__": self.var_creds_path.get().strip(),
+            "paths.results_csv_dir": self.var_results_dir.get().strip(),
             "betfair.username": self.var_bf_user.get().strip(),
             "betfair.password": self.var_bf_pass.get(),
             "betfair.app_key": self.var_bf_appkey.get(),
-            "user.user_id": (self.var_user_id.get().strip() or "Gazuty"),
+            "user.user_id": (self.var_user_id.get().strip() or DEFAULT_USER_ID),
             "user.days": int(self.var_days.get().strip()),
             "user.include_horses": bool(self.var_horses.get()),
             "user.include_greyhounds": bool(self.var_greyhounds.get()),
@@ -232,11 +289,19 @@ class App(ttk.Frame):
         super().__init__(master, padding=12)
         self.master = master
 
-        # Detect first run BEFORE ensure creates a template
-        first_run = not CREDENTIALS_PATH.exists()
+        # Resolve credentials path (may be user-selected)
+        self._creds_path = credentials_path()
+        first_run = not self._creds_path.exists()
 
-        ensure_credentials_file_exists()
-        self.creds = load_credentials()
+        # If first run, start from template (do not auto-create file yet)
+        if first_run:
+            self.creds = load_credentials_template()
+        else:
+            self.creds = load_credentials()
+
+        # --- Vars (Paths) ---
+        self.var_creds_file = tk.StringVar(value=str(self._creds_path))
+        self.var_results_dir = tk.StringVar(value=str(get_nested(self.creds, "paths.results_csv_dir", "")))
 
         # --- Vars (Betfair) ---
         self.var_bf_user = tk.StringVar(value=str(get_nested(self.creds, "betfair.username", "")))
@@ -244,7 +309,7 @@ class App(ttk.Frame):
         self.var_bf_appkey = tk.StringVar(value=str(get_nested(self.creds, "betfair.app_key", "")))
 
         # --- Vars (Run config) ---
-        self.var_user_id = tk.StringVar(value=str(get_nested(self.creds, "user.user_id", "Gazuty")))
+        self.var_user_id = tk.StringVar(value=str(get_nested(self.creds, "user.user_id", DEFAULT_USER_ID)))
         self.var_days = tk.StringVar(value=str(get_nested(self.creds, "user.days", 7)))
 
         self.var_horses = tk.BooleanVar(value=bool(get_nested(self.creds, "user.include_horses", True)))
@@ -254,7 +319,6 @@ class App(ttk.Frame):
         self.var_dry_run = tk.BooleanVar(value=bool(get_nested(self.creds, "user.dry_run", True)))
 
         # --- Vars (Azure unlock) ---
-        # These are GUI-only safety gates for non-dry-run publishing
         self.var_allow_publish = tk.BooleanVar(value=False)
         self.var_publish_text = tk.StringVar(value="")
 
@@ -279,29 +343,44 @@ class App(ttk.Frame):
         # First-run setup wizard
         if first_run:
             self._run_first_time_setup()
+        else:
+            # Ensure the resolved file exists going forward
+            ensure_credentials_file_exists()
 
     # ---------------- First-run onboarding ----------------
 
     def _run_first_time_setup(self) -> None:
         self._log("First run detected: launching setup wizard…")
 
-        wiz = FirstRunWizard(self.master, self.creds)
+        wiz = FirstRunWizard(self.master, self.creds, default_creds_path=self._creds_path)
         self.master.wait_window(wiz)
 
         if wiz.result is None:
-            self._log("First run setup cancelled. You can edit credentials in the GUI fields and click Save Settings.")
+            self._log("First run setup cancelled. You can edit settings in the GUI and click Save Settings.")
             return
 
         # Apply wizard values into creds
+        chosen_creds_path_raw = str(wiz.result.get("__credentials_path__", "")).strip()
+        chosen_creds_path = Path(chosen_creds_path_raw) if chosen_creds_path_raw else self._creds_path
+
+        # Persist chosen credentials path
+        set_credentials_path(chosen_creds_path)
+        self._creds_path = credentials_path()
+        self.var_creds_file.set(str(self._creds_path))
+
         for k, v in wiz.result.items():
+            if k == "__credentials_path__":
+                continue
             set_nested(self.creds, k, v)
 
-        # Update existing Vars (so bound widgets update)
+        # Update bound Vars
+        self.var_results_dir.set(str(get_nested(self.creds, "paths.results_csv_dir", "")))
+
         self.var_bf_user.set(str(get_nested(self.creds, "betfair.username", "")))
         self.var_bf_pass.set(str(get_nested(self.creds, "betfair.password", "")))
         self.var_bf_appkey.set(str(get_nested(self.creds, "betfair.app_key", "")))
 
-        self.var_user_id.set(str(get_nested(self.creds, "user.user_id", "Gazuty")))
+        self.var_user_id.set(str(get_nested(self.creds, "user.user_id", DEFAULT_USER_ID)))
         self.var_days.set(str(get_nested(self.creds, "user.days", 7)))
         self.var_horses.set(bool(get_nested(self.creds, "user.include_horses", True)))
         self.var_greyhounds.set(bool(get_nested(self.creds, "user.include_greyhounds", True)))
@@ -315,14 +394,15 @@ class App(ttk.Frame):
         self.var_az_driver.set(str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server")))
 
         try:
-            save_credentials(self.creds)
+            save_credentials(self.creds)  # saves to resolved credentials_path() via pointer
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             self._log(f"ERROR saving credentials: {e}")
             return
 
         # Friendly checklist
-        self._log("✅ credentials file created: secrets/credentials.json")
+        self._log(f"✅ credentials file created: {self._creds_path}")
+
         results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
         if results_dir_raw:
             self._log(f"✅ results directory configured: {results_dir_raw}")
@@ -346,18 +426,32 @@ class App(ttk.Frame):
 
     def _build(self) -> None:
         self.master.title("Betfair Results Downloader (GUI)")
-        self.master.minsize(820, 560)
+        self.master.minsize(820, 600)
 
         self.grid(row=0, column=0, sticky="nsew")
         self.master.columnconfigure(0, weight=1)
         self.master.rowconfigure(0, weight=1)
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(4, weight=1)
+
+        # --- Paths ---
+        pf = ttk.LabelFrame(self, text="Paths", padding=10)
+        pf.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        pf.columnconfigure(1, weight=1)
+
+        ttk.Label(pf, text="Credentials file").grid(row=0, column=0, sticky="w")
+        ent_creds = ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly")
+        ent_creds.grid(row=0, column=1, sticky="ew", padx=(10, 10))
+        ttk.Button(pf, text="Change…", command=self.on_change_credentials_file).grid(row=0, column=2, sticky="e")
+
+        ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(pf, textvariable=self.var_results_dir).grid(row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0))
+        ttk.Button(pf, text="Browse…", command=self.on_choose_results_folder).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         # --- Betfair ---
         bf = ttk.LabelFrame(self, text="Betfair Credentials", padding=10)
-        bf.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        bf.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         bf.columnconfigure(1, weight=1)
 
         ttk.Label(bf, text="Username").grid(row=0, column=0, sticky="w")
@@ -371,7 +465,7 @@ class App(ttk.Frame):
 
         # --- Run config ---
         rc = ttk.LabelFrame(self, text="Run Configuration", padding=10)
-        rc.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        rc.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         for i in range(4):
             rc.columnconfigure(i, weight=1)
 
@@ -390,7 +484,7 @@ class App(ttk.Frame):
 
         # --- Azure ---
         az = ttk.LabelFrame(self, text="Azure SQL (Optional)", padding=10)
-        az.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        az.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         az.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
@@ -406,7 +500,6 @@ class App(ttk.Frame):
             command=self._refresh_publish_unlock_state,
         ).grid(row=0, column=1, sticky="w", padx=(10, 0))
 
-        # --- Non-dry-run publish unlock (GUI safety gates) ---
         self.chk_allow_publish = ttk.Checkbutton(
             az,
             text="Allow non-dry-run publish (writes to Azure)",
@@ -436,7 +529,7 @@ class App(ttk.Frame):
 
         # --- Output + buttons ---
         out = ttk.LabelFrame(self, text="Output", padding=10)
-        out.grid(row=3, column=0, sticky="nsew")
+        out.grid(row=4, column=0, sticky="nsew")
         out.columnconfigure(0, weight=1)
         out.rowconfigure(1, weight=1)
 
@@ -446,11 +539,11 @@ class App(ttk.Frame):
         self.txt = tk.Text(out, height=12, wrap="word")
         self.txt.grid(row=1, column=0, sticky="nsew")
 
-        self._log("Loaded credentials file. Sensitive fields are masked in UI display only.")
+        self._log("Loaded credentials. Sensitive fields are masked in UI display only.")
         self._log("Tip: Dry run is ON by default. Non-dry-run publishing requires explicit unlock + confirmation.")
 
         btns = ttk.Frame(self)
-        btns.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        btns.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         btns.columnconfigure(0, weight=1)
 
         self.btn_clear = ttk.Button(btns, text="Clear Output", command=self.on_clear)
@@ -475,13 +568,16 @@ class App(ttk.Frame):
         self.txt.see("end")
 
     def _sync_to_creds(self) -> None:
+        # Paths
+        set_nested(self.creds, "paths.results_csv_dir", self.var_results_dir.get().strip())
+
         # Betfair
         set_nested(self.creds, "betfair.username", self.var_bf_user.get().strip())
         set_nested(self.creds, "betfair.password", self.var_bf_pass.get())
         set_nested(self.creds, "betfair.app_key", self.var_bf_appkey.get())
 
         # User/run config
-        set_nested(self.creds, "user.user_id", self.var_user_id.get().strip())
+        set_nested(self.creds, "user.user_id", (self.var_user_id.get().strip() or DEFAULT_USER_ID))
         set_nested(self.creds, "user.days", int(self.var_days.get().strip()))
         set_nested(self.creds, "user.include_horses", bool(self.var_horses.get()))
         set_nested(self.creds, "user.include_greyhounds", bool(self.var_greyhounds.get()))
@@ -506,7 +602,7 @@ class App(ttk.Frame):
             include_greyhounds=bool(self.var_greyhounds.get()),
             enable_azure_sql=bool(self.var_enable_azure.get()),
             dry_run=bool(self.var_dry_run.get()),
-            user_id=self.var_user_id.get().strip(),
+            user_id=self.var_user_id.get().strip() or DEFAULT_USER_ID,
         )
 
     def _format_block(self, title: str, data: object) -> str:
@@ -629,6 +725,49 @@ class App(ttk.Frame):
 
     # ---------------- Actions ----------------
 
+    def on_choose_results_folder(self) -> None:
+        initial = self.var_results_dir.get().strip()
+        initial_dir = initial if initial else str(Path.home())
+
+        folder = filedialog.askdirectory(
+            parent=self.master,
+            title="Choose where to store CSV results",
+            initialdir=initial_dir,
+            mustexist=False,
+        )
+        if folder:
+            self.var_results_dir.set(str(Path(folder)))
+            self._log(f"Selected results folder: {folder}")
+
+    def on_change_credentials_file(self) -> None:
+        initial = self.var_creds_file.get().strip()
+        initial_dir = str(Path(initial).parent) if initial else str(Path.cwd())
+
+        filename = filedialog.asksaveasfilename(
+            parent=self.master,
+            title="Choose where to save credentials.json",
+            initialdir=initial_dir,
+            initialfile="credentials.json",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not filename:
+            return
+
+        new_path = Path(filename)
+
+        try:
+            # Save current state to new location, then point future runs to it
+            self._sync_to_creds()
+            set_credentials_path(new_path)
+            self._creds_path = credentials_path()
+            save_credentials(self.creds)  # uses pointer target
+            self.var_creds_file.set(str(self._creds_path))
+            self._log(f"Credentials file updated: {self._creds_path}")
+            messagebox.showinfo("Credentials moved", f"Credentials will now be read from:\n{self._creds_path}")
+        except Exception as e:
+            messagebox.showerror("Change failed", str(e))
+
     def on_clear(self) -> None:
         self.txt.delete("1.0", "end")
         self._log("Output cleared.")
@@ -650,11 +789,14 @@ class App(ttk.Frame):
     def on_save(self) -> None:
         try:
             int(self.var_days.get().strip())
+            if not self.var_results_dir.get().strip():
+                raise ValueError("CSV results folder is required (paths.results_csv_dir).")
+
             self._sync_to_creds()
             save_credentials(self.creds)
 
-            self._log("Saved secrets/credentials.json")
-            messagebox.showinfo("Saved", "Settings saved to secrets/credentials.json")
+            self._log(f"Saved credentials: {self._creds_path}")
+            messagebox.showinfo("Saved", f"Settings saved to:\n{self._creds_path}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
@@ -694,7 +836,7 @@ class App(ttk.Frame):
                 self._format_block(
                     "Preflight",
                     {
-                        "credentials_file": "secrets/credentials.json",
+                        "credentials_file": str(self._creds_path),
                         "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
                         "enable_azure_sql": bool(self.var_enable_azure.get()),
                         "dry_run": bool(self.var_dry_run.get()),
@@ -735,9 +877,6 @@ class App(ttk.Frame):
         Background worker thread. Never call Tk directly here.
         """
         try:
-            # NOTE: Removed GUI-side "Phase 1/4..." line to avoid duplication.
-            # Pipeline is the single source of phase logs via status_cb.
-
             def status_cb(msg: str) -> None:
                 self._status(msg)
 

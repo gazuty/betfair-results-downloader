@@ -15,8 +15,63 @@ def secrets_dir() -> Path:
     return repo_root() / "secrets"
 
 
+def credentials_pointer_path() -> Path:
+    """
+    Stores the user-selected credentials path (if any), so we can load/save credentials.json
+    from a custom location while keeping a stable repo default.
+    """
+    return secrets_dir() / "credentials.location.json"
+
+
+def _normalize_path(p: str) -> Path:
+    path = Path(p).expanduser()
+    # If user gives a relative path, treat it as relative to repo root
+    if not path.is_absolute():
+        path = (repo_root() / path).resolve()
+    return path.resolve()
+
+
+def get_credentials_path() -> Path:
+    """
+    Resolve the credentials path from the pointer file if it exists and is valid.
+    Otherwise, return the repo default secrets/credentials.json.
+    """
+    default = secrets_dir() / "credentials.json"
+    ptr = credentials_pointer_path()
+
+    if not ptr.exists():
+        return default
+
+    try:
+        data = json.loads(ptr.read_text(encoding="utf-8"))
+        raw = str(data.get("path", "")).strip()
+        if not raw:
+            return default
+        return _normalize_path(raw)
+    except Exception:
+        return default
+
+
+def set_credentials_path(path: Path) -> None:
+    """
+    Persist a user-selected credentials path to the pointer file.
+    """
+    resolved = path.expanduser()
+    if not resolved.is_absolute():
+        resolved = (repo_root() / resolved).resolve()
+
+    credentials_pointer_path().parent.mkdir(parents=True, exist_ok=True)
+    credentials_pointer_path().write_text(
+        json.dumps({"path": str(resolved)}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def credentials_path() -> Path:
-    return secrets_dir() / "credentials.json"
+    """
+    Backwards-compatible accessor used throughout the codebase.
+    """
+    return get_credentials_path()
 
 
 def credentials_template_path() -> Path:
@@ -78,11 +133,6 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
     if not get_nested(creds, "betfair.app_key"):
         errors.append("Missing betfair.app_key")
 
-    # Optional user id (but recommended)
-    # Not required for local runs; Azure tends to need it
-    # if not get_nested(creds, "user.user_id"):
-    #     errors.append("Missing user.user_id")
-
     # Azure: only required if enable_azure_sql is true
     enable_azure = bool(get_nested(creds, "user.enable_azure_sql", False))
     if enable_azure:
@@ -99,38 +149,22 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
     return CredentialValidation(ok=(len(errors) == 0), errors=errors)
 
 
-def load_credentials() -> dict[str, Any]:
-    return _read_json(credentials_path())
-
-
-def save_credentials(creds: dict[str, Any]) -> None:
-    _write_json(credentials_path(), creds)
-
-
-def ensure_credentials_file_exists() -> None:
+def default_credentials_structure() -> dict[str, Any]:
     """
-    If secrets/credentials.json doesn't exist, create it from template (if present),
-    otherwise create a sensible default structure.
+    Canonical fallback structure used when no template exists.
     """
-    path = credentials_path()
-    if path.exists():
-        return
-
-    templ = _read_json(credentials_template_path())
-    if templ:
-        _write_json(path, templ)
-        return
-
-    # fallback default
-    default = {
+    return {
         "betfair": {"username": "", "password": "", "app_key": ""},
         "user": {
-            "user_id": "Gazuty",
+            "user_id": "YourUserName",
             "days": 7,
             "include_horses": True,
             "include_greyhounds": True,
             "enable_azure_sql": False,
             "dry_run": True,
+        },
+        "paths": {
+            "results_csv_dir": "",
         },
         "azure_sql": {
             "server": "",
@@ -140,4 +174,42 @@ def ensure_credentials_file_exists() -> None:
             "driver": "ODBC Driver 18 for SQL Server",
         },
     }
-    _write_json(path, default)
+
+
+def load_credentials_template() -> dict[str, Any]:
+    """
+    Load credentials template if present; otherwise return fallback default.
+    """
+    templ = _read_json(credentials_template_path())
+    if templ:
+        # Tidy up any historical hardcoded username, if present in template
+        # (do not overwrite user input if template already uses something else)
+        uid = get_nested(templ, "user.user_id", "")
+        if str(uid).strip().lower() in {"gazuty", "gAzuty".lower(), "GAZUTY".lower()}:
+            set_nested(templ, "user.user_id", "YourUserName")
+        return templ
+
+    return default_credentials_structure()
+
+
+def load_credentials(path: Path | None = None) -> dict[str, Any]:
+    p = path or credentials_path()
+    return _read_json(p)
+
+
+def save_credentials(creds: dict[str, Any], path: Path | None = None) -> None:
+    p = path or credentials_path()
+    _write_json(p, creds)
+
+
+def ensure_credentials_file_exists() -> None:
+    """
+    If credentials file doesn't exist at the resolved credentials_path(),
+    create it from template (if present), otherwise create fallback default.
+    """
+    path = credentials_path()
+    if path.exists():
+        return
+
+    templ = load_credentials_template()
+    _write_json(path, templ)
