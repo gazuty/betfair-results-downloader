@@ -43,7 +43,8 @@ def get_credentials_path() -> Path:
         return default
 
     try:
-        data = json.loads(ptr.read_text(encoding="utf-8"))
+        # utf-8-sig safely handles UTF-8 BOM if present (Windows editors sometimes add this)
+        data = json.loads(ptr.read_text(encoding="utf-8-sig"))
         raw = str(data.get("path", "")).strip()
         if not raw:
             return default
@@ -79,9 +80,16 @@ def credentials_template_path() -> Path:
 
 
 def _read_json(path: Path) -> dict[str, Any]:
+    """
+    Read JSON with BOM tolerance.
+
+    Windows tools (including some editors) may save JSON with a UTF-8 BOM.
+    json.loads() will error if we read that with plain "utf-8".
+    "utf-8-sig" strips BOM if present and behaves like UTF-8 otherwise.
+    """
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
@@ -183,9 +191,8 @@ def load_credentials_template() -> dict[str, Any]:
     templ = _read_json(credentials_template_path())
     if templ:
         # Tidy up any historical hardcoded username, if present in template
-        # (do not overwrite user input if template already uses something else)
-        uid = get_nested(templ, "user.user_id", "")
-        if str(uid).strip().lower() in {"gazuty", "gAzuty".lower(), "GAZUTY".lower()}:
+        uid = str(get_nested(templ, "user.user_id", "")).strip().lower()
+        if uid == "gazuty":
             set_nested(templ, "user.user_id", "YourUserName")
         return templ
 
