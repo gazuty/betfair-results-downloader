@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import queue
 import subprocess
 import sys
@@ -8,20 +9,20 @@ import threading
 import traceback
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox, filedialog
+from tkinter import filedialog, messagebox, ttk
 
 from .config import DownloaderConfig
 from .run import run_downloader
 from .secrets import (
+    credentials_path,
     ensure_credentials_file_exists,
-    load_credentials,
-    save_credentials,
     get_nested,
+    load_credentials,
+    load_credentials_template,
+    save_credentials,
+    set_credentials_path,
     set_nested,
     validate_credentials,
-    credentials_path,
-    set_credentials_path,
-    load_credentials_template,
 )
 
 DEFAULT_USER_ID = "YourUserName"
@@ -436,9 +437,7 @@ class App(ttk.Frame):
         self.var_az_db = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.database", "")))
         self.var_az_user = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.username", "")))
         self.var_az_pass = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.password", "")))
-        self.var_az_driver = tk.StringVar(
-            value=str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server"))
-        )
+        self.var_az_driver = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server")))
 
         # --- Runtime / status ---
         self._status_q: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -653,6 +652,19 @@ class App(ttk.Frame):
 
         self.txt = tk.Text(out, height=12, wrap="word")
         self.txt.grid(row=1, column=0, sticky="nsew")
+
+        # Output polish: monospaced font (improves kv() alignment) + light padding
+        try:
+            sys_name = platform.system().lower()
+            if "windows" in sys_name:
+                font = ("Consolas", 10)
+            elif "darwin" in sys_name or "mac" in sys_name:
+                font = ("Menlo", 11)
+            else:
+                font = ("Courier New", 10)
+            self.txt.configure(font=font, padx=6, pady=6)
+        except Exception:
+            pass
 
         self._log("Loaded credentials. Sensitive fields are masked in UI display only.")
         self._log("Tip: Dry run is ON by default. Non-dry-run publishing requires explicit unlock + confirmation.")
@@ -937,7 +949,6 @@ class App(ttk.Frame):
         try:
             self.master.clipboard_clear()
             self.master.clipboard_append(text)
-            # On some platforms the clipboard is only retained after an update cycle
             self.master.update_idletasks()
             self._log("Copied summary to clipboard.")
         except Exception as e:
@@ -1000,6 +1011,7 @@ class App(ttk.Frame):
 
         try:
             self.txt.delete("1.0", "end")
+            self._log("-" * 64)
             self._log("Starting run...")
 
             self._sync_to_creds()
