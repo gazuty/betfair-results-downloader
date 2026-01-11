@@ -1,160 +1,186 @@
-﻿# Betfair Results Downloader (Settled Orders → CSV)
+﻿# Betfair Results Downloader (GUI-first) 
 
-A production-ready Jupyter notebook that downloads **settled Betfair orders** using `betfairlightweight`, cleans them, writes a canonical CSV plus dated snapshots, and aggregates results to **market-level profit**.
+A professional, **GUI-first** Python application for downloading **settled Betfair orders**, enriching them with market metadata (with caching), writing reliable CSV outputs, and **optionally** publishing aggregated market results to Azure SQL — **safe by default**.
 
-An **optional** Azure SQL publish step is included, but it is **disabled by default** and gated behind configuration + safety switches.
+The GUI is now the **official and recommended way** to run this project.
 
 ---
 
 ## What this does
 
-1. Downloads settled (cleared) orders via Betfair API (`betfairlightweight`)
-2. Cleans/normalises data and writes:
-   - a **canonical CSV** (stable filename / latest state)
+1. Downloads **settled (cleared) orders** from Betfair using `betfairlightweight`
+2. Cleans and normalises the data
+3. Enriches orders with **market & event metadata** (cached to avoid repeat API calls)
+4. Writes:
+   - a **canonical CSV** (stable filename, always latest state)
    - **dated snapshot CSVs** (append-only history)
-3. Aggregates to **market-level** results (profit)
-4. *(Optional)* Publishes market-level results to **Azure SQL**
+5. Aggregates results to **market-level profit**
+6. *(Optional)* Publishes market-level results to **Azure SQL**
 
-> Core functionality is the CSV outputs. Azure SQL is strictly optional.
+> Core functionality is CSV generation. Azure SQL publishing is optional and heavily gated for safety.
+
+---
+
+## Official runner (GUI)
+
+```bash
+python -m betfair_results_downloader.gui_app
+```
+
+The GUI:
+- Runs the pipeline in a **background thread** (no UI freezing)
+- Streams **live status updates** during each phase
+- Prints clean, structured **summary blocks** at the end of each run
+- Provides strong **safety controls** around Azure publishing
+
+---
+
+## First Run Wizard (onboarding)
+
+On first launch, if no credentials file exists:
+
+- The GUI starts from a **template credentials file**
+- A **First Run Wizard** opens and guides you through:
+  - Choosing where to save `credentials.json`
+  - Selecting your results output folder
+  - Entering Betfair credentials
+  - Setting run defaults (lookback days, sports)
+  - (Optional) Entering Azure SQL credentials
+- The completed credentials file is saved and remembered for future runs
+
+No manual file copying is required.
+
+---
+
+## Azure publishing safety model (important)
+
+Azure SQL publishing is **safe by default** and requires **multiple explicit actions**.
+
+### Mandatory conditions
+
+1. `enable_azure_sql = true` in credentials
+2. `dry_run = false` in credentials
+3. In the GUI:
+   - Tick the **unlock** checkbox
+   - Type `PUBLISH` exactly
+   - Confirm a **final modal dialog** after seeing the Azure prep summary
+
+If **any** step is missing, **no database writes occur**.
 
 ---
 
 ## Azure publishing scope (current restriction)
 
-To reduce risk and keep the database focused, the Azure publish path is currently restricted to:
+To reduce risk and keep the database focused, Azure publishing is currently restricted to:
 
 - **Horse Racing** (`eventTypeId = 7`)
 - **Greyhound Racing** (`eventTypeId = 4339`)
 
-This is enforced in the notebook (Cell 9) by building a filtered dataset (`df_azure_upload`) from an **allow-list** of eventTypeIds. Other sports may still be downloaded and written to CSV, but they are **excluded from Azure uploads by design**.
+Other sports:
+- **are downloaded**
+- **are written to CSV**
+- **are excluded from Azure uploads by design**
 
-To expand scope later, update the allow-list in Cell 9.
+This restriction is enforced in code and can be expanded later if required.
 
 ---
 
-## Repository structure
+## Outputs
+
+### CSV outputs
+
+Written to the configured `results_csv_dir`:
+
+- **Canonical CSV**  
+  Stable filename representing the latest full dataset
+
+- **Snapshot CSV**  
+  Dated file (e.g. `*_2026-01-11.csv`) for historical tracking
+
+### Enrichment cache artifacts
+
+Written to the project `outputs/` directory:
+
+- Market catalogue cache (CSV)
+- Latest enrichment snapshot
+
+These paths are reported in the GUI and accessible via **Open Artifacts Folder**.
+
+---
+
+## Understanding enrichment behaviour
+
+It is **normal** for Betfair to return **zero market catalogues** for settled markets.
+
+In this case the app will report:
+
+> “API returned 0 catalogues (common for settled markets). Enriched from cache only.”
+
+This is expected behaviour and **not an error**.
+
+---
+
+## Repository structure (simplified)
 
 ```
 src/
   betfair_results_downloader/
-    __init__.py
-    csv_utils.py
-
-notebooks/
-  betfair_results_downloader.ipynb
+    gui_app.py
+    run.py
+    pipeline.py
+    downloader_core.py
+    azure_publish.py
+    secrets.py
 
 secrets/
   credentials.template.json   # committed
-  credentials.json            # git-ignored
+  credentials.json            # git-ignored (created by GUI)
 
-outputs/                      # git-ignored
-requirements.txt
+outputs/                      # git-ignored (cache + artifacts)
 README.md
 .gitignore
-.gitattributes
 ```
 
 ---
 
-## Setup
+## Setup (once)
 
-### 1) Create your local credentials file
-
-Copy the template:
-
-- `secrets/credentials.template.json` → `secrets/credentials.json`
-
-Then fill in your Betfair credentials.
-
-> `secrets/credentials.json` is intentionally **git-ignored**.
-
-### 2) Install dependencies
-
-Create/activate a virtual environment, then:
+Create and activate a virtual environment, then install in editable mode:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Notes:
-- `pyodbc` is only required if you enable Azure SQL publishing.
-- The notebook runs end-to-end for CSV generation without Azure enabled.
+- `pyodbc` is only required if Azure SQL publishing is enabled
+- The GUI runs fully without Azure enabled
 
 ---
 
-## Configuration
+## Typical workflow
 
-The notebook reads secrets from:
-
-- `secrets/credentials.json`
-
-### Key fields
-
-- `betfair.*` — Betfair credentials
-- `paths.results_csv_dir` — CSV output directory
-- `user.enable_azure_sql` — **false by default** (must be true to even attempt DB work)
-- `user.db_user_id` — your database user identity (not hard-coded in the notebook)
-- `user.dry_run` — **true by default** (must be false to allow DB writes)
-- `azure_sql.*` — connection settings (only used if Azure SQL is enabled)
+1. Launch the GUI
+2. Complete First Run Wizard (once)
+3. Click **Run Downloader**
+4. Watch live phase progress
+5. Review structured summary blocks
+6. (Optional) Publish to Azure if explicitly unlocked
 
 ---
 
-## Safety switches (Azure SQL)
+## Safety notes
 
-Azure SQL publishing is controlled by **two explicit switches** in `secrets/credentials.json`:
+- Real credentials and outputs are **never committed**
+- `.gitignore` intentionally ignores:
+  - `secrets/credentials.json`
+  - `outputs/`
+  - generated CSVs
 
-1. `user.enable_azure_sql` must be **true** (otherwise no DB work is attempted)
-2. `user.dry_run` must be **false** (otherwise the notebook will refuse to write)
-
-This is intentional “two-step safety” to prevent accidental writes.
-
-Example configuration for a real publish:
-
-```json
-"user": {
-  "enable_azure_sql": true,
-  "db_user_id": "Gazuty",
-  "dry_run": false
-}
-```
-
-If either condition is not met, the notebook will not write to Azure SQL.
-
----
-
-## Running the notebook (repeatable workflow)
-
-After a kernel restart, run cells in order:
-
-1. **Cell 0** — environment setup (repo root, secrets, safety switches)
-2. **Cell 1** — project imports (from `src/`)
-3. Continue top-to-bottom
-
----
-
-## Sharing / examples
-
-This repo does not commit real outputs or secrets.
-
-If you want to share structure safely, place small anonymised samples in:
-
-- `examples/`
-
-The `.gitignore` is designed to ignore real outputs (e.g. `outputs/`, `*.csv`) while allowing curated examples under `examples/`.
-
----
-
-## Notes on `.gitignore`
-
-This repo is configured so that:
-- `secrets/credentials.json` is **ignored**
-- `secrets/credentials.template.json` is **committed**
-- outputs and raw CSVs are **ignored**
-
-If you edit `.gitignore`, keep that behaviour intact.
+Keep this behaviour intact.
 
 ---
 
 ## Disclaimer
 
-This project is for personal analytics and learning. You are responsible for compliance with Betfair’s terms and any local laws/regulations.
+This project is for personal analytics and learning.
+You are responsible for compliance with Betfair’s terms and any applicable laws or regulations.
