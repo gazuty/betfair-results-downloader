@@ -444,6 +444,7 @@ class App(ttk.Frame):
         self._status_q: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._worker_thread: threading.Thread | None = None
         self._last_results_dir: Path | None = None
+        self._last_artifacts_dir: Path | None = None
 
         self._build()
         self.master.after(100, self._poll_status_queue)
@@ -666,17 +667,22 @@ class App(ttk.Frame):
         self.btn_copy = ttk.Button(btns, text="Copy Summary", command=self.on_copy_summary)
         self.btn_copy.grid(row=0, column=1, sticky="w", padx=(10, 0))
 
+        self.btn_open_artifacts = ttk.Button(
+            btns, text="Open Artifacts Folder", command=self.on_open_artifacts_folder, state="disabled"
+        )
+        self.btn_open_artifacts.grid(row=0, column=2, sticky="w", padx=(10, 0))
+
         self.btn_open = ttk.Button(btns, text="Open Results Folder", command=self.on_open_results_folder, state="disabled")
-        self.btn_open.grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self.btn_open.grid(row=0, column=3, sticky="w", padx=(10, 0))
 
         self.btn_save = ttk.Button(btns, text="Save Settings", command=self.on_save)
-        self.btn_save.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        self.btn_save.grid(row=0, column=4, sticky="e", padx=(0, 8))
 
         self.btn_validate = ttk.Button(btns, text="Validate", command=self.on_validate)
-        self.btn_validate.grid(row=0, column=4, sticky="e", padx=(0, 8))
+        self.btn_validate.grid(row=0, column=5, sticky="e", padx=(0, 8))
 
         self.btn_run = ttk.Button(btns, text="Run Downloader", command=self.on_run)
-        self.btn_run.grid(row=0, column=5, sticky="e")
+        self.btn_run.grid(row=0, column=6, sticky="e")
 
     # ---------------- Helpers ----------------
 
@@ -733,6 +739,9 @@ class App(ttk.Frame):
         self.btn_clear.configure(state="normal")
         self.btn_copy.configure(state="normal")
         self.btn_open.configure(state=("normal" if (not running and self._last_results_dir is not None) else "disabled"))
+        self.btn_open_artifacts.configure(
+            state=("normal" if (not running and self._last_artifacts_dir is not None) else "disabled")
+        )
 
         if running:
             self.progress.start(10)
@@ -784,18 +793,45 @@ class App(ttk.Frame):
         else:
             self._log("Run completed (GUI branch).")
 
+        enrich_block: dict | None = None
         if isinstance(result, dict):
             self._log_block("Plan", result.get("plan"))
             self._log_block("Download summary", result.get("download"))
             self._log_block("Enrichment summary", result.get("enrich"))
             self._log_block("CSV outputs", result.get("csv"))
             self._log_block("Azure summary", result.get("azure"))
+            if isinstance(result.get("enrich"), dict):
+                enrich_block = result.get("enrich")
 
+        # Enable Results folder if configured + exists
         results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
         if results_dir_raw:
             self._last_results_dir = Path(str(results_dir_raw))
             if self._last_results_dir.exists():
                 self.btn_open.configure(state="normal")
+
+        # Enable Artifacts folder if enrichment reported cache/snapshot paths
+        self._last_artifacts_dir = None
+        if enrich_block:
+            cache_path = enrich_block.get("cache_path")
+            snapshot_path = enrich_block.get("snapshot_path")
+
+            candidate_paths: list[Path] = []
+            if cache_path:
+                candidate_paths.append(Path(str(cache_path)))
+            if snapshot_path:
+                candidate_paths.append(Path(str(snapshot_path)))
+
+            for p in candidate_paths:
+                try:
+                    if p.exists():
+                        self._last_artifacts_dir = p.parent
+                        break
+                except Exception:
+                    continue
+
+        if self._last_artifacts_dir is not None and self._last_artifacts_dir.exists():
+            self.btn_open_artifacts.configure(state="normal")
 
         messagebox.showinfo("Run complete", "Run finished. See Output for details.")
 
@@ -831,6 +867,17 @@ class App(ttk.Frame):
         self.master.after(0, _do)
         ev.wait()
         return bool(result_holder["ok"])
+
+    def _open_folder(self, path: Path) -> None:
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as e:
+            messagebox.showerror("Open folder failed", str(e))
 
     # ---------------- Actions ----------------
 
@@ -896,19 +943,21 @@ class App(ttk.Frame):
         except Exception as e:
             messagebox.showerror("Copy failed", str(e))
 
+    def on_open_artifacts_folder(self) -> None:
+        if self._last_artifacts_dir is None:
+            return
+        if not self._last_artifacts_dir.exists():
+            messagebox.showerror("Open folder failed", f"Folder not found:\n{self._last_artifacts_dir}")
+            return
+        self._open_folder(self._last_artifacts_dir)
+
     def on_open_results_folder(self) -> None:
         if self._last_results_dir is None:
             return
-        path = self._last_results_dir
-        try:
-            if os.name == "nt":
-                os.startfile(str(path))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.run(["open", str(path)], check=False)
-            else:
-                subprocess.run(["xdg-open", str(path)], check=False)
-        except Exception as e:
-            messagebox.showerror("Open folder failed", str(e))
+        if not self._last_results_dir.exists():
+            messagebox.showerror("Open folder failed", f"Folder not found:\n{self._last_results_dir}")
+            return
+        self._open_folder(self._last_results_dir)
 
     def on_save(self) -> None:
         try:
@@ -954,6 +1003,12 @@ class App(ttk.Frame):
             self._log("Starting run...")
 
             self._sync_to_creds()
+
+            # Reset last folders on new run
+            self._last_results_dir = None
+            self._last_artifacts_dir = None
+            self.btn_open.configure(state="disabled")
+            self.btn_open_artifacts.configure(state="disabled")
 
             results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
             self._log_block(
