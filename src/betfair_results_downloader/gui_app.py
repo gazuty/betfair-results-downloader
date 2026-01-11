@@ -27,6 +27,109 @@ from .secrets import (
 DEFAULT_USER_ID = "YourUserName"
 
 
+def kv(key: str, value: object, *, width: int = 22) -> str:
+    """
+    Key/value formatter for report-style output.
+    """
+    k = str(key).strip()
+    v = "" if value is None else str(value)
+    return f"{k:<{width}} : {v}"
+
+
+def _ordered_items(data: dict, preferred_order: list[str]) -> list[tuple[str, object]]:
+    """
+    Return items in preferred_order first (if present), then any remaining keys
+    in original dict insertion order.
+    """
+    items: list[tuple[str, object]] = []
+    seen: set[str] = set()
+    for k in preferred_order:
+        if k in data:
+            items.append((k, data[k]))
+            seen.add(k)
+    for k, v in data.items():
+        if k not in seen:
+            items.append((k, v))
+    return items
+
+
+def format_block(title: str, data: object) -> str:
+    """
+    Consistent block formatting for Output pane.
+    """
+    header = f"\n=== {title} ==="
+    if not data:
+        return f"{header}\n(none)\n"
+
+    if isinstance(data, dict):
+        # Provide stable, human-friendly ordering for common blocks
+        preferred: list[str] = []
+        if title.lower().startswith("plan"):
+            preferred = [
+                "user_id",
+                "days",
+                "include_horses",
+                "include_greyhounds",
+                "enable_azure_sql",
+                "dry_run",
+            ]
+        elif title.lower().startswith("download"):
+            preferred = [
+                "rows_downloaded",
+                "rows_written",
+                "from_date",
+                "to_date",
+                "event_types",
+            ]
+        elif title.lower().startswith("enrichment"):
+            preferred = [
+                "rows_before_enrich",
+                "rows_after_enrich",
+                "unique_market_ids",
+                "unique_markets_seen",
+                "unique_markets_enriched",
+                "enrichment_mode",
+                "cache_hits",
+                "cache_misses",
+                "cache_only",
+                "api_only",
+                "cache_and_api",
+                "none",
+                "cache_path",
+                "snapshot_path",
+                "requested_total",
+                "returned_catalogues_total",
+            ]
+        elif title.lower().startswith("csv"):
+            preferred = [
+                "canonical_csv_path",
+                "snapshot_csv_path",
+                "rows_written",
+                "deduped_rows_dropped",
+            ]
+        elif title.lower().startswith("azure"):
+            preferred = [
+                "prep_attempted",
+                "publish_attempted",
+                "dry_run",
+                "enable_azure_sql",
+                "rows_filtered",
+                "markets_aggregated",
+                "rows_to_write_count",
+                "published",
+                "message",
+                "user_id",
+            ]
+
+        lines = [header]
+        for k, v in _ordered_items(data, preferred):
+            lines.append(kv(str(k), v))
+        return "\n".join(lines) + "\n"
+
+    # Fallback: treat as plain text / object
+    return f"{header}\n{data}\n"
+
+
 class FirstRunWizard(tk.Toplevel):
     """
     Minimal modal wizard to gather credentials/settings on first run.
@@ -140,7 +243,9 @@ class FirstRunWizard(tk.Toplevel):
         ttk.Button(pf, text="Browse…", command=self._choose_creds_file).grid(row=0, column=2, sticky="e")
 
         ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(pf, textvariable=self.var_results_dir).grid(row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0))
+        ttk.Entry(pf, textvariable=self.var_results_dir).grid(
+            row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0)
+        )
         ttk.Button(pf, text="Browse…", command=self._choose_results_dir).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         # --- Betfair ---
@@ -152,10 +257,14 @@ class FirstRunWizard(tk.Toplevel):
         ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="Password").grid(row=1, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(
+            row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0)
+        )
 
         ttk.Label(bf, text="App Key").grid(row=2, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(row=2, column=1, columnspan=2, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(
+            row=2, column=1, columnspan=2, sticky="ew", padx=(10, 0)
+        )
 
         # --- Run defaults ---
         rc = ttk.LabelFrame(frm, text="Run defaults", padding=10)
@@ -441,8 +550,7 @@ class App(ttk.Frame):
         pf.columnconfigure(1, weight=1)
 
         ttk.Label(pf, text="Credentials file").grid(row=0, column=0, sticky="w")
-        ent_creds = ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly")
-        ent_creds.grid(row=0, column=1, sticky="ew", padx=(10, 10))
+        ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly").grid(row=0, column=1, sticky="ew", padx=(10, 10))
         ttk.Button(pf, text="Change…", command=self.on_change_credentials_file).grid(row=0, column=2, sticky="e")
 
         ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -567,6 +675,9 @@ class App(ttk.Frame):
         self.txt.insert("end", msg.rstrip() + "\n")
         self.txt.see("end")
 
+    def _log_block(self, title: str, data: object) -> None:
+        self._log(format_block(title, data).rstrip())
+
     def _sync_to_creds(self) -> None:
         # Paths
         set_nested(self.creds, "paths.results_csv_dir", self.var_results_dir.get().strip())
@@ -604,18 +715,6 @@ class App(ttk.Frame):
             dry_run=bool(self.var_dry_run.get()),
             user_id=self.var_user_id.get().strip() or DEFAULT_USER_ID,
         )
-
-    def _format_block(self, title: str, data: object) -> str:
-        if not data:
-            return f"\n=== {title} ===\n(none)\n"
-
-        if isinstance(data, dict):
-            lines = [f"\n=== {title} ==="]
-            for k, v in data.items():
-                lines.append(f"{k}: {v}")
-            return "\n".join(lines) + "\n"
-
-        return f"\n=== {title} ===\n{data}\n"
 
     def _set_running_state(self, running: bool) -> None:
         state = "disabled" if running else "normal"
@@ -676,11 +775,11 @@ class App(ttk.Frame):
             self._log("Run completed (GUI branch).")
 
         if isinstance(result, dict):
-            self._log(self._format_block("Plan", result.get("plan")))
-            self._log(self._format_block("Download summary", result.get("download")))
-            self._log(self._format_block("Enrichment summary", result.get("enrich")))
-            self._log(self._format_block("CSV outputs", result.get("csv")))
-            self._log(self._format_block("Azure summary", result.get("azure")))
+            self._log_block("Plan", result.get("plan"))
+            self._log_block("Download summary", result.get("download"))
+            self._log_block("Enrichment summary", result.get("enrich"))
+            self._log_block("CSV outputs", result.get("csv"))
+            self._log_block("Azure summary", result.get("azure"))
 
         results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
         if results_dir_raw:
@@ -832,16 +931,14 @@ class App(ttk.Frame):
             self._sync_to_creds()
 
             results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
-            self._log(
-                self._format_block(
-                    "Preflight",
-                    {
-                        "credentials_file": str(self._creds_path),
-                        "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
-                        "enable_azure_sql": bool(self.var_enable_azure.get()),
-                        "dry_run": bool(self.var_dry_run.get()),
-                    },
-                )
+            self._log_block(
+                "Preflight",
+                {
+                    "credentials_file": str(self._creds_path),
+                    "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
+                    "enable_azure_sql": bool(self.var_enable_azure.get()),
+                    "dry_run": bool(self.var_dry_run.get()),
+                },
             )
 
             cfg = self._build_config_from_ui()
