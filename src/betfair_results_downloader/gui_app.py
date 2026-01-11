@@ -550,12 +550,18 @@ class App(ttk.Frame):
         pf.columnconfigure(1, weight=1)
 
         ttk.Label(pf, text="Credentials file").grid(row=0, column=0, sticky="w")
-        ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly").grid(row=0, column=1, sticky="ew", padx=(10, 10))
+        ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly").grid(
+            row=0, column=1, sticky="ew", padx=(10, 10)
+        )
         ttk.Button(pf, text="Change…", command=self.on_change_credentials_file).grid(row=0, column=2, sticky="e")
 
         ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(pf, textvariable=self.var_results_dir).grid(row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0))
-        ttk.Button(pf, text="Browse…", command=self.on_choose_results_folder).grid(row=1, column=2, sticky="e", pady=(6, 0))
+        ttk.Entry(pf, textvariable=self.var_results_dir).grid(
+            row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0)
+        )
+        ttk.Button(pf, text="Browse…", command=self.on_choose_results_folder).grid(
+            row=1, column=2, sticky="e", pady=(6, 0)
+        )
 
         # --- Betfair ---
         bf = ttk.LabelFrame(self, text="Betfair Credentials", padding=10)
@@ -657,17 +663,20 @@ class App(ttk.Frame):
         self.btn_clear = ttk.Button(btns, text="Clear Output", command=self.on_clear)
         self.btn_clear.grid(row=0, column=0, sticky="w")
 
+        self.btn_copy = ttk.Button(btns, text="Copy Summary", command=self.on_copy_summary)
+        self.btn_copy.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
         self.btn_open = ttk.Button(btns, text="Open Results Folder", command=self.on_open_results_folder, state="disabled")
-        self.btn_open.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.btn_open.grid(row=0, column=2, sticky="w", padx=(10, 0))
 
         self.btn_save = ttk.Button(btns, text="Save Settings", command=self.on_save)
-        self.btn_save.grid(row=0, column=2, sticky="e", padx=(0, 8))
+        self.btn_save.grid(row=0, column=3, sticky="e", padx=(0, 8))
 
         self.btn_validate = ttk.Button(btns, text="Validate", command=self.on_validate)
-        self.btn_validate.grid(row=0, column=3, sticky="e", padx=(0, 8))
+        self.btn_validate.grid(row=0, column=4, sticky="e", padx=(0, 8))
 
         self.btn_run = ttk.Button(btns, text="Run Downloader", command=self.on_run)
-        self.btn_run.grid(row=0, column=4, sticky="e")
+        self.btn_run.grid(row=0, column=5, sticky="e")
 
     # ---------------- Helpers ----------------
 
@@ -722,6 +731,7 @@ class App(ttk.Frame):
         self.btn_save.configure(state=state)
         self.btn_validate.configure(state=state)
         self.btn_clear.configure(state="normal")
+        self.btn_copy.configure(state="normal")
         self.btn_open.configure(state=("normal" if (not running and self._last_results_dir is not None) else "disabled"))
 
         if running:
@@ -871,6 +881,21 @@ class App(ttk.Frame):
         self.txt.delete("1.0", "end")
         self._log("Output cleared.")
 
+    def on_copy_summary(self) -> None:
+        text = self.txt.get("1.0", "end-1c")
+        if not text.strip():
+            messagebox.showinfo("Copy Summary", "Nothing to copy yet.")
+            return
+
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(text)
+            # On some platforms the clipboard is only retained after an update cycle
+            self.master.update_idletasks()
+            self._log("Copied summary to clipboard.")
+        except Exception as e:
+            messagebox.showerror("Copy failed", str(e))
+
     def on_open_results_folder(self) -> None:
         if self._last_results_dir is None:
             return
@@ -974,6 +999,7 @@ class App(ttk.Frame):
         Background worker thread. Never call Tk directly here.
         """
         try:
+
             def status_cb(msg: str) -> None:
                 self._status(msg)
 
