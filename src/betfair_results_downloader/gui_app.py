@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
+import queue
+import subprocess
+import sys
+import threading
 import traceback
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 from .config import DownloaderConfig
@@ -15,11 +21,219 @@ from .secrets import (
     validate_credentials,
 )
 
+CREDENTIALS_PATH = Path("secrets") / "credentials.json"
+
+
+class FirstRunWizard(tk.Toplevel):
+    """
+    Minimal modal wizard to gather credentials/settings on first run.
+    Saves to secrets/credentials.json via caller.
+    """
+
+    def __init__(self, master: tk.Misc, initial: dict):
+        super().__init__(master)
+        self.title("First run setup")
+        self.resizable(False, False)
+
+        self._result: dict | None = None
+
+        # --- Vars ---
+        self.var_bf_user = tk.StringVar(value=str(get_nested(initial, "betfair.username", "")))
+        self.var_bf_pass = tk.StringVar(value=str(get_nested(initial, "betfair.password", "")))
+        self.var_bf_appkey = tk.StringVar(value=str(get_nested(initial, "betfair.app_key", "")))
+
+        self.var_user_id = tk.StringVar(value=str(get_nested(initial, "user.user_id", "Gazuty")))
+        self.var_days = tk.StringVar(value=str(get_nested(initial, "user.days", 7)))
+        self.var_horses = tk.BooleanVar(value=bool(get_nested(initial, "user.include_horses", True)))
+        self.var_greyhounds = tk.BooleanVar(value=bool(get_nested(initial, "user.include_greyhounds", True)))
+        self.var_dry_run = tk.BooleanVar(value=bool(get_nested(initial, "user.dry_run", True)))
+
+        self.var_enable_azure = tk.BooleanVar(value=bool(get_nested(initial, "user.enable_azure_sql", False)))
+        self.var_az_server = tk.StringVar(value=str(get_nested(initial, "azure_sql.server", "")))
+        self.var_az_db = tk.StringVar(value=str(get_nested(initial, "azure_sql.database", "")))
+        self.var_az_user = tk.StringVar(value=str(get_nested(initial, "azure_sql.username", "")))
+        self.var_az_pass = tk.StringVar(value=str(get_nested(initial, "azure_sql.password", "")))
+        self.var_az_driver = tk.StringVar(
+            value=str(get_nested(initial, "azure_sql.driver", "ODBC Driver 18 for SQL Server"))
+        )
+
+        self._build()
+        self._refresh_azure_state()
+
+        # Modal behavior
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+        # Center on parent
+        self.update_idletasks()
+        try:
+            px = master.winfo_rootx()
+            py = master.winfo_rooty()
+            pw = master.winfo_width()
+            ph = master.winfo_height()
+            w = self.winfo_width()
+            h = self.winfo_height()
+            self.geometry(f"+{px + (pw - w)//2}+{py + (ph - h)//2}")
+        except Exception:
+            pass
+
+    @property
+    def result(self) -> dict | None:
+        return self._result
+
+    def _build(self) -> None:
+        frm = ttk.Frame(self, padding=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            frm,
+            text=(
+                "Welcome! Let’s set up Betfair Results Downloader.\n"
+                "We’ll save these settings to secrets/credentials.json."
+            ),
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        # --- Betfair ---
+        bf = ttk.LabelFrame(frm, text="Betfair", padding=10)
+        bf.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        bf.columnconfigure(1, weight=1)
+
+        ttk.Label(bf, text="Username").grid(row=0, column=0, sticky="w")
+        ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(bf, text="Password").grid(row=1, column=0, sticky="w")
+        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(bf, text="App Key").grid(row=2, column=0, sticky="w")
+        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(row=2, column=1, sticky="ew", padx=(10, 0))
+
+        # --- Run defaults ---
+        rc = ttk.LabelFrame(frm, text="Run defaults", padding=10)
+        rc.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        rc.columnconfigure(1, weight=1)
+
+        ttk.Label(rc, text="User ID").grid(row=0, column=0, sticky="w")
+        ttk.Entry(rc, textvariable=self.var_user_id).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(rc, text="Days to download").grid(row=1, column=0, sticky="w")
+        ttk.Entry(rc, textvariable=self.var_days, width=8).grid(row=1, column=1, sticky="w", padx=(10, 0))
+
+        ttk.Checkbutton(rc, text="Include Horses (eventTypeId 7)", variable=self.var_horses).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+        ttk.Checkbutton(rc, text="Include Greyhounds (eventTypeId 4339)", variable=self.var_greyhounds).grid(
+            row=3, column=0, columnspan=2, sticky="w"
+        )
+
+        ttk.Checkbutton(rc, text="Dry run (recommended)", variable=self.var_dry_run).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
+        # --- Azure (optional) ---
+        az = ttk.LabelFrame(frm, text="Azure SQL (optional)", padding=10)
+        az.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        az.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(
+            az,
+            text="Enable Azure upload",
+            variable=self.var_enable_azure,
+            command=self._refresh_azure_state,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(az, text="Server").grid(row=1, column=0, sticky="w")
+        self.ent_az_server = ttk.Entry(az, textvariable=self.var_az_server)
+        self.ent_az_server.grid(row=1, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(az, text="Database").grid(row=2, column=0, sticky="w")
+        self.ent_az_db = ttk.Entry(az, textvariable=self.var_az_db)
+        self.ent_az_db.grid(row=2, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(az, text="Username").grid(row=3, column=0, sticky="w")
+        self.ent_az_user = ttk.Entry(az, textvariable=self.var_az_user)
+        self.ent_az_user.grid(row=3, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(az, text="Password").grid(row=4, column=0, sticky="w")
+        self.ent_az_pass = ttk.Entry(az, textvariable=self.var_az_pass, show="•")
+        self.ent_az_pass.grid(row=4, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(az, text="ODBC Driver").grid(row=5, column=0, sticky="w")
+        self.ent_az_driver = ttk.Entry(az, textvariable=self.var_az_driver)
+        self.ent_az_driver.grid(row=5, column=1, sticky="ew", padx=(10, 0))
+
+        # --- Buttons ---
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="ew")
+        btns.columnconfigure(0, weight=1)
+
+        ttk.Button(btns, text="Cancel", command=self._cancel).grid(row=0, column=1, sticky="e", padx=(0, 8))
+        ttk.Button(btns, text="Save & Continue", command=self._save).grid(row=0, column=2, sticky="e")
+
+    def _refresh_azure_state(self) -> None:
+        enabled = bool(self.var_enable_azure.get())
+        state = "normal" if enabled else "disabled"
+        for w in (self.ent_az_server, self.ent_az_db, self.ent_az_user, self.ent_az_pass, self.ent_az_driver):
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.grab_release()
+        self.destroy()
+
+    def _save(self) -> None:
+        # Lightweight validation
+        if not self.var_bf_user.get().strip():
+            messagebox.showerror("Missing field", "Betfair username is required.", parent=self)
+            return
+        if not self.var_bf_pass.get():
+            messagebox.showerror("Missing field", "Betfair password is required.", parent=self)
+            return
+        if not self.var_bf_appkey.get():
+            messagebox.showerror("Missing field", "Betfair app key is required.", parent=self)
+            return
+
+        try:
+            days = int(self.var_days.get().strip())
+            if days <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Invalid field", "Days to download must be a positive integer.", parent=self)
+            return
+
+        self._result = {
+            "betfair.username": self.var_bf_user.get().strip(),
+            "betfair.password": self.var_bf_pass.get(),
+            "betfair.app_key": self.var_bf_appkey.get(),
+            "user.user_id": (self.var_user_id.get().strip() or "Gazuty"),
+            "user.days": int(self.var_days.get().strip()),
+            "user.include_horses": bool(self.var_horses.get()),
+            "user.include_greyhounds": bool(self.var_greyhounds.get()),
+            "user.enable_azure_sql": bool(self.var_enable_azure.get()),
+            "user.dry_run": bool(self.var_dry_run.get()),
+            "azure_sql.server": self.var_az_server.get().strip(),
+            "azure_sql.database": self.var_az_db.get().strip(),
+            "azure_sql.username": self.var_az_user.get().strip(),
+            "azure_sql.password": self.var_az_pass.get(),
+            "azure_sql.driver": self.var_az_driver.get().strip(),
+        }
+
+        self.grab_release()
+        self.destroy()
+
 
 class App(ttk.Frame):
     def __init__(self, master: tk.Tk):
         super().__init__(master, padding=12)
         self.master = master
+
+        # Detect first run BEFORE ensure creates a template
+        first_run = not CREDENTIALS_PATH.exists()
 
         ensure_credentials_file_exists()
         self.creds = load_credentials()
@@ -39,6 +253,11 @@ class App(ttk.Frame):
         self.var_enable_azure = tk.BooleanVar(value=bool(get_nested(self.creds, "user.enable_azure_sql", False)))
         self.var_dry_run = tk.BooleanVar(value=bool(get_nested(self.creds, "user.dry_run", True)))
 
+        # --- Vars (Azure unlock) ---
+        # These are GUI-only safety gates for non-dry-run publishing
+        self.var_allow_publish = tk.BooleanVar(value=False)
+        self.var_publish_text = tk.StringVar(value="")
+
         # --- Vars (Azure) ---
         self.var_az_server = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.server", "")))
         self.var_az_db = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.database", "")))
@@ -48,13 +267,86 @@ class App(ttk.Frame):
             value=str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server"))
         )
 
+        # --- Runtime / status ---
+        self._status_q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._worker_thread: threading.Thread | None = None
+        self._last_results_dir: Path | None = None
+
         self._build()
+        self.master.after(100, self._poll_status_queue)
+        self._refresh_publish_unlock_state()
+
+        # First-run setup wizard
+        if first_run:
+            self._run_first_time_setup()
+
+    # ---------------- First-run onboarding ----------------
+
+    def _run_first_time_setup(self) -> None:
+        self._log("First run detected: launching setup wizard…")
+
+        wiz = FirstRunWizard(self.master, self.creds)
+        self.master.wait_window(wiz)
+
+        if wiz.result is None:
+            self._log("First run setup cancelled. You can edit credentials in the GUI fields and click Save Settings.")
+            return
+
+        # Apply wizard values into creds
+        for k, v in wiz.result.items():
+            set_nested(self.creds, k, v)
+
+        # Update existing Vars (so bound widgets update)
+        self.var_bf_user.set(str(get_nested(self.creds, "betfair.username", "")))
+        self.var_bf_pass.set(str(get_nested(self.creds, "betfair.password", "")))
+        self.var_bf_appkey.set(str(get_nested(self.creds, "betfair.app_key", "")))
+
+        self.var_user_id.set(str(get_nested(self.creds, "user.user_id", "Gazuty")))
+        self.var_days.set(str(get_nested(self.creds, "user.days", 7)))
+        self.var_horses.set(bool(get_nested(self.creds, "user.include_horses", True)))
+        self.var_greyhounds.set(bool(get_nested(self.creds, "user.include_greyhounds", True)))
+        self.var_enable_azure.set(bool(get_nested(self.creds, "user.enable_azure_sql", False)))
+        self.var_dry_run.set(bool(get_nested(self.creds, "user.dry_run", True)))
+
+        self.var_az_server.set(str(get_nested(self.creds, "azure_sql.server", "")))
+        self.var_az_db.set(str(get_nested(self.creds, "azure_sql.database", "")))
+        self.var_az_user.set(str(get_nested(self.creds, "azure_sql.username", "")))
+        self.var_az_pass.set(str(get_nested(self.creds, "azure_sql.password", "")))
+        self.var_az_driver.set(str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server")))
+
+        try:
+            save_credentials(self.creds)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            self._log(f"ERROR saving credentials: {e}")
+            return
+
+        # Friendly checklist
+        self._log("✅ credentials file created: secrets/credentials.json")
+        results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
+        if results_dir_raw:
+            self._log(f"✅ results directory configured: {results_dir_raw}")
+        else:
+            self._log("⚠️ results directory not configured yet (paths.results_csv_dir).")
+
+        if bool(get_nested(self.creds, "user.dry_run", True)):
+            self._log("✅ dry-run enabled (safe-by-default)")
+        else:
+            self._log("⚠️ dry-run disabled (publishing still requires GUI unlock + confirmation)")
+
+        if bool(get_nested(self.creds, "user.enable_azure_sql", False)):
+            self._log("ℹ️ Azure enabled (still safe-by-default)")
+        else:
+            self._log("ℹ️ Azure disabled")
+
+        messagebox.showinfo("Setup complete", "First run setup saved. You can now run the downloader.")
+        self._refresh_publish_unlock_state()
 
     # ---------------- UI ----------------
 
     def _build(self) -> None:
         self.master.title("Betfair Results Downloader (GUI)")
-        self.master.minsize(760, 520)
+        self.master.minsize(820, 560)
 
         self.grid(row=0, column=0, sticky="nsew")
         self.master.columnconfigure(0, weight=1)
@@ -101,45 +393,80 @@ class App(ttk.Frame):
         az.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         az.columnconfigure(1, weight=1)
 
-        ttk.Checkbutton(az, text="Enable Azure upload", variable=self.var_enable_azure).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(az, text="Dry run (recommended)", variable=self.var_dry_run).grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
+        ttk.Checkbutton(
+            az,
+            text="Enable Azure upload",
+            variable=self.var_enable_azure,
+            command=self._refresh_publish_unlock_state,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            az,
+            text="Dry run (recommended)",
+            variable=self.var_dry_run,
+            command=self._refresh_publish_unlock_state,
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        # --- Non-dry-run publish unlock (GUI safety gates) ---
+        self.chk_allow_publish = ttk.Checkbutton(
+            az,
+            text="Allow non-dry-run publish (writes to Azure)",
+            variable=self.var_allow_publish,
+            command=self._refresh_publish_unlock_state,
         )
+        self.chk_allow_publish.grid(row=1, column=0, sticky="w", pady=(6, 0))
 
-        ttk.Label(az, text="Server").grid(row=1, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_server).grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(az, text="Type PUBLISH to enable").grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(6, 0))
+        self.ent_publish_text = ttk.Entry(az, textvariable=self.var_publish_text, width=16)
+        self.ent_publish_text.grid(row=1, column=1, sticky="e", padx=(10, 0), pady=(6, 0))
 
-        ttk.Label(az, text="Database").grid(row=2, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_db).grid(row=2, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(az, text="Server").grid(row=2, column=0, sticky="w")
+        ttk.Entry(az, textvariable=self.var_az_server).grid(row=2, column=1, sticky="ew", padx=(10, 0))
 
-        ttk.Label(az, text="Username").grid(row=3, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_user).grid(row=3, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(az, text="Database").grid(row=3, column=0, sticky="w")
+        ttk.Entry(az, textvariable=self.var_az_db).grid(row=3, column=1, sticky="ew", padx=(10, 0))
 
-        ttk.Label(az, text="Password").grid(row=4, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_pass, show="•").grid(row=4, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(az, text="Username").grid(row=4, column=0, sticky="w")
+        ttk.Entry(az, textvariable=self.var_az_user).grid(row=4, column=1, sticky="ew", padx=(10, 0))
 
-        ttk.Label(az, text="ODBC Driver").grid(row=5, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_driver).grid(row=5, column=1, sticky="ew", padx=(10, 0))
+        ttk.Label(az, text="Password").grid(row=5, column=0, sticky="w")
+        ttk.Entry(az, textvariable=self.var_az_pass, show="•").grid(row=5, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(az, text="ODBC Driver").grid(row=6, column=0, sticky="w")
+        ttk.Entry(az, textvariable=self.var_az_driver).grid(row=6, column=1, sticky="ew", padx=(10, 0))
 
         # --- Output + buttons ---
         out = ttk.LabelFrame(self, text="Output", padding=10)
         out.grid(row=3, column=0, sticky="nsew")
         out.columnconfigure(0, weight=1)
-        out.rowconfigure(0, weight=1)
+        out.rowconfigure(1, weight=1)
 
-        self.txt = tk.Text(out, height=10, wrap="word")
-        self.txt.grid(row=0, column=0, sticky="nsew")
+        self.progress = ttk.Progressbar(out, mode="indeterminate")
+        self.progress.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        self.txt = tk.Text(out, height=12, wrap="word")
+        self.txt.grid(row=1, column=0, sticky="nsew")
 
         self._log("Loaded credentials file. Sensitive fields are masked in UI display only.")
+        self._log("Tip: Dry run is ON by default. Non-dry-run publishing requires explicit unlock + confirmation.")
 
         btns = ttk.Frame(self)
         btns.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         btns.columnconfigure(0, weight=1)
 
-        ttk.Button(btns, text="Clear Output", command=self.on_clear).grid(row=0, column=0, sticky="w")
-        ttk.Button(btns, text="Save Settings", command=self.on_save).grid(row=0, column=1, sticky="e", padx=(0, 8))
-        ttk.Button(btns, text="Validate", command=self.on_validate).grid(row=0, column=2, sticky="e", padx=(0, 8))
-        ttk.Button(btns, text="Run Downloader", command=self.on_run).grid(row=0, column=3, sticky="e")
+        self.btn_clear = ttk.Button(btns, text="Clear Output", command=self.on_clear)
+        self.btn_clear.grid(row=0, column=0, sticky="w")
+
+        self.btn_open = ttk.Button(btns, text="Open Results Folder", command=self.on_open_results_folder, state="disabled")
+        self.btn_open.grid(row=0, column=1, sticky="w", padx=(10, 0))
+
+        self.btn_save = ttk.Button(btns, text="Save Settings", command=self.on_save)
+        self.btn_save.grid(row=0, column=2, sticky="e", padx=(0, 8))
+
+        self.btn_validate = ttk.Button(btns, text="Validate", command=self.on_validate)
+        self.btn_validate.grid(row=0, column=3, sticky="e", padx=(0, 8))
+
+        self.btn_run = ttk.Button(btns, text="Run Downloader", command=self.on_run)
+        self.btn_run.grid(row=0, column=4, sticky="e")
 
     # ---------------- Helpers ----------------
 
@@ -182,17 +509,147 @@ class App(ttk.Frame):
             user_id=self.var_user_id.get().strip(),
         )
 
+    def _format_block(self, title: str, data: object) -> str:
+        if not data:
+            return f"\n=== {title} ===\n(none)\n"
+
+        if isinstance(data, dict):
+            lines = [f"\n=== {title} ==="]
+            for k, v in data.items():
+                lines.append(f"{k}: {v}")
+            return "\n".join(lines) + "\n"
+
+        return f"\n=== {title} ===\n{data}\n"
+
+    def _set_running_state(self, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        self.btn_run.configure(state=state)
+        self.btn_save.configure(state=state)
+        self.btn_validate.configure(state=state)
+        self.btn_clear.configure(state="normal")
+        self.btn_open.configure(state=("normal" if (not running and self._last_results_dir is not None) else "disabled"))
+
+        if running:
+            self.progress.start(10)
+        else:
+            self.progress.stop()
+
+    def _refresh_publish_unlock_state(self) -> None:
+        enable_az = bool(self.var_enable_azure.get())
+        dry_run = bool(self.var_dry_run.get())
+
+        if (not enable_az) or dry_run:
+            self.var_allow_publish.set(False)
+            self.var_publish_text.set("")
+            try:
+                self.chk_allow_publish.configure(state="disabled")
+                self.ent_publish_text.configure(state="disabled")
+            except Exception:
+                pass
+            return
+
+        try:
+            self.chk_allow_publish.configure(state="normal")
+            self.ent_publish_text.configure(state="normal")
+        except Exception:
+            pass
+
+    def _status(self, msg: str) -> None:
+        self._status_q.put(("log", msg))
+
+    def _poll_status_queue(self) -> None:
+        try:
+            while True:
+                kind, payload = self._status_q.get_nowait()
+                if kind == "log":
+                    self._log(str(payload))
+                elif kind == "done":
+                    self._handle_run_done(payload)
+                elif kind == "error":
+                    self._handle_run_error(payload)
+        except queue.Empty:
+            pass
+        self.master.after(100, self._poll_status_queue)
+
+    def _handle_run_done(self, result: object) -> None:
+        self._set_running_state(False)
+
+        if isinstance(result, dict) and result.get("message"):
+            self._log(str(result["message"]))
+        else:
+            self._log("Run completed (GUI branch).")
+
+        if isinstance(result, dict):
+            self._log(self._format_block("Plan", result.get("plan")))
+            self._log(self._format_block("Download summary", result.get("download")))
+            self._log(self._format_block("Enrichment summary", result.get("enrich")))
+            self._log(self._format_block("CSV outputs", result.get("csv")))
+            self._log(self._format_block("Azure summary", result.get("azure")))
+
+        results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
+        if results_dir_raw:
+            self._last_results_dir = Path(str(results_dir_raw))
+            if self._last_results_dir.exists():
+                self.btn_open.configure(state="normal")
+
+        messagebox.showinfo("Run complete", "Run finished. See Output for details.")
+
+    def _handle_run_error(self, err_text: object) -> None:
+        self._set_running_state(False)
+        self._log("ERROR:")
+        self._log(str(err_text))
+        messagebox.showerror("Run failed", str(err_text))
+
+    def _ask_confirm_publish_from_mainthread(self, *, user_id: str, markets: int, rows: int) -> bool:
+        msg = (
+            "You are about to WRITE to Azure SQL (non-dry-run).\n\n"
+            f"UserID: {user_id}\n"
+            f"Markets to write: {markets:,}\n"
+            f"Rows to write: {rows:,}\n\n"
+            "This will DELETE existing rows for this UserID and then INSERT the new rows.\n\n"
+            "Proceed?"
+        )
+        return messagebox.askokcancel("Confirm Azure Publish", msg, icon="warning")
+
+    def _confirm_publish_cb_threadsafe(self, *, user_id: str, markets: int, rows: int) -> bool:
+        ev = threading.Event()
+        result_holder: dict[str, bool] = {"ok": False}
+
+        def _do():
+            try:
+                result_holder["ok"] = self._ask_confirm_publish_from_mainthread(
+                    user_id=user_id, markets=markets, rows=rows
+                )
+            finally:
+                ev.set()
+
+        self.master.after(0, _do)
+        ev.wait()
+        return bool(result_holder["ok"])
+
     # ---------------- Actions ----------------
 
     def on_clear(self) -> None:
         self.txt.delete("1.0", "end")
         self._log("Output cleared.")
 
+    def on_open_results_folder(self) -> None:
+        if self._last_results_dir is None:
+            return
+        path = self._last_results_dir
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as e:
+            messagebox.showerror("Open folder failed", str(e))
+
     def on_save(self) -> None:
         try:
-            # Validate days parse early
             int(self.var_days.get().strip())
-
             self._sync_to_creds()
             save_credentials(self.creds)
 
@@ -203,7 +660,6 @@ class App(ttk.Frame):
 
     def on_validate(self) -> None:
         try:
-            # sync so we validate current UI state (even if not saved yet)
             self._sync_to_creds()
             v = validate_credentials(self.creds)
 
@@ -223,50 +679,89 @@ class App(ttk.Frame):
             messagebox.showerror("Validation error", str(e))
 
     def on_run(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            messagebox.showinfo("Busy", "A run is already in progress.")
+            return
+
         try:
-            # Clear output each run so it’s obvious what belongs to this run
             self.txt.delete("1.0", "end")
             self._log("Starting run...")
 
-            # Keep creds in sync with UI (in-memory)
             self._sync_to_creds()
 
-            # Safety: Azure non-dry-run is not implemented on feature/gui
-            if bool(self.var_enable_azure.get()) and (not bool(self.var_dry_run.get())):
-                raise ValueError(
-                    "Azure upload is enabled but Dry run is unchecked.\n\n"
-                    "Azure publishing is not implemented yet on feature/gui.\n"
-                    "Please re-check Dry run, or disable Azure upload."
+            results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
+            self._log(
+                self._format_block(
+                    "Preflight",
+                    {
+                        "credentials_file": "secrets/credentials.json",
+                        "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
+                        "enable_azure_sql": bool(self.var_enable_azure.get()),
+                        "dry_run": bool(self.var_dry_run.get()),
+                    },
                 )
+            )
 
             cfg = self._build_config_from_ui()
-            result = run_downloader(cfg, self.creds)
 
-            if isinstance(result, dict) and result.get("message"):
-                self._log(str(result["message"]))
-            else:
-                self._log("Run completed (GUI branch).")
+            if cfg.enable_azure_sql and (not cfg.dry_run):
+                if (not bool(self.var_allow_publish.get())) or (self.var_publish_text.get().strip() != "PUBLISH"):
+                    raise ValueError(
+                        "Azure upload is enabled and Dry run is OFF.\n\n"
+                        "To proceed with non-dry-run publishing:\n"
+                        "1) Tick: 'Allow non-dry-run publish (writes to Azure)'\n"
+                        "2) Type: PUBLISH\n"
+                        "3) You will then be asked to confirm after Azure prep summary is computed.\n\n"
+                        "Otherwise, turn Dry run back ON."
+                    )
 
-            if isinstance(result, dict) and "plan" in result:
-                self._log(f"Plan: {result.get('plan')}")
+            self._set_running_state(True)
+            self._worker_thread = threading.Thread(
+                target=self._run_worker,
+                args=(cfg, dict(self.creds)),
+                daemon=True,
+            )
+            self._worker_thread.start()
 
-            if isinstance(result, dict) and "download" in result:
-                self._log(f"Download: {result['download']}")
-            if isinstance(result, dict) and "azure" in result:
-                self._log(f"Azure: {result['azure']}")
-
-            messagebox.showinfo("Run complete", "Run finished. See Output for details.")
         except Exception as e:
+            self._set_running_state(False)
             self._log("ERROR:")
             self._log(str(e))
             self._log(traceback.format_exc())
             messagebox.showerror("Run failed", str(e))
 
+    def _run_worker(self, cfg: DownloaderConfig, creds_copy: dict) -> None:
+        """
+        Background worker thread. Never call Tk directly here.
+        """
+        try:
+            # NOTE: Removed GUI-side "Phase 1/4..." line to avoid duplication.
+            # Pipeline is the single source of phase logs via status_cb.
+
+            def status_cb(msg: str) -> None:
+                self._status(msg)
+
+            def confirm_publish_cb(prep_summary: dict) -> bool:
+                user_id = str(prep_summary.get("user_id", cfg.user_id))
+                markets = int(prep_summary.get("markets_aggregated", 0) or 0)
+                rows = int(prep_summary.get("rows_to_write_count", 0) or 0)
+                return self._confirm_publish_cb_threadsafe(user_id=user_id, markets=markets, rows=rows)
+
+            result = run_downloader(
+                cfg,
+                creds_copy,
+                status_cb=status_cb,
+                confirm_publish_cb=confirm_publish_cb,
+            )
+            self._status_q.put(("done", result))
+        except Exception as e:
+            err_text = f"{e}\n\n{traceback.format_exc()}"
+            self._status_q.put(("error", err_text))
+
 
 def main() -> None:
     root = tk.Tk()
 
-    # Use themed widgets
     try:
         style = ttk.Style()
         if "vista" in style.theme_names():

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 import json
 import time
@@ -37,6 +37,16 @@ class EnrichResult:
     markets_requested: int
     markets_returned: int
     message: str
+
+    # Additional, backward-compatible enrichment stats (optional)
+    unique_market_ids: int = 0
+    use_cache: bool = True
+    cache_path: Optional[str] = None
+    cache_snapshot_path: Optional[str] = None
+    cache_rows: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    batch_size: int = 0
 
 
 @dataclass
@@ -203,6 +213,7 @@ def enrich_with_market_catalogue(
     use_cache: bool = True,
     batch_size: int = 50,
     sleep_seconds: float = 0.20,
+    status_cb: Optional[callable] = None,
 ) -> tuple[pd.DataFrame, EnrichResult]:
     """
     Notebook Cell 3, ported:
@@ -210,15 +221,38 @@ def enrich_with_market_catalogue(
     - cache at outputs/market_catalogue_event_cache.csv
     - deterministic column names: mkt_*, evt_*
     """
+    def say(msg: str) -> None:
+        if status_cb:
+            try:
+                status_cb(msg)
+            except Exception:
+                pass
+
     if (not enable) or df_co is None or df_co.empty:
-        return df_co, EnrichResult(True, 0, 0, "Enrichment skipped (disabled or empty df).")
+        return df_co, EnrichResult(
+            attempted=True,
+            markets_requested=0,
+            markets_returned=0,
+            message="Enrichment skipped (disabled or empty df).",
+            unique_market_ids=0,
+            use_cache=use_cache,
+            batch_size=batch_size,
+        )
 
     username = (betfair.get("username") or "").strip()
     password = betfair.get("password") or ""
     app_key = (betfair.get("app_key") or "").strip()
 
     if not username or not password or not app_key:
-        return df_co, EnrichResult(False, 0, 0, "Enrichment skipped (Betfair creds missing).")
+        return df_co, EnrichResult(
+            attempted=False,
+            markets_requested=0,
+            markets_returned=0,
+            message="Enrichment skipped (Betfair creds missing).",
+            unique_market_ids=int(df_co["marketId"].nunique()) if "marketId" in df_co.columns else 0,
+            use_cache=use_cache,
+            batch_size=batch_size,
+        )
 
     trading = betfairlightweight.APIClient(username=username, password=password, app_key=app_key)
     trading.login_interactive()
@@ -240,10 +274,18 @@ def enrich_with_market_catalogue(
     cached_market_ids = set(df_cache["marketId"].unique()) if (not df_cache.empty and "marketId" in df_cache.columns) else set()
     missing_market_ids = [m for m in unique_market_ids if m not in cached_market_ids]
 
+    cache_hits = len(unique_market_ids) - len(missing_market_ids)
+    cache_misses = len(missing_market_ids)
+
+    say(f"Enrichment: unique_market_ids={len(unique_market_ids):,}, cache_hits={cache_hits:,}, cache_misses={cache_misses:,}.")
+
     fetched_rows: list[dict[str, Any]] = []
     returned_total = 0
 
-    for batch in _chunked(missing_market_ids, batch_size):
+    total_batches = (len(missing_market_ids) + batch_size - 1) // batch_size if batch_size > 0 else 0
+    for idx, batch in enumerate(_chunked(missing_market_ids, batch_size), start=1):
+        if total_batches > 0:
+            say(f"Enrichment: fetching batch {idx}/{total_batches} (batch_size={len(batch):,})…")
         time.sleep(sleep_seconds)
 
         cats = trading.betting.list_market_catalogue(
@@ -275,12 +317,50 @@ def enrich_with_market_catalogue(
         if not df_cache.empty:
             df_cache.to_csv(snapshot_path, index=False)
 
+    cache_rows = len(df_new_cache) if not df_new_cache.empty else 0
+
     if not df_new_cache.empty:
         df_out = df_work.merge(df_new_cache, on="marketId", how="left")
-        msg = f"Enriched metadata using market catalogue. Cache rows={len(df_new_cache):,}."
-        return df_out, EnrichResult(True, len(missing_market_ids), returned_total, msg)
 
-    return df_work, EnrichResult(True, len(missing_market_ids), returned_total, "No enrichment rows available (cache empty and fetch returned none).")
+        # --- Message clarity tweak (cache-only vs API) ---
+        if returned_total == 0 and cache_hits > 0:
+            msg = f"Enriched metadata from cache only (API returned 0). Cache rows={cache_rows:,}."
+        elif returned_total > 0 and cache_hits > 0:
+            msg = f"Enriched metadata from cache + API. Cache rows={cache_rows:,}, api_returned={returned_total:,}."
+        elif returned_total > 0:
+            msg = f"Enriched metadata from API (no cache hits). Cache rows={cache_rows:,}, api_returned={returned_total:,}."
+        else:
+            msg = f"Enriched metadata using market catalogue. Cache rows={cache_rows:,}."
+
+        return df_out, EnrichResult(
+            attempted=True,
+            markets_requested=len(missing_market_ids),
+            markets_returned=returned_total,
+            message=msg,
+            unique_market_ids=len(unique_market_ids),
+            use_cache=use_cache,
+            cache_path=str(cache_path),
+            cache_snapshot_path=str(snapshot_path),
+            cache_rows=cache_rows,
+            cache_hits=cache_hits,
+            cache_misses=cache_misses,
+            batch_size=batch_size,
+        )
+
+    return df_work, EnrichResult(
+        attempted=True,
+        markets_requested=len(missing_market_ids),
+        markets_returned=returned_total,
+        message="No enrichment rows available (cache empty and fetch returned none).",
+        unique_market_ids=len(unique_market_ids),
+        use_cache=use_cache,
+        cache_path=str(cache_path),
+        cache_snapshot_path=str(snapshot_path),
+        cache_rows=cache_rows,
+        cache_hits=cache_hits,
+        cache_misses=cache_misses,
+        batch_size=batch_size,
+    )
 
 
 # -----------------------------
