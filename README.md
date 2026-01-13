@@ -168,6 +168,90 @@ Notes:
 
 ---
 
+## Reporting Dashboard (Streamlit)
+
+The Reporting Dashboard is a **local, professional analytics UI** for analysing
+Betfair settled (cleared) orders using CSV outputs produced by this project.
+
+It is built with **Streamlit** and is designed for:
+- fast iteration
+- local-only usage
+- code-first, reproducible analysis
+- clean separation of data, transforms, and UI
+
+> **Status:** Active development  
+> **Branch:** `feature/reporting-dashboard`
+
+### Key Features
+
+- Reads **local canonical CSVs only** (no Azure dependency)
+- Timezone-aware reporting (UTC → Australia/Sydney)
+- **Sunday–Saturday weekly aggregation**
+- Sport filtering (Horses, Greyhounds)
+- Daily and weekly P&L views
+- KPI summaries (profit, strike rate, averages)
+- CSV export of all tables
+- Cached loading for large datasets
+- Clean, professional Streamlit UI
+
+### Data Requirements
+
+The dashboard expects CSVs produced by the downloader pipeline, typically:
+
+```
+cleared_orders_cleaned.csv
+cleared_orders_cleaned_YYYYMMDD.csv
+```
+
+Minimum required columns:
+
+- `betId`
+- `profit`
+- `placedDate`
+- `settledDate`
+- `eventTypeId`
+- `evt_countryCode`
+- `mkt_marketName`
+
+### Running the Dashboard
+
+From the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+streamlit run src/betfair_results_downloader/reporting_app.py
+```
+
+In the sidebar:
+1. Select the folder containing your cleaned CSVs
+2. Choose the canonical file
+3. Navigate using the left-hand menu
+
+### Architecture Overview
+
+```
+reporting/
+  io.py          # CSV discovery, loading, caching
+  schema.py      # Normalisation and derived fields
+  filters.py     # Sidebar filters
+  transforms.py  # Aggregations (daily, weekly, monthly)
+  ui.py          # Shared UI components
+  pages/         # Individual report pages
+```
+
+This design keeps data logic separate from presentation and allows
+incremental extension without refactoring.
+
+### Roadmap
+
+- Track filtering using `evt_venue`
+- Monthly and rolling 2 / 4 / 8 week views
+- Sport / Country / Track breakdown pages
+- Drill-down from aggregates to raw bets
+- Additional UI polish and visualisations
+
 ## Safety notes
 
 - Real credentials and outputs are **never committed**
