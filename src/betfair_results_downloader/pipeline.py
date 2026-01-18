@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from typing import Any, Callable, Dict, Optional
 from pathlib import Path
 
@@ -21,6 +22,9 @@ def run_pipeline(
     creds: dict[str, Any],
     status_cb: Optional[Callable[[str], None]] = None,
     confirm_publish_cb: Optional[Callable[[dict[str, Any]], bool]] = None,
+    last_settled_date_utc: Optional[date] = None,
+    recommended_days: Optional[int] = None,
+    recommendation_note: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     GUI pipeline (wired):
@@ -43,6 +47,9 @@ def run_pipeline(
         "enable_azure_sql": config.enable_azure_sql,
         "dry_run": config.dry_run,
         "user_id": config.user_id,
+        "last_settled_date_utc": str(last_settled_date_utc) if last_settled_date_utc else None,
+        "recommended_days": recommended_days,
+        "recommendation_note": recommendation_note,
     }
 
     betfair = creds.get("betfair", {}) or {}

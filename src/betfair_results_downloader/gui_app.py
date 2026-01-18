@@ -12,7 +12,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .config import DownloaderConfig
-from .run import run_downloader
+from .recommend import recommend_lookback_days
+from .run import run_downloader, publish_to_azure_from_canonical
 from .secrets import (
     credentials_path,
     ensure_credentials_file_exists,
@@ -73,6 +74,9 @@ def format_block(title: str, data: object) -> str:
                 "include_greyhounds",
                 "enable_azure_sql",
                 "dry_run",
+                "last_settled_date_utc",
+                "recommended_days",
+                "recommendation_note",
             ]
         elif title.lower().startswith("download"):
             preferred = [
@@ -120,6 +124,17 @@ def format_block(title: str, data: object) -> str:
                 "published",
                 "message",
                 "user_id",
+            ]
+        elif title.lower().startswith("publish-only"):
+            preferred = [
+                "canonical_path",
+                "canonical_rows_read",
+                "markets_aggregated",
+                "existing_markets_in_azure_count",
+                "new_markets_to_publish",
+                "publish_attempted",
+                "inserted_rows",
+                "message",
             ]
 
         lines = [header]
@@ -421,6 +436,9 @@ class App(ttk.Frame):
         # --- Vars (Run config) ---
         self.var_user_id = tk.StringVar(value=str(get_nested(self.creds, "user.user_id", DEFAULT_USER_ID)))
         self.var_days = tk.StringVar(value=str(get_nested(self.creds, "user.days", 7)))
+        self.var_reco_note = tk.StringVar(value="")
+        self._reco_last_settled_date_utc: object | None = None
+        self._reco_days: int | None = None
 
         self.var_horses = tk.BooleanVar(value=bool(get_nested(self.creds, "user.include_horses", True)))
         self.var_greyhounds = tk.BooleanVar(value=bool(get_nested(self.creds, "user.include_greyhounds", True)))
@@ -446,8 +464,10 @@ class App(ttk.Frame):
         self._last_artifacts_dir: Path | None = None
 
         self._build()
+        self._refresh_lookback_recommendation()
         self.master.after(100, self._poll_status_queue)
         self._refresh_publish_unlock_state()
+        self.var_publish_text.trace_add("write", lambda *_: self._refresh_publish_button_state())
 
         # First-run setup wizard
         if first_run:
@@ -484,6 +504,7 @@ class App(ttk.Frame):
 
         # Update bound Vars
         self.var_results_dir.set(str(get_nested(self.creds, "paths.results_csv_dir", "")))
+        self._refresh_lookback_recommendation()
 
         self.var_bf_user.set(str(get_nested(self.creds, "betfair.username", "")))
         self.var_bf_pass.set(str(get_nested(self.creds, "betfair.password", "")))
@@ -589,11 +610,15 @@ class App(ttk.Frame):
         ttk.Label(rc, text="Days to download").grid(row=0, column=2, sticky="w")
         ttk.Entry(rc, textvariable=self.var_days, width=8).grid(row=0, column=3, sticky="w", padx=(10, 0))
 
+        ttk.Label(rc, textvariable=self.var_reco_note, wraplength=680).grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(4, 0)
+        )
+
         ttk.Checkbutton(rc, text="Horses (eventTypeId 7)", variable=self.var_horses).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
         ttk.Checkbutton(rc, text="Greyhounds (eventTypeId 4339)", variable=self.var_greyhounds).grid(
-            row=1, column=2, columnspan=2, sticky="w", pady=(6, 0)
+            row=2, column=2, columnspan=2, sticky="w", pady=(6, 0)
         )
 
         # --- Azure ---
@@ -696,6 +721,9 @@ class App(ttk.Frame):
         self.btn_run = ttk.Button(btns, text="Run Downloader", command=self.on_run)
         self.btn_run.grid(row=0, column=6, sticky="e")
 
+        self.btn_publish = ttk.Button(btns, text="Publish to Azure", command=self.on_publish_only)
+        self.btn_publish.grid(row=0, column=7, sticky="e", padx=(8, 0))
+
     # ---------------- Helpers ----------------
 
     def _log(self, msg: str) -> None:
@@ -743,9 +771,36 @@ class App(ttk.Frame):
             user_id=self.var_user_id.get().strip() or DEFAULT_USER_ID,
         )
 
+    def _refresh_lookback_recommendation(self) -> None:
+        results_dir_raw = self.var_results_dir.get().strip()
+        if not results_dir_raw:
+            self._reco_days = 90
+            self._reco_last_settled_date_utc = None
+            self.var_reco_note.set(
+                "No existing data - Recommend 90 days capture, however this may take some time."
+            )
+            self.var_days.set(str(self._reco_days))
+            return
+
+        try:
+            recommended_days, note, last_settled_utc = recommend_lookback_days(Path(results_dir_raw))
+        except Exception:
+            recommended_days, note, last_settled_utc = 90, (
+                "No existing data - Recommend 90 days capture, however this may take some time."
+            ), None
+
+        self._reco_days = int(recommended_days)
+        self._reco_last_settled_date_utc = last_settled_utc
+        self.var_reco_note.set(note)
+        self.var_days.set(str(self._reco_days))
+
     def _set_running_state(self, running: bool) -> None:
         state = "disabled" if running else "normal"
         self.btn_run.configure(state=state)
+        if running:
+            self.btn_publish.configure(state="disabled")
+        else:
+            self._refresh_publish_button_state()
         self.btn_save.configure(state=state)
         self.btn_validate.configure(state=state)
         self.btn_clear.configure(state="normal")
@@ -772,11 +827,42 @@ class App(ttk.Frame):
                 self.ent_publish_text.configure(state="disabled")
             except Exception:
                 pass
+            self._refresh_publish_button_state()
             return
 
         try:
             self.chk_allow_publish.configure(state="normal")
             self.ent_publish_text.configure(state="normal")
+        except Exception:
+            pass
+
+        self._refresh_publish_button_state()
+
+    def _azure_credentials_ok(self) -> bool:
+        try:
+            self._sync_to_creds()
+        except Exception:
+            return False
+
+        v = validate_credentials(self.creds)
+        if not v.ok:
+            return False
+
+        user = self.creds.get("user", {}) or {}
+        db_user_id = (user.get("db_user_id") or "").strip()
+        if not db_user_id:
+            return False
+
+        return True
+
+    def _refresh_publish_button_state(self) -> None:
+        enable_az = bool(self.var_enable_azure.get())
+        dry_run = bool(self.var_dry_run.get())
+        unlocked = bool(self.var_allow_publish.get()) and (self.var_publish_text.get().strip() == "PUBLISH")
+
+        can_publish = enable_az and self._azure_credentials_ok() and (dry_run or unlocked)
+        try:
+            self.btn_publish.configure(state=("normal" if can_publish else "disabled"))
         except Exception:
             pass
 
@@ -791,6 +877,8 @@ class App(ttk.Frame):
                     self._log(str(payload))
                 elif kind == "done":
                     self._handle_run_done(payload)
+                elif kind == "publish_done":
+                    self._handle_publish_done(payload)
                 elif kind == "error":
                     self._handle_run_error(payload)
         except queue.Empty:
@@ -846,6 +934,25 @@ class App(ttk.Frame):
             self.btn_open_artifacts.configure(state="normal")
 
         messagebox.showinfo("Run complete", "Run finished. See Output for details.")
+
+    def _handle_publish_done(self, result: object) -> None:
+        self._set_running_state(False)
+
+        if isinstance(result, dict) and result.get("message"):
+            self._log(str(result["message"]))
+        else:
+            self._log("Publish-only completed.")
+
+        if isinstance(result, dict):
+            summary = result.get("summary")
+            if summary is not None:
+                self._log_block("Publish-only summary", summary)
+
+            if result.get("ok") is False:
+                messagebox.showerror("Publish failed", str(result.get("message", "Publish failed.")))
+                return
+
+        messagebox.showinfo("Publish complete", "Publish-only run finished. See Output for details.")
 
     def _handle_run_error(self, err_text: object) -> None:
         self._set_running_state(False)
@@ -906,6 +1013,7 @@ class App(ttk.Frame):
         if folder:
             self.var_results_dir.set(str(Path(folder)))
             self._log(f"Selected results folder: {folder}")
+            self._refresh_lookback_recommendation()
 
     def on_change_credentials_file(self) -> None:
         initial = self.var_creds_file.get().strip()
@@ -981,6 +1089,7 @@ class App(ttk.Frame):
 
             self._log(f"Saved credentials: {self._creds_path}")
             messagebox.showinfo("Saved", f"Settings saved to:\n{self._creds_path}")
+            self._refresh_publish_button_state()
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
@@ -992,6 +1101,7 @@ class App(ttk.Frame):
             if v.ok:
                 self._log("VALIDATION OK ✅")
                 messagebox.showinfo("Validation", "Credentials look valid.")
+                self._refresh_publish_button_state()
                 return
 
             self._log("VALIDATION FAILED ❌")
@@ -1030,6 +1140,11 @@ class App(ttk.Frame):
                     "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
                     "enable_azure_sql": bool(self.var_enable_azure.get()),
                     "dry_run": bool(self.var_dry_run.get()),
+                    "last_settled_date_utc": (
+                        str(self._reco_last_settled_date_utc) if self._reco_last_settled_date_utc else None
+                    ),
+                    "recommended_days": self._reco_days,
+                    "recommendation_note": self.var_reco_note.get(),
                 },
             )
 
@@ -1061,6 +1176,46 @@ class App(ttk.Frame):
             self._log(traceback.format_exc())
             messagebox.showerror("Run failed", str(e))
 
+    def on_publish_only(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            messagebox.showinfo("Busy", "A run is already in progress.")
+            return
+
+        try:
+            self.txt.delete("1.0", "end")
+            self._log("-" * 64)
+            self._log("Starting Azure publish-only...")
+
+            self._sync_to_creds()
+
+            cfg = self._build_config_from_ui()
+
+            if cfg.enable_azure_sql and (not cfg.dry_run):
+                if (not bool(self.var_allow_publish.get())) or (self.var_publish_text.get().strip() != "PUBLISH"):
+                    raise ValueError(
+                        "Azure upload is enabled and Dry run is OFF.\n\n"
+                        "To proceed with non-dry-run publishing:\n"
+                        "1) Tick: 'Allow non-dry-run publish (writes to Azure)'\n"
+                        "2) Type: PUBLISH\n"
+                        "3) You will then be asked to confirm before publishing.\n\n"
+                        "Otherwise, turn Dry run back ON."
+                    )
+
+            self._set_running_state(True)
+            self._worker_thread = threading.Thread(
+                target=self._publish_only_worker,
+                args=(cfg, dict(self.creds)),
+                daemon=True,
+            )
+            self._worker_thread.start()
+
+        except Exception as e:
+            self._set_running_state(False)
+            self._log("ERROR:")
+            self._log(str(e))
+            self._log(traceback.format_exc())
+            messagebox.showerror("Publish failed", str(e))
+
     def _run_worker(self, cfg: DownloaderConfig, creds_copy: dict) -> None:
         """
         Background worker thread. Never call Tk directly here.
@@ -1081,8 +1236,37 @@ class App(ttk.Frame):
                 creds_copy,
                 status_cb=status_cb,
                 confirm_publish_cb=confirm_publish_cb,
+                last_settled_date_utc=self._reco_last_settled_date_utc,
+                recommended_days=self._reco_days,
+                recommendation_note=self.var_reco_note.get(),
             )
             self._status_q.put(("done", result))
+        except Exception as e:
+            err_text = f"{e}\n\n{traceback.format_exc()}"
+            self._status_q.put(("error", err_text))
+
+    def _publish_only_worker(self, cfg: DownloaderConfig, creds_copy: dict) -> None:
+        """
+        Background worker thread for publish-only. Never call Tk directly here.
+        """
+        try:
+
+            def status_cb(msg: str) -> None:
+                self._status(msg)
+
+            def confirm_publish_cb(prep_summary: dict) -> bool:
+                user_id = str(prep_summary.get("user_id", cfg.user_id))
+                markets = int(prep_summary.get("markets_aggregated", 0) or 0)
+                rows = int(prep_summary.get("rows_to_write_count", 0) or 0)
+                return self._confirm_publish_cb_threadsafe(user_id=user_id, markets=markets, rows=rows)
+
+            result = publish_to_azure_from_canonical(
+                cfg,
+                creds_copy,
+                status_cb=status_cb,
+                confirm_publish_cb=confirm_publish_cb,
+            )
+            self._status_q.put(("publish_done", result))
         except Exception as e:
             err_text = f"{e}\n\n{traceback.format_exc()}"
             self._status_q.put(("error", err_text))
