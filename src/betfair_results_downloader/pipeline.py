@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from typing import Any, Callable, Dict, Optional
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from .config import DownloaderConfig
 from .downloader_core import (
     fetch_cleared_orders_df,
     enrich_with_market_catalogue,
+    _log_item_description_smoke_check,
     prepare_azure_dataset,
     write_csv_outputs,
 )
@@ -20,6 +22,9 @@ def run_pipeline(
     creds: dict[str, Any],
     status_cb: Optional[Callable[[str], None]] = None,
     confirm_publish_cb: Optional[Callable[[dict[str, Any]], bool]] = None,
+    last_settled_date_utc: Optional[date] = None,
+    recommended_days: Optional[int] = None,
+    recommendation_note: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     GUI pipeline (wired):
@@ -42,6 +47,9 @@ def run_pipeline(
         "enable_azure_sql": config.enable_azure_sql,
         "dry_run": config.dry_run,
         "user_id": config.user_id,
+        "last_settled_date_utc": str(last_settled_date_utc) if last_settled_date_utc else None,
+        "recommended_days": recommended_days,
+        "recommendation_note": recommendation_note,
     }
 
     betfair = creds.get("betfair", {}) or {}
@@ -91,6 +99,7 @@ def run_pipeline(
         }
 
     df_co = dl.df_co
+    _log_item_description_smoke_check(df_co, status_cb)
 
     def _unique_markets(df) -> int:
         try:
@@ -160,7 +169,7 @@ def run_pipeline(
     # 3) CSV outputs
     # -------------------
     say("Phase 3/4: Writing CSV outputs…")
-    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir)
+    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=say)
     csv_summary = {
         "canonical_path": str(csvr.canonical_path),
         "snapshot_path": str(csvr.snapshot_path),

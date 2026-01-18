@@ -4,6 +4,8 @@ secrets/*
 !secrets/
 !secrets/credentials.template.json
 secrets/credentials.json
+secrets/credentials.location.json
+*.env
 
 # ------------------------------
 # Virtual environments
@@ -52,12 +54,14 @@ data/
 # Logs
 # ------------------------------
 *.log
+gui_run_log.txt
 
 # ------------------------------
 # OS / IDE
 # ------------------------------
 .DS_Store
 Thumbs.db
+Desktop.ini
 .vscode/
 .idea/
 
@@ -69,6 +73,7 @@ notebooks/_scratch/
 *.egg-info/
 build/
 dist/
+*.spec
 
 # Local env + caches
 .venv/
