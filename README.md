@@ -11,13 +11,13 @@ The GUI is now the **official and recommended way** to run this project.
 1. Downloads **settled (cleared) orders** from Betfair using `betfairlightweight`
 2. Cleans and normalises the data
 3. Captures Betfair `itemDescription` metadata from cleared orders (`include_item_description=True`) for event, market, and runner context
-3. Enriches orders with **market & event metadata** (cached to avoid repeat API calls)
-4. Writes:
+4. Enriches orders with **market & event metadata** (cached to avoid repeat API calls)
+5. Writes:
    - a **canonical CSV** (stable filename, always latest state)
    - **dated snapshot CSVs** (append-only history)
    - itemDescription metadata is preserved end-to-end in both canonical and snapshot outputs
-5. Aggregates results to **market-level profit**
-6. *(Optional)* Publishes market-level results to **Azure SQL**
+6. Aggregates results to **market-level profit**
+7. *(Optional)* Publishes market-level results to **Azure SQL**
 
 Lightweight, non-blocking smoke logs note whether `itemDescription` fields are present during a run for validation only.
 
@@ -36,6 +36,9 @@ The GUI:
 - Streams **live status updates** during each phase
 - Prints clean, structured **summary blocks** at the end of each run
 - Provides strong **safety controls** around Azure publishing
+- Recommends the next **days lookback** based on the latest settled UTC date in the canonical CSV (gap + 1 overlap, capped at 90; fallback to 90 if no data)
+- Includes a **Publish to Azure** button that publishes from the local canonical CSV without downloading
+- Publish-only summaries include both **publish_requested** and **publish_attempted** to distinguish intent vs execution
 
 ---
 
@@ -70,6 +73,8 @@ Azure SQL publishing is **safe by default** and requires **multiple explicit act
    - Confirm a **final modal dialog** after seeing the Azure prep summary
 
 If **any** step is missing, **no database writes occur**.
+
+Publish-only is **non-destructive** and inserts only missing markets for the UserID + MarketID pair (if Azure is already up to date, the run no-ops with a clear message).
 
 ---
 
@@ -169,6 +174,7 @@ Notes:
 4. Watch live phase progress
 5. Review structured summary blocks
 6. (Optional) Publish to Azure if explicitly unlocked
+7. (Optional) Use **Publish to Azure** to push missing markets from the canonical CSV without downloading
 
 ---
 
