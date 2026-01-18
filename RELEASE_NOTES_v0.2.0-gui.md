@@ -5,7 +5,7 @@ It targets tag v0.2.0-gui on main.
 
 ## Highlights
 - Smart lookback recommendation based on the latest settledDate in the canonical CSV (UTC gap + 1 overlap, capped at 90).
-- Publish-only Azure button that publishes from the canonical CSV without downloading.
+- Publish-only Azure button allows publishing from the canonical CSV without downloading.
 - Cleared orders now capture Betfair itemDescription metadata with smoke checks for validation.
 
 ## Safety

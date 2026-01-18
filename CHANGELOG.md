@@ -21,4 +21,5 @@ This project follows Semantic Versioning (SemVer), even while pre-1.0.
 ### Notes
 - Repo hygiene improvements: .gitignore hardened for secrets, outputs, and build artifacts.
 
-[v0.2.0-gui]: <placeholder>
+### Upgrade notes
+- Existing users can upgrade safely; canonical CSV formats remain compatible.
