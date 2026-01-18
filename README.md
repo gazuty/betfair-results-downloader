@@ -10,12 +10,16 @@ The GUI is now the **official and recommended way** to run this project.
 
 1. Downloads **settled (cleared) orders** from Betfair using `betfairlightweight`
 2. Cleans and normalises the data
+3. Captures Betfair `itemDescription` metadata from cleared orders (`include_item_description=True`) for event, market, and runner context
 3. Enriches orders with **market & event metadata** (cached to avoid repeat API calls)
 4. Writes:
    - a **canonical CSV** (stable filename, always latest state)
    - **dated snapshot CSVs** (append-only history)
+   - itemDescription metadata is preserved end-to-end in both canonical and snapshot outputs
 5. Aggregates results to **market-level profit**
 6. *(Optional)* Publishes market-level results to **Azure SQL**
+
+Lightweight, non-blocking smoke logs note whether `itemDescription` fields are present during a run for validation only.
 
 > Core functionality is CSV generation. Azure SQL publishing is optional and heavily gated for safety.
 
