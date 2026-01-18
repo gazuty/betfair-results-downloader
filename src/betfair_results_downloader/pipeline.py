@@ -9,6 +9,7 @@ from .config import DownloaderConfig
 from .downloader_core import (
     fetch_cleared_orders_df,
     enrich_with_market_catalogue,
+    _log_item_description_smoke_check,
     prepare_azure_dataset,
     write_csv_outputs,
 )
@@ -91,6 +92,7 @@ def run_pipeline(
         }
 
     df_co = dl.df_co
+    _log_item_description_smoke_check(df_co, status_cb)
 
     def _unique_markets(df) -> int:
         try:
@@ -160,7 +162,7 @@ def run_pipeline(
     # 3) CSV outputs
     # -------------------
     say("Phase 3/4: Writing CSV outputs…")
-    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir)
+    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=say)
     csv_summary = {
         "canonical_path": str(csvr.canonical_path),
         "snapshot_path": str(csvr.snapshot_path),

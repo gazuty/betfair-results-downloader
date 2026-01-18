@@ -89,6 +89,7 @@ def _call_list_cleared_orders(
                 settled_date_range=settled_range,
                 from_record=from_record,
                 record_count=record_count,
+                include_item_description=True,  # include itemDescription fields (event/market/runner names) for downstream features
             )
         except APIError as e:
             msg = str(e)
@@ -167,7 +168,8 @@ def fetch_cleared_orders_df(
     for c in required_cols:
         if c not in df_co.columns:
             df_co[c] = pd.NA
-    df_co = df_co[required_cols]
+    # Keep all columns (including itemDescription.*) while ensuring required columns exist.
+    df_co = df_co[required_cols + [c for c in df_co.columns if c not in required_cols]]
 
     def determine_win(row: pd.Series) -> int:
         if (row["side"] == "BACK" and row["betOutcome"] == "LOST") or (row["side"] == "LAY" and row["betOutcome"] == "WON"):
@@ -367,10 +369,31 @@ def enrich_with_market_catalogue(
 # CSV outputs
 # -----------------------------
 
+def _log_item_description_smoke_check(
+    df: pd.DataFrame,
+    status_cb: Optional[callable] = None,
+) -> None:
+    emit = status_cb or print
+    cols = [c for c in df.columns if c.startswith("itemDescription")]
+    if not cols:
+        emit("SMOKE: WARNING - no itemDescription* columns present in cleared orders dataframe.")
+        return
+
+    emit(f"SMOKE: itemDescription columns found: {len(cols)} (e.g. {cols[:5]})")
+    for c in cols[:2]:
+        s = df[c].dropna().astype(str)
+        if s.empty:
+            continue
+        vals = s.head(3).tolist()
+        vals = [v[:120] + ("..." if len(v) > 120 else "") for v in vals]
+        emit(f"SMOKE: samples {c}: {vals}")
+
+
 def write_csv_outputs(
     *,
     df_co: pd.DataFrame,
     results_csv_dir: Path,
+    status_cb: Optional[callable] = None,
 ) -> CsvWriteResult:
     """
     Notebook Cells 7–8, ported:
@@ -386,6 +409,7 @@ def write_csv_outputs(
     update_csv_with_new_data(canonical_path, df_co)
 
     df_canonical = pd.read_csv(canonical_path)
+    _log_item_description_smoke_check(df_canonical, status_cb)
     df_canonical.to_csv(snapshot_path, index=False)
 
     return CsvWriteResult(
