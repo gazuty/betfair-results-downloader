@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import platform
@@ -12,8 +12,19 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .config import DownloaderConfig
-from .recommend import recommend_lookback_days
-from .run import run_downloader, publish_to_azure_from_canonical
+from .run import run_downloader, publish_to_azure_from_canonical_incremental
+from .azure_remediation import (
+    audit_duplicates,
+    backup_user_rows,
+    check_raw_userid_variants,
+    create_unique_index,
+    dedupe_user_marketid,
+    delete_user_rows,
+    detect_row_identifier,
+    get_scoped_user_id,
+    normalize_userid,
+    preview_normalize_userid,
+)
 from .secrets import (
     credentials_path,
     ensure_credentials_file_exists,
@@ -74,9 +85,6 @@ def format_block(title: str, data: object) -> str:
                 "include_greyhounds",
                 "enable_azure_sql",
                 "dry_run",
-                "last_settled_date_utc",
-                "recommended_days",
-                "recommendation_note",
             ]
         elif title.lower().startswith("download"):
             preferred = [
@@ -116,24 +124,44 @@ def format_block(title: str, data: object) -> str:
             preferred = [
                 "prep_attempted",
                 "publish_attempted",
-                "dry_run",
-                "enable_azure_sql",
-                "rows_filtered",
+                "rows_after_filter",
                 "markets_aggregated",
                 "rows_to_write_count",
-                "published",
+                "existing_rows_in_db",
+                "matching_rows_unchanged",
+                "rows_to_update",
+                "rows_to_insert",
+                "rows_db_only_not_in_new",
+                "inserted_rows",
+                "updated_rows",
+                "deleted_rows",
                 "message",
                 "user_id",
             ]
+        elif title.lower().startswith("azure tools"):
+            preferred = [
+                "user_id",
+                "table",
+                "total_rows",
+                "duplicated_marketids",
+                "rows_involved_in_duplication",
+                "duplicates_csv",
+                "rows_exported",
+                "backup_csv",
+                "rows_with_padding",
+                "rows_updated",
+                "pre_delete_rows",
+                "rows_deleted",
+                "post_delete_rows",
+                "index_name",
+                "created",
+                "message",
+            ]
         elif title.lower().startswith("publish-only"):
             preferred = [
+                "attempted",
                 "canonical_path",
-                "canonical_rows_read",
-                "markets_aggregated",
-                "existing_markets_in_azure_count",
-                "new_markets_to_publish",
-                "publish_attempted",
-                "inserted_rows",
+                "rows_loaded",
                 "message",
             ]
 
@@ -243,7 +271,7 @@ class FirstRunWizard(tk.Toplevel):
         ttk.Label(
             frm,
             text=(
-                "Welcome! Let’s set up Betfair Results Downloader.\n"
+                "Welcome! LetÔÇÖs set up Betfair Results Downloader.\n"
                 "Choose where to save your credentials and where to store CSV outputs."
             ),
             justify="left",
@@ -256,13 +284,13 @@ class FirstRunWizard(tk.Toplevel):
 
         ttk.Label(pf, text="Credentials file").grid(row=0, column=0, sticky="w")
         ttk.Entry(pf, textvariable=self.var_creds_path).grid(row=0, column=1, sticky="ew", padx=(10, 10))
-        ttk.Button(pf, text="Browse…", command=self._choose_creds_file).grid(row=0, column=2, sticky="e")
+        ttk.Button(pf, text="BrowseÔÇª", command=self._choose_creds_file).grid(row=0, column=2, sticky="e")
 
         ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(pf, textvariable=self.var_results_dir).grid(
             row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0)
         )
-        ttk.Button(pf, text="Browse…", command=self._choose_results_dir).grid(row=1, column=2, sticky="e", pady=(6, 0))
+        ttk.Button(pf, text="BrowseÔÇª", command=self._choose_results_dir).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         # --- Betfair ---
         bf = ttk.LabelFrame(frm, text="Betfair", padding=10)
@@ -273,12 +301,12 @@ class FirstRunWizard(tk.Toplevel):
         ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="Password").grid(row=1, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(
+        ttk.Entry(bf, textvariable=self.var_bf_pass, show="ÔÇó").grid(
             row=1, column=1, columnspan=2, sticky="ew", padx=(10, 0)
         )
 
         ttk.Label(bf, text="App Key").grid(row=2, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(
+        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="ÔÇó").grid(
             row=2, column=1, columnspan=2, sticky="ew", padx=(10, 0)
         )
 
@@ -329,7 +357,7 @@ class FirstRunWizard(tk.Toplevel):
         self.ent_az_user.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="Password").grid(row=4, column=0, sticky="w")
-        self.ent_az_pass = ttk.Entry(az, textvariable=self.var_az_pass, show="•")
+        self.ent_az_pass = ttk.Entry(az, textvariable=self.var_az_pass, show="ÔÇó")
         self.ent_az_pass.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="ODBC Driver").grid(row=5, column=0, sticky="w")
@@ -436,9 +464,6 @@ class App(ttk.Frame):
         # --- Vars (Run config) ---
         self.var_user_id = tk.StringVar(value=str(get_nested(self.creds, "user.user_id", DEFAULT_USER_ID)))
         self.var_days = tk.StringVar(value=str(get_nested(self.creds, "user.days", 7)))
-        self.var_reco_note = tk.StringVar(value="")
-        self._reco_last_settled_date_utc: object | None = None
-        self._reco_days: int | None = None
 
         self.var_horses = tk.BooleanVar(value=bool(get_nested(self.creds, "user.include_horses", True)))
         self.var_greyhounds = tk.BooleanVar(value=bool(get_nested(self.creds, "user.include_greyhounds", True)))
@@ -457,6 +482,11 @@ class App(ttk.Frame):
         self.var_az_pass = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.password", "")))
         self.var_az_driver = tk.StringVar(value=str(get_nested(self.creds, "azure_sql.driver", "ODBC Driver 18 for SQL Server")))
 
+        # --- Vars (Azure tools) ---
+        self.var_azure_tools_enabled = tk.BooleanVar(value=False)
+        self.var_azure_tools_phrase = tk.StringVar(value="")
+        self.var_azure_tools_user_id = tk.StringVar(value="")
+
         # --- Runtime / status ---
         self._status_q: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._worker_thread: threading.Thread | None = None
@@ -464,10 +494,12 @@ class App(ttk.Frame):
         self._last_artifacts_dir: Path | None = None
 
         self._build()
-        self._refresh_lookback_recommendation()
         self.master.after(100, self._poll_status_queue)
         self._refresh_publish_unlock_state()
+        self._refresh_azure_tools_user_id()
+        self._refresh_azure_tools_state()
         self.var_publish_text.trace_add("write", lambda *_: self._refresh_publish_button_state())
+        self.var_azure_tools_phrase.trace_add("write", lambda *_: self._refresh_azure_tools_state())
 
         # First-run setup wizard
         if first_run:
@@ -479,7 +511,7 @@ class App(ttk.Frame):
     # ---------------- First-run onboarding ----------------
 
     def _run_first_time_setup(self) -> None:
-        self._log("First run detected: launching setup wizard…")
+        self._log("First run detected: launching setup wizardÔÇª")
 
         wiz = FirstRunWizard(self.master, self.creds, default_creds_path=self._creds_path)
         self.master.wait_window(wiz)
@@ -504,7 +536,6 @@ class App(ttk.Frame):
 
         # Update bound Vars
         self.var_results_dir.set(str(get_nested(self.creds, "paths.results_csv_dir", "")))
-        self._refresh_lookback_recommendation()
 
         self.var_bf_user.set(str(get_nested(self.creds, "betfair.username", "")))
         self.var_bf_pass.set(str(get_nested(self.creds, "betfair.password", "")))
@@ -531,23 +562,23 @@ class App(ttk.Frame):
             return
 
         # Friendly checklist
-        self._log(f"✅ credentials file created: {self._creds_path}")
+        self._log(f"Ô£à credentials file created: {self._creds_path}")
 
         results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
         if results_dir_raw:
-            self._log(f"✅ results directory configured: {results_dir_raw}")
+            self._log(f"Ô£à results directory configured: {results_dir_raw}")
         else:
-            self._log("⚠️ results directory not configured yet (paths.results_csv_dir).")
+            self._log("ÔÜá´©Å results directory not configured yet (paths.results_csv_dir).")
 
         if bool(get_nested(self.creds, "user.dry_run", True)):
-            self._log("✅ dry-run enabled (safe-by-default)")
+            self._log("Ô£à dry-run enabled (safe-by-default)")
         else:
-            self._log("⚠️ dry-run disabled (publishing still requires GUI unlock + confirmation)")
+            self._log("ÔÜá´©Å dry-run disabled (publishing still requires GUI unlock + confirmation)")
 
         if bool(get_nested(self.creds, "user.enable_azure_sql", False)):
-            self._log("ℹ️ Azure enabled (still safe-by-default)")
+            self._log("Ôä╣´©Å Azure enabled (still safe-by-default)")
         else:
-            self._log("ℹ️ Azure disabled")
+            self._log("Ôä╣´©Å Azure disabled")
 
         messagebox.showinfo("Setup complete", "First run setup saved. You can now run the downloader.")
         self._refresh_publish_unlock_state()
@@ -563,7 +594,7 @@ class App(ttk.Frame):
         self.master.rowconfigure(0, weight=1)
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(4, weight=1)
+        self.rowconfigure(5, weight=1)
 
         # --- Paths ---
         pf = ttk.LabelFrame(self, text="Paths", padding=10)
@@ -574,13 +605,13 @@ class App(ttk.Frame):
         ttk.Entry(pf, textvariable=self.var_creds_file, state="readonly").grid(
             row=0, column=1, sticky="ew", padx=(10, 10)
         )
-        ttk.Button(pf, text="Change…", command=self.on_change_credentials_file).grid(row=0, column=2, sticky="e")
+        ttk.Button(pf, text="ChangeÔÇª", command=self.on_change_credentials_file).grid(row=0, column=2, sticky="e")
 
         ttk.Label(pf, text="CSV results folder").grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(pf, textvariable=self.var_results_dir).grid(
             row=1, column=1, sticky="ew", padx=(10, 10), pady=(6, 0)
         )
-        ttk.Button(pf, text="Browse…", command=self.on_choose_results_folder).grid(
+        ttk.Button(pf, text="BrowseÔÇª", command=self.on_choose_results_folder).grid(
             row=1, column=2, sticky="e", pady=(6, 0)
         )
 
@@ -593,10 +624,10 @@ class App(ttk.Frame):
         ttk.Entry(bf, textvariable=self.var_bf_user).grid(row=0, column=1, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="Password").grid(row=1, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_pass, show="•").grid(row=1, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_pass, show="ÔÇó").grid(row=1, column=1, sticky="ew", padx=(10, 0))
 
         ttk.Label(bf, text="App Key").grid(row=2, column=0, sticky="w")
-        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="•").grid(row=2, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(bf, textvariable=self.var_bf_appkey, show="ÔÇó").grid(row=2, column=1, sticky="ew", padx=(10, 0))
 
         # --- Run config ---
         rc = ttk.LabelFrame(self, text="Run Configuration", padding=10)
@@ -610,15 +641,11 @@ class App(ttk.Frame):
         ttk.Label(rc, text="Days to download").grid(row=0, column=2, sticky="w")
         ttk.Entry(rc, textvariable=self.var_days, width=8).grid(row=0, column=3, sticky="w", padx=(10, 0))
 
-        ttk.Label(rc, textvariable=self.var_reco_note, wraplength=680).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(4, 0)
-        )
-
         ttk.Checkbutton(rc, text="Horses (eventTypeId 7)", variable=self.var_horses).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
         ttk.Checkbutton(rc, text="Greyhounds (eventTypeId 4339)", variable=self.var_greyhounds).grid(
-            row=2, column=2, columnspan=2, sticky="w", pady=(6, 0)
+            row=1, column=2, columnspan=2, sticky="w", pady=(6, 0)
         )
 
         # --- Azure ---
@@ -661,14 +688,63 @@ class App(ttk.Frame):
         ttk.Entry(az, textvariable=self.var_az_user).grid(row=4, column=1, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="Password").grid(row=5, column=0, sticky="w")
-        ttk.Entry(az, textvariable=self.var_az_pass, show="•").grid(row=5, column=1, sticky="ew", padx=(10, 0))
+        ttk.Entry(az, textvariable=self.var_az_pass, show="ÔÇó").grid(row=5, column=1, sticky="ew", padx=(10, 0))
 
         ttk.Label(az, text="ODBC Driver").grid(row=6, column=0, sticky="w")
         ttk.Entry(az, textvariable=self.var_az_driver).grid(row=6, column=1, sticky="ew", padx=(10, 0))
 
+        # --- Azure Tools ---
+        tools = ttk.LabelFrame(self, text="Azure Tools", padding=10)
+        tools.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        tools.columnconfigure(1, weight=1)
+
+        ttk.Label(tools, text="Active UserID").grid(row=0, column=0, sticky="w")
+        ttk.Label(tools, textvariable=self.var_azure_tools_user_id).grid(row=0, column=1, sticky="w")
+
+        self.btn_az_health = ttk.Button(
+            tools, text="Azure Health Check (Read-only)", command=self.on_azure_health_check
+        )
+        self.btn_az_health.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        self.btn_az_backup = ttk.Button(
+            tools, text="Export Azure Backup (My Rows)", command=self.on_azure_backup
+        )
+        self.btn_az_backup.grid(row=1, column=1, sticky="w", pady=(6, 0), padx=(10, 0))
+
+        adv = ttk.LabelFrame(tools, text="Advanced Tools (Write Operations)", padding=10)
+        adv.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        adv.columnconfigure(1, weight=1)
+
+        self.chk_azure_tools = ttk.Checkbutton(
+            adv,
+            text="Enable Advanced Azure Tools",
+            variable=self.var_azure_tools_enabled,
+            command=self._refresh_azure_tools_state,
+        )
+        self.chk_azure_tools.grid(row=0, column=0, sticky="w")
+
+        ttk.Label(adv, text="Type to confirm").grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.ent_azure_tools_phrase = ttk.Entry(adv, textvariable=self.var_azure_tools_phrase, width=20)
+        self.ent_azure_tools_phrase.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        self.btn_az_normalize = ttk.Button(
+            adv, text="Normalize My UserID (Padding Fix)", command=self.on_azure_normalize
+        )
+        self.btn_az_normalize.grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        self.btn_az_index = ttk.Button(
+            adv, text="Create/Verify My Unique Index", command=self.on_azure_create_index
+        )
+        self.btn_az_index.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(8, 0))
+
+        self.btn_az_cleanup = ttk.Button(
+            adv, text="Emergency Cleanup Wizard...", command=self.on_azure_cleanup_wizard
+        )
+        self.btn_az_cleanup.grid(row=1, column=2, sticky="e", padx=(10, 0), pady=(8, 0))
+
         # --- Output + buttons ---
         out = ttk.LabelFrame(self, text="Output", padding=10)
-        out.grid(row=4, column=0, sticky="nsew")
+        out.grid(row=5, column=0, sticky="nsew")
         out.columnconfigure(0, weight=1)
         out.rowconfigure(1, weight=1)
 
@@ -695,7 +771,7 @@ class App(ttk.Frame):
         self._log("Tip: Dry run is ON by default. Non-dry-run publishing requires explicit unlock + confirmation.")
 
         btns = ttk.Frame(self)
-        btns.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        btns.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         btns.columnconfigure(0, weight=1)
 
         self.btn_clear = ttk.Button(btns, text="Clear Output", command=self.on_clear)
@@ -721,7 +797,7 @@ class App(ttk.Frame):
         self.btn_run = ttk.Button(btns, text="Run Downloader", command=self.on_run)
         self.btn_run.grid(row=0, column=6, sticky="e")
 
-        self.btn_publish = ttk.Button(btns, text="Publish to Azure", command=self.on_publish_only)
+        self.btn_publish = ttk.Button(btns, text="Publish to Azure", command=self.on_publish_only, state="disabled")
         self.btn_publish.grid(row=0, column=7, sticky="e", padx=(8, 0))
 
     # ---------------- Helpers ----------------
@@ -757,6 +833,9 @@ class App(ttk.Frame):
         set_nested(self.creds, "azure_sql.password", self.var_az_pass.get())
         set_nested(self.creds, "azure_sql.driver", self.var_az_driver.get().strip())
 
+        self._refresh_azure_tools_user_id()
+        self._refresh_azure_tools_state()
+
     def _build_config_from_ui(self) -> DownloaderConfig:
         days = int(self.var_days.get().strip())
         if days <= 0:
@@ -771,29 +850,6 @@ class App(ttk.Frame):
             user_id=self.var_user_id.get().strip() or DEFAULT_USER_ID,
         )
 
-    def _refresh_lookback_recommendation(self) -> None:
-        results_dir_raw = self.var_results_dir.get().strip()
-        if not results_dir_raw:
-            self._reco_days = 90
-            self._reco_last_settled_date_utc = None
-            self.var_reco_note.set(
-                "No existing data - Recommend 90 days capture, however this may take some time."
-            )
-            self.var_days.set(str(self._reco_days))
-            return
-
-        try:
-            recommended_days, note, last_settled_utc = recommend_lookback_days(Path(results_dir_raw))
-        except Exception:
-            recommended_days, note, last_settled_utc = 90, (
-                "No existing data - Recommend 90 days capture, however this may take some time."
-            ), None
-
-        self._reco_days = int(recommended_days)
-        self._reco_last_settled_date_utc = last_settled_utc
-        self.var_reco_note.set(note)
-        self.var_days.set(str(self._reco_days))
-
     def _set_running_state(self, running: bool) -> None:
         state = "disabled" if running else "normal"
         self.btn_run.configure(state=state)
@@ -801,6 +857,17 @@ class App(ttk.Frame):
             self.btn_publish.configure(state="disabled")
         else:
             self._refresh_publish_button_state()
+        try:
+            if running:
+                self.btn_az_health.configure(state="disabled")
+                self.btn_az_backup.configure(state="disabled")
+                self.btn_az_normalize.configure(state="disabled")
+                self.btn_az_index.configure(state="disabled")
+                self.btn_az_cleanup.configure(state="disabled")
+            else:
+                self._refresh_azure_tools_state()
+        except Exception:
+            pass
         self.btn_save.configure(state=state)
         self.btn_validate.configure(state=state)
         self.btn_clear.configure(state="normal")
@@ -835,32 +902,83 @@ class App(ttk.Frame):
             self.ent_publish_text.configure(state="normal")
         except Exception:
             pass
-
         self._refresh_publish_button_state()
 
-    def _azure_credentials_ok(self) -> bool:
-        try:
-            self._sync_to_creds()
-        except Exception:
-            return False
-
-        v = validate_credentials(self.creds)
-        if not v.ok:
-            return False
-
+    def _get_scoped_user_id_from_creds(self) -> str:
         user = self.creds.get("user", {}) or {}
-        db_user_id = (user.get("db_user_id") or "").strip()
-        if not db_user_id:
-            return False
+        db_user_id = str(user.get("db_user_id") or "").strip()
+        if db_user_id:
+            return db_user_id
+        return (str(user.get("user_id") or "").strip() or DEFAULT_USER_ID)
 
+    def _refresh_azure_tools_user_id(self) -> None:
+        try:
+            self.var_azure_tools_user_id.set(self._get_scoped_user_id_from_creds())
+        except Exception:
+            self.var_azure_tools_user_id.set(DEFAULT_USER_ID)
+
+    def _azure_tools_ready(self) -> bool:
+        az = self.creds.get("azure_sql", {}) or {}
+        user = self.creds.get("user", {}) or {}
+        if not str(user.get("db_user_id") or user.get("user_id") or "").strip():
+            return False
+        if not str(az.get("server") or "").strip():
+            return False
+        if not str(az.get("database") or "").strip():
+            return False
+        if not str(az.get("username") or "").strip():
+            return False
+        if not str(az.get("password") or "").strip():
+            return False
         return True
+
+    def _refresh_azure_tools_state(self) -> None:
+        ready = self._azure_tools_ready()
+        adv_enabled = bool(self.var_azure_tools_enabled.get())
+        enable_az = bool(self.var_enable_azure.get())
+        dry_run = bool(self.var_dry_run.get())
+        can_write = ready and enable_az and (not dry_run) and adv_enabled
+
+        try:
+            self.btn_az_health.configure(state=("normal" if ready else "disabled"))
+            self.btn_az_backup.configure(state=("normal" if ready else "disabled"))
+            self.btn_az_normalize.configure(state=("normal" if can_write else "disabled"))
+            self.btn_az_index.configure(state=("normal" if can_write else "disabled"))
+            self.btn_az_cleanup.configure(state=("normal" if can_write else "disabled"))
+            self.chk_azure_tools.configure(state=("normal" if ready else "disabled"))
+            self.ent_azure_tools_phrase.configure(state=("normal" if adv_enabled and ready else "disabled"))
+        except Exception:
+            pass
+
+    def _require_advanced_tools(self, *, phrase: str, action: str) -> None:
+        if not bool(self.var_enable_azure.get()):
+            raise ValueError("Azure upload is disabled. Enable Azure upload to use Azure Tools.")
+        if bool(self.var_dry_run.get()):
+            raise ValueError("Dry run is enabled. Turn it off to use write operations.")
+        if not bool(self.var_azure_tools_enabled.get()):
+            raise ValueError("Enable Advanced Azure Tools to proceed.")
+        if self.var_azure_tools_phrase.get().strip() != phrase:
+            raise ValueError(f"Type {phrase!r} to confirm {action}.")
+
+    def _confirm_action_threadsafe(self, title: str, message: str) -> bool:
+        ev = threading.Event()
+        result_holder: dict[str, bool] = {"ok": False}
+
+        def _do():
+            try:
+                result_holder["ok"] = messagebox.askokcancel(title, message, icon="warning")
+            finally:
+                ev.set()
+
+        self.master.after(0, _do)
+        ev.wait()
+        return bool(result_holder["ok"])
 
     def _refresh_publish_button_state(self) -> None:
         enable_az = bool(self.var_enable_azure.get())
         dry_run = bool(self.var_dry_run.get())
         unlocked = bool(self.var_allow_publish.get()) and (self.var_publish_text.get().strip() == "PUBLISH")
-
-        can_publish = enable_az and self._azure_credentials_ok() and (dry_run or unlocked)
+        can_publish = enable_az and (not dry_run) and unlocked
         try:
             self.btn_publish.configure(state=("normal" if can_publish else "disabled"))
         except Exception:
@@ -868,6 +986,9 @@ class App(ttk.Frame):
 
     def _status(self, msg: str) -> None:
         self._status_q.put(("log", msg))
+
+    def _get_azure_tools_table(self) -> str:
+        return os.getenv("AZURE_SQL_TABLE") or "dbo.MarketResults"
 
     def _poll_status_queue(self) -> None:
         try:
@@ -879,6 +1000,8 @@ class App(ttk.Frame):
                     self._handle_run_done(payload)
                 elif kind == "publish_done":
                     self._handle_publish_done(payload)
+                elif kind == "azure_tools_done":
+                    self._handle_azure_tools_done(payload)
                 elif kind == "error":
                     self._handle_run_error(payload)
         except queue.Empty:
@@ -944,15 +1067,50 @@ class App(ttk.Frame):
             self._log("Publish-only completed.")
 
         if isinstance(result, dict):
-            summary = result.get("summary")
+            summary = result.get("publish_only")
             if summary is not None:
                 self._log_block("Publish-only summary", summary)
+
+            azure = result.get("azure")
+            if azure is not None:
+                self._log_block("Azure summary", azure)
 
             if result.get("ok") is False:
                 messagebox.showerror("Publish failed", str(result.get("message", "Publish failed.")))
                 return
 
+        results_dir_raw = get_nested(self.creds, "paths.results_csv_dir", None)
+        if results_dir_raw:
+            self._last_results_dir = Path(str(results_dir_raw))
+            if self._last_results_dir.exists():
+                self.btn_open.configure(state="normal")
+
         messagebox.showinfo("Publish complete", "Publish-only run finished. See Output for details.")
+
+    def _handle_azure_tools_done(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            title = payload.get("title") or "Azure Tools"
+            summary = payload.get("summary")
+            message = payload.get("message")
+            suppress = bool(payload.get("suppress_dialog"))
+            defer_reset = bool(payload.get("defer_running_reset"))
+
+            if message:
+                self._log(str(message))
+            if summary is not None:
+                self._log_block(title, summary)
+
+            if payload.get("ok") is False:
+                self._set_running_state(False)
+                messagebox.showerror("Azure Tools", str(message or "Azure Tools action failed."))
+                return
+            if not defer_reset:
+                self._set_running_state(False)
+
+        if isinstance(payload, dict) and payload.get("ok") is not False:
+            if suppress:
+                return
+            messagebox.showinfo("Azure Tools", "Azure tools action completed. See Output for details.")
 
     def _handle_run_error(self, err_text: object) -> None:
         self._set_running_state(False)
@@ -966,7 +1124,8 @@ class App(ttk.Frame):
             f"UserID: {user_id}\n"
             f"Markets to write: {markets:,}\n"
             f"Rows to write: {rows:,}\n\n"
-            "This will DELETE existing rows for this UserID and then INSERT the new rows.\n\n"
+            "This will INSERT new rows and UPDATE changed rows for this UserID.\n"
+            "Existing rows not present in the new dataset will be left unchanged.\n\n"
             "Proceed?"
         )
         return messagebox.askokcancel("Confirm Azure Publish", msg, icon="warning")
@@ -1013,7 +1172,6 @@ class App(ttk.Frame):
         if folder:
             self.var_results_dir.set(str(Path(folder)))
             self._log(f"Selected results folder: {folder}")
-            self._refresh_lookback_recommendation()
 
     def on_change_credentials_file(self) -> None:
         initial = self.var_creds_file.get().strip()
@@ -1089,7 +1247,6 @@ class App(ttk.Frame):
 
             self._log(f"Saved credentials: {self._creds_path}")
             messagebox.showinfo("Saved", f"Settings saved to:\n{self._creds_path}")
-            self._refresh_publish_button_state()
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
@@ -1099,12 +1256,11 @@ class App(ttk.Frame):
             v = validate_credentials(self.creds)
 
             if v.ok:
-                self._log("VALIDATION OK ✅")
+                self._log("VALIDATION OK Ô£à")
                 messagebox.showinfo("Validation", "Credentials look valid.")
-                self._refresh_publish_button_state()
                 return
 
-            self._log("VALIDATION FAILED ❌")
+            self._log("VALIDATION FAILED ÔØî")
             for err in getattr(v, "errors", []) or []:
                 self._log(f"- {err}")
             messagebox.showerror("Validation", "Credentials validation failed. See Output for details.")
@@ -1113,6 +1269,360 @@ class App(ttk.Frame):
             self._log(str(e))
             self._log(traceback.format_exc())
             messagebox.showerror("Validation error", str(e))
+
+    def _start_azure_tool_worker(self, *, title: str, worker) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            messagebox.showinfo("Busy", "A run is already in progress.")
+            return
+
+        self._set_running_state(True)
+        self._worker_thread = threading.Thread(
+            target=worker,
+            daemon=True,
+        )
+        self._worker_thread.start()
+
+    def on_azure_health_check(self) -> None:
+        try:
+            self._sync_to_creds()
+            user_id = self._get_scoped_user_id_from_creds()
+            table = self._get_azure_tools_table()
+
+            def _worker() -> None:
+                try:
+                    self._status("Azure Tools: running health check...")
+                    summary = audit_duplicates(user_id, table)
+                    self._status_q.put(
+                        (
+                            "azure_tools_done",
+                            {
+                                "ok": True,
+                                "title": "Azure Tools - Health Check",
+                                "summary": summary,
+                                "message": "Health check completed.",
+                            },
+                        )
+                    )
+                except Exception as e:
+                    self._status_q.put(
+                        ("azure_tools_done", {"ok": False, "title": "Azure Tools - Health Check", "message": str(e)})
+                    )
+
+            self._start_azure_tool_worker(title="Azure Tools - Health Check", worker=_worker)
+        except Exception as e:
+            messagebox.showerror("Azure Tools", str(e))
+
+    def on_azure_backup(self) -> None:
+        try:
+            self._sync_to_creds()
+            user_id = self._get_scoped_user_id_from_creds()
+            table = self._get_azure_tools_table()
+
+            def _worker() -> None:
+                try:
+                    self._status("Azure Tools: exporting backup...")
+                    summary = backup_user_rows(user_id, table)
+                    self._status_q.put(
+                        (
+                            "azure_tools_done",
+                            {
+                                "ok": True,
+                                "title": "Azure Tools - Backup",
+                                "summary": summary,
+                                "message": "Backup completed.",
+                            },
+                        )
+                    )
+                except Exception as e:
+                    self._status_q.put(
+                        ("azure_tools_done", {"ok": False, "title": "Azure Tools - Backup", "message": str(e)})
+                    )
+
+            self._start_azure_tool_worker(title="Azure Tools - Backup", worker=_worker)
+        except Exception as e:
+            messagebox.showerror("Azure Tools", str(e))
+
+    def on_azure_normalize(self) -> None:
+        try:
+            self._sync_to_creds()
+            self._require_advanced_tools(phrase="NORMALIZE", action="Normalize My UserID")
+            user_id = self._get_scoped_user_id_from_creds()
+            table = self._get_azure_tools_table()
+
+            def _worker() -> None:
+                try:
+                    preview = preview_normalize_userid(user_id, table)
+                    msg = (
+                        "You are about to normalize UserID padding for this user.\n\n"
+                        f"UserID: {user_id}\n"
+                        f"Rows affected: {preview['rows_with_padding']}\n\n"
+                        "Proceed?"
+                    )
+                    if not self._confirm_action_threadsafe("Confirm Normalize", msg):
+                        self._status_q.put(
+                            ("azure_tools_done", {"ok": True, "title": "Azure Tools - Normalize", "message": "Cancelled."})
+                        )
+                        return
+
+                    self._status("Azure Tools: normalizing UserID...")
+                    summary = normalize_userid(user_id, table)
+                    self._status_q.put(
+                        (
+                            "azure_tools_done",
+                            {
+                                "ok": True,
+                                "title": "Azure Tools - Normalize",
+                                "summary": summary,
+                                "message": summary.get("message", "Normalization completed."),
+                            },
+                        )
+                    )
+                except Exception as e:
+                    self._status_q.put(
+                        ("azure_tools_done", {"ok": False, "title": "Azure Tools - Normalize", "message": str(e)})
+                    )
+
+            self._start_azure_tool_worker(title="Azure Tools - Normalize", worker=_worker)
+        except Exception as e:
+            messagebox.showerror("Azure Tools", str(e))
+
+    def on_azure_create_index(self) -> None:
+        try:
+            self._sync_to_creds()
+            self._require_advanced_tools(phrase="INDEX", action="Create/Verify My Unique Index")
+            user_id = self._get_scoped_user_id_from_creds()
+            table = self._get_azure_tools_table()
+            index_name = os.getenv("AZURE_SQL_UNIQUE_INDEX_NAME") or None
+
+            def _worker() -> None:
+                try:
+                    variants = check_raw_userid_variants(user_id, table)
+                    msg = (
+                        "You are about to create/verify a scoped unique index for this user.\n\n"
+                        f"UserID: {user_id}\n"
+                        f"Raw variants: {variants['variant_count']}\n\n"
+                        "Proceed?"
+                    )
+                    if not self._confirm_action_threadsafe("Confirm Index", msg):
+                        self._status_q.put(
+                            ("azure_tools_done", {"ok": True, "title": "Azure Tools - Index", "message": "Cancelled."})
+                        )
+                        return
+
+                    self._status("Azure Tools: creating/verifying scoped index...")
+                    summary = create_unique_index(
+                        scope="scoped",
+                        user_id=user_id,
+                        table=table,
+                        index_name=index_name,
+                    )
+                    self._status_q.put(
+                        (
+                            "azure_tools_done",
+                            {
+                                "ok": True,
+                                "title": "Azure Tools - Index",
+                                "summary": summary,
+                                "message": summary.get("message", "Index operation completed."),
+                            },
+                        )
+                    )
+                except Exception as e:
+                    self._status_q.put(
+                        ("azure_tools_done", {"ok": False, "title": "Azure Tools - Index", "message": str(e)})
+                    )
+
+            self._start_azure_tool_worker(title="Azure Tools - Index", worker=_worker)
+        except Exception as e:
+            messagebox.showerror("Azure Tools", str(e))
+
+    def on_azure_cleanup_wizard(self) -> None:
+        try:
+            self._sync_to_creds()
+            if not bool(self.var_enable_azure.get()):
+                raise ValueError("Azure upload is disabled. Enable Azure upload to use Azure Tools.")
+            if bool(self.var_dry_run.get()):
+                raise ValueError("Dry run is enabled. Turn it off to use write operations.")
+            if not bool(self.var_azure_tools_enabled.get()):
+                raise ValueError("Enable Advanced Azure Tools to proceed.")
+            user_id = self._get_scoped_user_id_from_creds()
+            table = self._get_azure_tools_table()
+
+            wiz = tk.Toplevel(self.master)
+            wiz.title("Emergency Cleanup Wizard")
+            wiz.resizable(False, False)
+
+            var_choice = tk.StringVar(value="reset")
+            var_status = tk.StringVar(value="Ready.")
+            var_backup_done = tk.BooleanVar(value=False)
+
+            ttk.Label(wiz, text="Choose remediation option:", justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+            rb_reset = ttk.Radiobutton(
+                wiz,
+                text="Reset my Azure rows and republish from canonical CSV (recommended)",
+                variable=var_choice,
+                value="reset",
+            )
+            rb_reset.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+            identifier = detect_row_identifier(table)
+            rb_dedupe = ttk.Radiobutton(
+                wiz,
+                text="Attempt surgical dedupe (only if safe row identifier exists)",
+                variable=var_choice,
+                value="dedupe",
+                state=("normal" if identifier else "disabled"),
+            )
+            rb_dedupe.grid(row=2, column=0, columnspan=2, sticky="w")
+
+            ttk.Label(wiz, textvariable=var_status).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+            def _run_backup() -> None:
+                def _worker() -> None:
+                    try:
+                        self._status("Azure Tools: wizard backup...")
+                        summary = backup_user_rows(user_id, table)
+                        self.master.after(0, lambda: (var_backup_done.set(True), var_status.set("Backup complete.")))
+                        self._status_q.put(
+                            ("azure_tools_done", {"ok": True, "title": "Azure Tools - Backup", "summary": summary})
+                        )
+                    except Exception as e:
+                        self._status_q.put(
+                            ("azure_tools_done", {"ok": False, "title": "Azure Tools - Backup", "message": str(e)})
+                        )
+
+                self._start_azure_tool_worker(title="Azure Tools - Backup", worker=_worker)
+
+            def _run_cleanup() -> None:
+                if not var_backup_done.get():
+                    messagebox.showerror("Wizard", "Run backup first.")
+                    return
+
+                choice = var_choice.get()
+                phrase = "WIPE MY ROWS" if choice == "reset" else "DEDUPE"
+                if self.var_azure_tools_phrase.get().strip() != phrase:
+                    messagebox.showerror("Wizard", f"Type {phrase!r} to confirm this action.")
+                    return
+
+                msg = (
+                    "You are about to run emergency cleanup.\n\n"
+                    f"UserID: {user_id}\n"
+                    f"Mode: {choice}\n\n"
+                    "Proceed?"
+                )
+                if not messagebox.askokcancel("Confirm Emergency Cleanup", msg, icon="warning"):
+                    return
+
+                def _worker() -> None:
+                    try:
+                        self._status("Azure Tools: wizard audit...")
+                        audit_summary = audit_duplicates(user_id, table)
+                        self._status_q.put(
+                            (
+                                "azure_tools_done",
+                                {
+                                    "ok": True,
+                                    "title": "Azure Tools - Audit",
+                                    "summary": audit_summary,
+                                    "suppress_dialog": True,
+                                    "defer_running_reset": True,
+                                },
+                            )
+                        )
+
+                        if choice == "dedupe":
+                            self._status("Azure Tools: wizard dedupe...")
+                            dedupe_summary = dedupe_user_marketid(user_id, table)
+                            self._status_q.put(
+                                (
+                                    "azure_tools_done",
+                                    {
+                                        "ok": True,
+                                        "title": "Azure Tools - Dedupe",
+                                        "summary": dedupe_summary,
+                                        "suppress_dialog": True,
+                                        "defer_running_reset": True,
+                                    },
+                                )
+                            )
+                        else:
+                            self._status("Azure Tools: wizard delete...")
+                            delete_summary = delete_user_rows(user_id, table)
+                            self._status_q.put(
+                                (
+                                    "azure_tools_done",
+                                    {
+                                        "ok": True,
+                                        "title": "Azure Tools - Delete",
+                                        "summary": delete_summary,
+                                        "suppress_dialog": True,
+                                        "defer_running_reset": True,
+                                    },
+                                )
+                            )
+
+                        self._status("Azure Tools: wizard normalize...")
+                        normalize_summary = normalize_userid(user_id, table)
+                        self._status_q.put(
+                            (
+                                "azure_tools_done",
+                                {
+                                    "ok": True,
+                                    "title": "Azure Tools - Normalize",
+                                    "summary": normalize_summary,
+                                    "suppress_dialog": True,
+                                    "defer_running_reset": True,
+                                },
+                            )
+                        )
+
+                        self._status("Azure Tools: wizard index...")
+                        index_summary = create_unique_index(scope="scoped", user_id=user_id, table=table, index_name=None)
+                        self._status_q.put(
+                            (
+                                "azure_tools_done",
+                                {
+                                    "ok": True,
+                                    "title": "Azure Tools - Index",
+                                    "summary": index_summary,
+                                    "suppress_dialog": True,
+                                    "defer_running_reset": True,
+                                },
+                            )
+                        )
+
+                        self._status("Azure Tools: wizard final audit...")
+                        final_audit = audit_duplicates(user_id, table)
+                        self._status_q.put(
+                            (
+                                "azure_tools_done",
+                                {
+                                    "ok": True,
+                                    "title": "Azure Tools - Final Audit",
+                                    "summary": final_audit,
+                                },
+                            )
+                        )
+
+                        self.master.after(
+                            0,
+                            lambda: var_status.set("Cleanup complete. Now click 'Publish to Azure' to repopulate."),
+                        )
+                    except Exception as e:
+                        self._status_q.put(
+                            ("azure_tools_done", {"ok": False, "title": "Azure Tools - Wizard", "message": str(e)})
+                        )
+
+                self._start_azure_tool_worker(title="Azure Tools - Wizard", worker=_worker)
+
+            btn_backup = ttk.Button(wiz, text="Run Backup", command=_run_backup)
+            btn_backup.grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+            btn_cleanup = ttk.Button(wiz, text="Run Cleanup", command=_run_cleanup)
+            btn_cleanup.grid(row=4, column=1, sticky="e", pady=(8, 0))
+
+        except Exception as e:
+            messagebox.showerror("Azure Tools", str(e))
 
     def on_run(self) -> None:
         if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -1140,11 +1650,6 @@ class App(ttk.Frame):
                     "results_csv_dir": results_dir_raw or "(missing: paths.results_csv_dir)",
                     "enable_azure_sql": bool(self.var_enable_azure.get()),
                     "dry_run": bool(self.var_dry_run.get()),
-                    "last_settled_date_utc": (
-                        str(self._reco_last_settled_date_utc) if self._reco_last_settled_date_utc else None
-                    ),
-                    "recommended_days": self._reco_days,
-                    "recommendation_note": self.var_reco_note.get(),
                 },
             )
 
@@ -1184,22 +1689,25 @@ class App(ttk.Frame):
         try:
             self.txt.delete("1.0", "end")
             self._log("-" * 64)
-            self._log("Starting Azure publish-only...")
+            self._log("Starting publish-only...")
 
             self._sync_to_creds()
 
             cfg = self._build_config_from_ui()
+            if not cfg.enable_azure_sql:
+                raise ValueError("Azure upload is disabled. Enable Azure upload to publish.")
+            if cfg.dry_run:
+                raise ValueError("Dry run is enabled. Turn it off to publish to Azure.")
 
-            if cfg.enable_azure_sql and (not cfg.dry_run):
-                if (not bool(self.var_allow_publish.get())) or (self.var_publish_text.get().strip() != "PUBLISH"):
-                    raise ValueError(
-                        "Azure upload is enabled and Dry run is OFF.\n\n"
-                        "To proceed with non-dry-run publishing:\n"
-                        "1) Tick: 'Allow non-dry-run publish (writes to Azure)'\n"
-                        "2) Type: PUBLISH\n"
-                        "3) You will then be asked to confirm before publishing.\n\n"
-                        "Otherwise, turn Dry run back ON."
-                    )
+            if (not bool(self.var_allow_publish.get())) or (self.var_publish_text.get().strip() != "PUBLISH"):
+                raise ValueError(
+                    "Azure upload is enabled and Dry run is OFF.\n\n"
+                    "To proceed with non-dry-run publishing:\n"
+                    "1) Tick: 'Allow non-dry-run publish (writes to Azure)'\n"
+                    "2) Type: PUBLISH\n"
+                    "3) You will then be asked to confirm before publishing.\n\n"
+                    "Otherwise, turn Dry run back ON."
+                )
 
             self._set_running_state(True)
             self._worker_thread = threading.Thread(
@@ -1236,9 +1744,6 @@ class App(ttk.Frame):
                 creds_copy,
                 status_cb=status_cb,
                 confirm_publish_cb=confirm_publish_cb,
-                last_settled_date_utc=self._reco_last_settled_date_utc,
-                recommended_days=self._reco_days,
-                recommendation_note=self.var_reco_note.get(),
             )
             self._status_q.put(("done", result))
         except Exception as e:
@@ -1260,7 +1765,7 @@ class App(ttk.Frame):
                 rows = int(prep_summary.get("rows_to_write_count", 0) or 0)
                 return self._confirm_publish_cb_threadsafe(user_id=user_id, markets=markets, rows=rows)
 
-            result = publish_to_azure_from_canonical(
+            result = publish_to_azure_from_canonical_incremental(
                 cfg,
                 creds_copy,
                 status_cb=status_cb,

@@ -70,6 +70,21 @@ If any step is missing, **no database writes occur**.
 
 ---
 
+## Publish-only (Azure)
+
+The GUI includes a **Publish to Azure** button that publishes only from the
+canonical CSV. It does **not** download from Betfair.
+
+This flow:
+
+- Reads `cleared_orders_cleaned.csv`
+- Builds the Azure dataset (same filter + aggregation as a normal run)
+- Applies **incremental sync** (insert + update only)
+
+All Azure publish safety gates still apply.
+
+---
+
 ## Azure publishing scope (current restriction)
 
 To reduce risk and keep the database focused, Azure publishing is currently restricted to:
@@ -86,6 +101,28 @@ Other sports:
 This restriction is enforced in code and can be expanded later if required.
 
 ---
+
+## Azure Data Safety & Remediation
+
+Azure publishing is **incremental and non-destructive** by design:
+
+- Sync key is `(UserID, MarketID)`
+- Inserts new rows and updates changed rows only
+- Leaves DB-only rows unchanged
+
+A **filtered unique index** is enforced per user to prevent duplicates.
+Delete-then-insert is intentionally avoided.
+
+The GUI provides **Azure Tools** for safe recovery:
+
+- Read-only health check (duplicate audit)
+- Scoped backup export
+- UserID normalization (padding fix)
+- Scoped unique index creation/verification
+- Emergency cleanup wizard (backup -> wipe user rows -> index -> re-audit)
+
+Azure cleanup tools are **user-scoped and guarded**. They exist for recovery,
+not routine use.
 
 ## Outputs
 
@@ -170,6 +207,7 @@ Notes:
 4. Watch live phase progress
 5. Review structured summary blocks
 6. *(Optional)* Publish to Azure if explicitly unlocked
+7. *(Optional)* Use Azure Tools for health checks or recovery
 
 ---
 
