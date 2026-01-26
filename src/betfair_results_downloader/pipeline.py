@@ -184,7 +184,7 @@ def run_pipeline(
     # 3) CSV outputs
     # -------------------
     say("Phase 3/4: Writing CSV outputs...")
-    rows_after_dedupe = len(clean_and_remove_duplicates(df_co))
+    rows_after_dedupe = len(clean_and_remove_duplicates(df_co, status_cb=say))
     csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=say)
     csv_summary = {
         "canonical_path": str(csvr.canonical_path),
