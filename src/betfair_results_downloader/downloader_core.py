@@ -469,7 +469,7 @@ def write_csv_outputs(
     today_str = date.today().isoformat()
     snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}.csv"
 
-    update_csv_with_new_data(canonical_path, df_co)
+    update_csv_with_new_data(canonical_path, df_co, status_cb=status_cb)
 
     df_canonical = pd.read_csv(canonical_path)
     _log_item_description_smoke_check(df_canonical, status_cb)
