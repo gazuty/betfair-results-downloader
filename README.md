@@ -235,6 +235,8 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
+For developer setup, quality checks, and release steps, see `CONTRIBUTING.md`.
+
 Notes:
 
 - `pyodbc` is only required if Azure SQL publishing is enabled
