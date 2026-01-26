@@ -6,7 +6,10 @@ from _bootstrap import ensure_src_on_path
 
 ensure_src_on_path()
 
-from betfair_results_downloader.azure_remediation import create_unique_index, get_scoped_user_id
+from betfair_results_downloader.azure_remediation import (
+    create_unique_index,
+    get_scoped_user_id,
+)
 
 
 def main() -> None:
@@ -15,7 +18,9 @@ def main() -> None:
     scope = os.getenv("AZURE_SQL_INDEX_SCOPE") or "scoped"
     index_name = os.getenv("AZURE_SQL_UNIQUE_INDEX_NAME")
 
-    summary = create_unique_index(scope=scope, user_id=user_id, table=table_raw, index_name=index_name)
+    summary = create_unique_index(
+        scope=scope, user_id=user_id, table=table_raw, index_name=index_name
+    )
 
     print(f"Scope: {summary['scope']}")
     print(f"UserID: {summary['user_id']}")

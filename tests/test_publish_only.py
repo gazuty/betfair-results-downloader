@@ -14,7 +14,13 @@ def _base_creds(results_dir: Path) -> dict:
         "paths": {"results_csv_dir": str(results_dir)},
         "user": {"enable_azure_sql": True, "db_user_id": "user1"},
         "betfair": {"username": "u", "password": "p", "app_key": "k"},
-        "azure_sql": {"server": "s", "database": "d", "username": "u", "password": "p", "driver": "driver"},
+        "azure_sql": {
+            "server": "s",
+            "database": "d",
+            "username": "u",
+            "password": "p",
+            "driver": "driver",
+        },
     }
 
 
@@ -59,7 +65,9 @@ def test_publish_only_calls_prep_and_publish(tmp_path: Path, monkeypatch) -> Non
         assert Path(path) == canonical_path
         return df_stub
 
-    def fake_prepare_azure_dataset(*, df_co: pd.DataFrame, allowed_event_type_ids: set[int]) -> AzurePrepResult:
+    def fake_prepare_azure_dataset(
+        *, df_co: pd.DataFrame, allowed_event_type_ids: set[int]
+    ) -> AzurePrepResult:
         assert df_co is df_stub
         called["prep"] += 1
         return AzurePrepResult(
@@ -71,7 +79,9 @@ def test_publish_only_calls_prep_and_publish(tmp_path: Path, monkeypatch) -> Non
             rows_to_write=[(Decimal("1"), Decimal("1.00"), "")],
         )
 
-    def fake_publish_to_azure_sql(*, creds: dict, rows_to_write, dry_run: bool) -> AzurePublishResult:
+    def fake_publish_to_azure_sql(
+        *, creds: dict, rows_to_write, dry_run: bool
+    ) -> AzurePublishResult:
         called["publish"] += 1
         assert dry_run is False
         assert rows_to_write == [(Decimal("1"), Decimal("1.00"), "")]

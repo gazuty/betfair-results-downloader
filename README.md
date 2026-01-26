@@ -36,6 +36,49 @@ The GUI:
 
 ---
 
+## Recommended GUI Workflow
+
+Follow the same order shown at the top of the GUI:
+
+1) Choose Paths (Results folder) -> 2) Validate -> 3) Compute Lookback -> 4) Run Downloader -> (Optional) 5) Publish to Azure
+
+---
+
+## Lookback v2 (auto)
+
+The downloader computes an **effective lookback** before a run. Decision order:
+
+1) Missing settled-date gaps within the audit window (<= 90 days) -> recommend based on the earliest missing date in the most recent missing range.
+2) Otherwise use `run_state.json` (`last_success_utc`).
+3) Otherwise fall back to the canonical CSV latest settledDate heuristic.
+4) If no CSV and no run_state exist, default to **90 days** (Betfair maximum backfill).
+
+The audit only considers gaps **between observed settled dates** inside the backfillable window.
+
+---
+
+## Manual Override
+
+By default, the run uses the **computed effective lookback**.
+
+To force a manual value for a single run:
+
+- Tick **Manual override**
+- Enter the Days value
+- Run Downloader will use that manual Days value for this run only
+
+---
+
+## Run logs
+
+Each run persists a full log transcript for debugging:
+
+`<results_csv_dir>/run_logs/run_YYYYMMDD_HHMMSS.txt`
+
+These logs match the GUI output and are written in UTF-8 with ASCII-safe status lines.
+
+---
+
 ## First Run Wizard (onboarding)
 
 On first launch, if no credentials file exists:
@@ -203,11 +246,12 @@ Notes:
 
 1. Launch the GUI
 2. Complete First Run Wizard (once)
-3. Click **Run Downloader**
-4. Watch live phase progress
-5. Review structured summary blocks
-6. *(Optional)* Publish to Azure if explicitly unlocked
-7. *(Optional)* Use Azure Tools for health checks or recovery
+3. Choose Paths (Results folder) and Validate credentials
+4. Compute Lookback (recommended)
+5. Run Downloader (auto lookback by default, or manual override if enabled)
+6. Review structured summary blocks
+7. *(Optional)* Publish to Azure if explicitly unlocked
+8. *(Optional)* Use Azure Tools for health checks or recovery
 
 ---
 

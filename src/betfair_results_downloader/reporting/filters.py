@@ -21,7 +21,9 @@ def _safe_unique_sorted(df: pd.DataFrame, col: str) -> list[str]:
     if col not in df.columns:
         return []
     vals = df[col].dropna().astype(str)
-    vals = [v for v in vals.unique().tolist() if v.strip() and v.strip().lower() != "nan"]
+    vals = [
+        v for v in vals.unique().tolist() if v.strip() and v.strip().lower() != "nan"
+    ]
     return sorted(vals)
 
 
@@ -44,7 +46,11 @@ def apply_sidebar_filters(df: pd.DataFrame) -> tuple[pd.DataFrame, FilterState]:
             help="Most reporting uses settled time; placed is useful for activity analysis.",
         )
 
-        dt_col = "settled_dt_local" if date_basis.startswith("Settled") else "placed_dt_local"
+        dt_col = (
+            "settled_dt_local"
+            if date_basis.startswith("Settled")
+            else "placed_dt_local"
+        )
 
         # Determine available min/max for date picker
         if dt_col in df.columns and df[dt_col].notna().any():

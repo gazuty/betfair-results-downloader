@@ -22,18 +22,26 @@ def clean_and_remove_duplicates(df: pd.DataFrame) -> pd.DataFrame:
 
         if out["betId"].notna().any():
             # stable ordering improves reproducibility
-            sort_cols = [c for c in ["settledDate", "placedDate", "marketId", "betId"] if c in out.columns]
+            sort_cols = [
+                c
+                for c in ["settledDate", "placedDate", "marketId", "betId"]
+                if c in out.columns
+            ]
             if sort_cols:
                 out = out.sort_values(sort_cols, kind="mergesort")
 
-            out = out.drop_duplicates(subset=["betId"], keep="last").reset_index(drop=True)
+            out = out.drop_duplicates(subset=["betId"], keep="last").reset_index(
+                drop=True
+            )
             return out
 
     # fallback: full-row dedupe
     return out.drop_duplicates(keep="last").reset_index(drop=True)
 
 
-def update_csv_with_new_data(existing_csv_path: str | Path, new_data_df: pd.DataFrame) -> Path:
+def update_csv_with_new_data(
+    existing_csv_path: str | Path, new_data_df: pd.DataFrame
+) -> Path:
     """
     Idempotently update a canonical CSV with new data:
     - create parent directory if missing

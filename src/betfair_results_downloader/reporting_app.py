@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import streamlit as st
 
-from betfair_results_downloader.reporting.io import discover_csv_files, load_csv, file_info
+from betfair_results_downloader.reporting.io import (
+    discover_csv_files,
+    load_csv,
+    file_info,
+)
 from betfair_results_downloader.reporting.schema import normalize_cleared_orders_schema
 from betfair_results_downloader.reporting.filters import apply_sidebar_filters
 
@@ -28,7 +30,9 @@ st.set_page_config(
 render_app_header()
 
 # -------- Sidebar: data source + nav --------
-DEFAULT_RESULTS_DIR = r"C:\Users\Mark\OneDrive\BF Documentation\BF Results and Analysis\Results Database"
+DEFAULT_RESULTS_DIR = (
+    r"C:\Users\Mark\OneDrive\BF Documentation\BF Results and Analysis\Results Database"
+)
 
 if "results_dir" not in st.session_state:
     st.session_state["results_dir"] = DEFAULT_RESULTS_DIR
@@ -70,8 +74,16 @@ df_raw = load_csv(selected_path)
 df = normalize_cleared_orders_schema(df_raw)
 
 # Determine date range for header (use settled local as primary)
-date_min = df["settled_dt_local"].min() if "settled_dt_local" in df.columns and df["settled_dt_local"].notna().any() else None
-date_max = df["settled_dt_local"].max() if "settled_dt_local" in df.columns and df["settled_dt_local"].notna().any() else None
+date_min = (
+    df["settled_dt_local"].min()
+    if "settled_dt_local" in df.columns and df["settled_dt_local"].notna().any()
+    else None
+)
+date_max = (
+    df["settled_dt_local"].max()
+    if "settled_dt_local" in df.columns and df["settled_dt_local"].notna().any()
+    else None
+)
 
 render_dataset_header(
     file_meta=meta,

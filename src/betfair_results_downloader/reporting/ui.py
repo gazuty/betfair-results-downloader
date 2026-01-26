@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
 from typing import Any, Optional
 
 import pandas as pd
@@ -17,7 +16,7 @@ def _fmt_currency(x: float) -> str:
 
 def _fmt_percent(x: float) -> str:
     try:
-        return f"{x*100:,.1f}%"
+        return f"{x * 100:,.1f}%"
     except Exception:
         return str(x)
 
@@ -99,7 +98,7 @@ def render_filter_summary(filter_state: Any) -> None:
     if tracks:
         # Avoid enormous summaries
         if len(tracks) > 5:
-            bits.append(f"Track/Market: {tracks[0]} +{len(tracks)-1} more")
+            bits.append(f"Track/Market: {tracks[0]} +{len(tracks) - 1} more")
         else:
             bits.append(f"Track/Market: {', '.join(tracks)}")
 
@@ -114,7 +113,9 @@ def kpi_row(*, bets: int, profit: float, avg_profit: float, strike_rate: float) 
     c4.metric("Strike Rate", _fmt_percent(strike_rate))
 
 
-def dataframe_pretty(df: pd.DataFrame, *, profit_cols: Optional[list[str]] = None) -> None:
+def dataframe_pretty(
+    df: pd.DataFrame, *, profit_cols: Optional[list[str]] = None
+) -> None:
     """
     Consistent formatting for tables across the app.
     """
@@ -126,8 +127,15 @@ def dataframe_pretty(df: pd.DataFrame, *, profit_cols: Optional[list[str]] = Non
             col_config[c] = st.column_config.NumberColumn(format="%.2f")
         if c.lower() == "strike_rate":
             col_config[c] = st.column_config.NumberColumn(format="%.3f")
-        if "date" in c.lower() or c.lower().endswith("_start") or c.lower().endswith("_end") or c.lower() in {"day", "week_start", "week_end"}:
+        if (
+            "date" in c.lower()
+            or c.lower().endswith("_start")
+            or c.lower().endswith("_end")
+            or c.lower() in {"day", "week_start", "week_end"}
+        ):
             # Streamlit will handle python date objects well; keep it simple
             pass
 
-    st.dataframe(df, use_container_width=True, hide_index=True, column_config=col_config)
+    st.dataframe(
+        df, use_container_width=True, hide_index=True, column_config=col_config
+    )

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
@@ -83,7 +83,9 @@ def _profits_equal(a: Decimal | None, b: Decimal | None, tol: Decimal) -> bool:
     return abs(a - b) <= tol
 
 
-def read_existing_marketresults(conn: pyodbc.Connection, db_user_id: str) -> pd.DataFrame:
+def read_existing_marketresults(
+    conn: pyodbc.Connection, db_user_id: str
+) -> pd.DataFrame:
     query = """
         SELECT RTRIM(UserID) AS UserID, MarketID, Profit, Notes
         FROM dbo.MarketResults
@@ -118,12 +120,18 @@ def build_sync_plan(
     df_new = df_new[df_new["MarketID_key"] != ""]
     df_existing = df_existing[df_existing["MarketID_key"] != ""]
 
-    dupes_new = df_new["MarketID_key"][df_new["MarketID_key"].duplicated()].unique().tolist()
+    dupes_new = (
+        df_new["MarketID_key"][df_new["MarketID_key"].duplicated()].unique().tolist()
+    )
     if dupes_new:
         examples = ", ".join(dupes_new[:10])
         raise ValueError(f"Duplicate MarketID_key in new dataset: {examples}")
 
-    dupes_existing = df_existing["MarketID_key"][df_existing["MarketID_key"].duplicated()].unique().tolist()
+    dupes_existing = (
+        df_existing["MarketID_key"][df_existing["MarketID_key"].duplicated()]
+        .unique()
+        .tolist()
+    )
     if dupes_existing:
         examples = ", ".join(dupes_existing[:10])
         raise ValueError(f"Duplicate MarketID_key in existing dataset: {examples}")
@@ -145,7 +153,9 @@ def build_sync_plan(
         both["Profit_new_dec"] = both["Profit_new"].apply(_to_decimal)
         both["Profit_db_dec"] = both["Profit_db"].apply(_to_decimal)
         both["_profit_equal"] = both.apply(
-            lambda r: _profits_equal(r["Profit_new_dec"], r["Profit_db_dec"], profit_tolerance),
+            lambda r: _profits_equal(
+                r["Profit_new_dec"], r["Profit_db_dec"], profit_tolerance
+            ),
             axis=1,
         )
     else:
@@ -155,15 +165,23 @@ def build_sync_plan(
     update_count = len(both) - unchanged_count
 
     new_keys = set(new_only["MarketID_key"].tolist())
-    update_keys = set(both.loc[~both["_profit_equal"], "MarketID_key"].tolist()) if not both.empty else set()
+    update_keys = (
+        set(both.loc[~both["_profit_equal"], "MarketID_key"].tolist())
+        if not both.empty
+        else set()
+    )
 
     rows_to_insert_df = df_new[df_new["MarketID_key"].isin(new_keys)]
     rows_to_update_df = df_new[df_new["MarketID_key"].isin(update_keys)]
 
     rows_to_insert_df = rows_to_insert_df.copy()
     rows_to_update_df = rows_to_update_df.copy()
-    rows_to_insert_df["MarketID_canon"] = rows_to_insert_df["MarketID"].apply(_canonical_market_id)
-    rows_to_update_df["MarketID_canon"] = rows_to_update_df["MarketID"].apply(_canonical_market_id)
+    rows_to_insert_df["MarketID_canon"] = rows_to_insert_df["MarketID"].apply(
+        _canonical_market_id
+    )
+    rows_to_update_df["MarketID_canon"] = rows_to_update_df["MarketID"].apply(
+        _canonical_market_id
+    )
     rows_to_insert_df = rows_to_insert_df[rows_to_insert_df["MarketID_canon"].notna()]
     rows_to_update_df = rows_to_update_df[rows_to_update_df["MarketID_canon"].notna()]
 
@@ -229,13 +247,21 @@ def publish_to_azure_sql(
 
     db_user_id = (user.get("db_user_id") or "").strip() or None
     if db_user_id is None:
-        return AzurePublishResult(attempted=False, message="Azure publish blocked: user.db_user_id missing in secrets.")
+        return AzurePublishResult(
+            attempted=False,
+            message="Azure publish blocked: user.db_user_id missing in secrets.",
+        )
 
     if not azsql:
-        return AzurePublishResult(attempted=False, message="Azure publish blocked: azure_sql block missing in secrets.")
+        return AzurePublishResult(
+            attempted=False,
+            message="Azure publish blocked: azure_sql block missing in secrets.",
+        )
 
     if not rows_to_write:
-        return AzurePublishResult(attempted=False, message="Azure publish blocked: rows_to_write is empty.")
+        return AzurePublishResult(
+            attempted=False, message="Azure publish blocked: rows_to_write is empty."
+        )
 
     conn = None
     cur = None
@@ -245,7 +271,9 @@ def publish_to_azure_sql(
         cur = conn.cursor()
 
         rows_for_db = [(db_user_id, *row) for row in rows_to_write]
-        df_new = pd.DataFrame(rows_for_db, columns=["UserID", "MarketID", "Profit", "Notes"])
+        df_new = pd.DataFrame(
+            rows_for_db, columns=["UserID", "MarketID", "Profit", "Notes"]
+        )
 
         df_existing = read_existing_marketresults(conn, db_user_id)
         plan = build_sync_plan(df_new, df_existing)
