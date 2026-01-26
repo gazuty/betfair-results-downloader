@@ -20,6 +20,20 @@ from .csv_utils import update_csv_with_new_data
 
 
 # -----------------------------
+# Cache directory resolution
+# -----------------------------
+
+
+def resolve_enrichment_cache_dir(results_csv_dir: Path) -> Path:
+    """
+    Resolve enrichment cache directory under the dataset folder.
+
+    Returns: <results_csv_dir>/.cache
+    """
+    return results_csv_dir / ".cache"
+
+
+# -----------------------------
 # Small results containers
 # -----------------------------
 
@@ -239,7 +253,7 @@ def enrich_with_market_catalogue(
     *,
     df_co: pd.DataFrame,
     betfair: dict[str, Any],
-    repo_root: Path,
+    cache_dir: Path,
     enable: bool = True,
     use_cache: bool = True,
     batch_size: int = 50,
@@ -249,7 +263,7 @@ def enrich_with_market_catalogue(
     """
     Notebook Cell 3, ported:
     - list_market_catalogue by marketId batches
-    - cache at outputs/market_catalogue_event_cache.csv
+    - cache at <cache_dir>/market_catalogue_event_cache.csv
     - deterministic column names: mkt_*, evt_*
     """
 
@@ -293,10 +307,11 @@ def enrich_with_market_catalogue(
     )
     trading.login_interactive()
 
-    out_dir = repo_root / "outputs"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = out_dir / "market_catalogue_event_cache.csv"
-    snapshot_path = out_dir / "market_catalogue_event_latest.csv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / "market_catalogue_event_cache.csv"
+    snapshot_path = cache_dir / "market_catalogue_event_latest.csv"
+
+    say(f"Enrichment cache directory: {cache_dir}")
 
     df_work = df_co.copy()
     df_work["marketId"] = df_work["marketId"].astype(str)

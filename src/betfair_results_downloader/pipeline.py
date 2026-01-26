@@ -14,6 +14,7 @@ from .downloader_core import (
     _log_item_description_smoke_check,
     prepare_azure_dataset,
     write_csv_outputs,
+    resolve_enrichment_cache_dir,
 )
 from .audit import compute_missing_settled_dates
 from .state import append_run_history, save_run_state
@@ -71,10 +72,7 @@ def run_pipeline(
         }
 
     results_dir = Path(results_dir_raw)
-
-    # Try to infer repo_root for outputs/ cache folder.
-    # If running from src/ package, outputs folder relative to cwd is OK as fallback.
-    repo_root = Path.cwd()
+    cache_dir = resolve_enrichment_cache_dir(results_dir)
 
     # -------------------
     # 1) Download
@@ -128,7 +126,7 @@ def run_pipeline(
     df_co, enr = enrich_with_market_catalogue(
         df_co=df_co,
         betfair=betfair,
-        repo_root=repo_root,
+        cache_dir=cache_dir,
         enable=True,
         use_cache=True,
         batch_size=50,
