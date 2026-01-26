@@ -466,7 +466,7 @@ def write_csv_outputs(
     results_csv_dir.mkdir(parents=True, exist_ok=True)
 
     canonical_path = results_csv_dir / "cleared_orders_cleaned.csv"
-    today_str = date.today().isoformat()
+    today_str = datetime.now(timezone.utc).date().isoformat()
     snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}.csv"
 
     update_csv_with_new_data(canonical_path, df_co)
