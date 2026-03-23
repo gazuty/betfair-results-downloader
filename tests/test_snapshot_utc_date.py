@@ -19,10 +19,12 @@ def test_snapshot_uses_utc_date(tmp_path: Path, monkeypatch):
     results_dir.mkdir()
 
     # Sample data
-    df = pd.DataFrame({
-        "betId": [12345],
-        "profit": [10.50],
-    })
+    df = pd.DataFrame(
+        {
+            "betId": [12345],
+            "profit": [10.50],
+        }
+    )
 
     # Mock datetime.now() to return a fixed UTC time
     # Scenario: 2026-01-26 23:30:00 UTC
@@ -44,12 +46,13 @@ def test_snapshot_uses_utc_date(tmp_path: Path, monkeypatch):
 
         # Delegate other attributes to real datetime
         def __getattribute__(self, name):
-            if name in ('now',):
+            if name in ("now",):
                 return object.__getattribute__(self, name)
             return getattr(real_datetime, name)
 
     # Patch datetime in the downloader_core module
     import betfair_results_downloader.downloader_core as dc
+
     monkeypatch.setattr(dc, "datetime", MockDatetime)
 
     # Execute write_csv_outputs

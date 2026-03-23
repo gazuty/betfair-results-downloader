@@ -1,4 +1,6 @@
-﻿betfairlightweight
+# Notebook / development environment dependencies.
+# For the installable package, see pyproject.toml.
+betfairlightweight
 pandas
 numpy
 pytz

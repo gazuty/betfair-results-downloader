@@ -24,6 +24,7 @@ def clean_and_remove_duplicates(
         df: DataFrame to deduplicate
         status_cb: Optional callback for status messages (warnings visible in GUI)
     """
+
     def warn(msg: str) -> None:
         """Log and emit warning via status callback."""
         logger.warning(msg)
@@ -48,7 +49,9 @@ def clean_and_remove_duplicates(
 
         if nan_count > 0 and valid_count > 0:
             # Some betIds are invalid, but we can still dedupe on valid ones
-            warn(f"DEDUPE WARNING: {nan_count:,} of {total_rows:,} rows have invalid betId values")
+            warn(
+                f"DEDUPE WARNING: {nan_count:,} of {total_rows:,} rows have invalid betId values"
+            )
 
         if out["betId"].notna().any():
             # stable ordering improves reproducibility
@@ -66,7 +69,9 @@ def clean_and_remove_duplicates(
             return out
         else:
             # All betIds are NaN - must fall back
-            warn(f"DEDUPE WARNING: All {total_rows:,} betId values invalid — falling back to full-row dedupe")
+            warn(
+                f"DEDUPE WARNING: All {total_rows:,} betId values invalid — falling back to full-row dedupe"
+            )
 
     else:
         # betId column missing entirely

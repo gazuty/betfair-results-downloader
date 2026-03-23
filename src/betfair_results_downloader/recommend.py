@@ -277,12 +277,3 @@ def recommend_lookback_days_v2(
         "today_utc": today_utc.isoformat(),
         "missing_range": None,
     }
-
-    _emit(status_cb, "Lookback v2: lookback_source=ui_default")
-    return {
-        "recommended_days": FALLBACK_DAYS,
-        "lookback_source": "ui_default",
-        "recommendation_note": FALLBACK_NOTE,
-        "today_utc": today_utc.isoformat(),
-        "missing_range": None,
-    }
