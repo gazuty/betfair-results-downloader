@@ -1,314 +1,539 @@
-# Betfair Results Downloader (GUI-first)
+# Betfair Results Downloader
 
-A **professional, GUI-first Python application** for downloading settled Betfair orders, enriching them with market metadata (with caching), writing reliable CSV outputs, and optionally publishing aggregated market results to Azure SQL — **safe by default**.
-
-The GUI is the **official and recommended way** to run this project.
+A professional Python application for downloading settled Betfair orders, enriching them with market metadata, writing reliable CSV outputs, and optionally publishing aggregated market-level results to Azure SQL — safe by default.
 
 ---
 
-## What this does
+## Features
 
-- Downloads settled (cleared) orders from Betfair using `betfairlightweight`
-- Cleans and normalises the data
-- Enriches orders with market & event metadata (cached to avoid repeat API calls)
-- Writes:
-  - a **canonical CSV** (stable filename, always latest state)
-  - **dated snapshot CSVs** (append-only history)
-- Aggregates results to market-level profit
-- *(Optional)* Publishes market-level results to Azure SQL
-
-> Core functionality is **CSV generation**. Azure SQL publishing is optional and heavily gated for safety.
+- **GUI-first downloader** — Tkinter desktop app with First Run Wizard, live phase progress, and structured summaries
+- **CSV outputs** — canonical file plus dated snapshots, idempotent updates, safe to re-run
+- **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
+- **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
+- **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
+- **Reporting Dashboard** — local Streamlit UI for daily/weekly P&L analytics
+- **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.4.0)*
+- **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.4.0)*
+- **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.4.0)*
+- **Scheduled automatic daily downloads** — *in development; see [Roadmap](#roadmap-scheduled-automatic-downloads)*
 
 ---
 
-## Official runner (GUI)
+## Quick Start (GUI mode)
 
-```powershell
+The GUI is the supported interactive entry point.
+
+```bash
+git clone https://github.com/<your-org>/betfair-results-downloader.git
+cd betfair-results-downloader
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
+pip install -e .
 python -m betfair_results_downloader.gui_app
 ```
 
-The GUI:
+On first launch, the **First Run Wizard** walks you through:
 
-- Runs the pipeline in a background thread (no UI freezing)
-- Streams live status updates during each phase
-- Prints clean, structured summary blocks at the end of each run
-- Provides strong safety controls around Azure publishing
+1. Choosing where to save `credentials.json`
+2. Selecting a results output folder
+3. Entering Betfair credentials
+4. Setting run defaults (lookback days, sports)
+5. *(Optional)* Entering Azure SQL credentials
 
----
-
-## First Run Wizard (onboarding)
-
-On first launch, if no credentials file exists:
-
-- The GUI starts from a template credentials file
-- A First Run Wizard opens and guides you through:
-  - Choosing where to save `credentials.json`
-  - Selecting your results output folder
-  - Entering Betfair credentials
-  - Setting run defaults (lookback days, sports)
-  - *(Optional)* Entering Azure SQL credentials
-- The completed credentials file is saved and remembered for future runs
-
-> No manual file copying is required.
+Then click **Run Downloader** and watch the four-phase progress: download → enrich → CSV → Azure (if enabled).
 
 ---
 
-## Azure publishing safety model (important)
+## Detailed Setup Guide
 
-Azure SQL publishing is **safe by default** and requires multiple explicit actions.
+### Prerequisites
 
-### Mandatory conditions
+- **Python 3.10+**
+- **A Betfair account** with the Exchange API activated and an **app key** registered ([Betfair Developer Program](https://developer.betfair.com/))
+- *(Optional)* **Azure SQL database** if you want to publish market-level results
+- *(Optional, for Azure)* **ODBC Driver 18 for SQL Server** installed on the machine running the publish step
+- *(Optional, for scheduled mode)* **Two-factor authentication enabled** on your Betfair account — required to enroll the client certificate used by non-interactive login
 
-- `enable_azure_sql = true` in credentials
-- `dry_run = false` in credentials
-- In the GUI:
-  - Tick the unlock checkbox
-  - Type **PUBLISH** exactly
-  - Confirm a final modal dialog after seeing the Azure prep summary
+### Install
 
-If any step is missing, **no database writes occur**.
+```bash
+git clone https://github.com/<your-org>/betfair-results-downloader.git
+cd betfair-results-downloader
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Editable install (`-e`) is recommended so you can pull updates without reinstalling.
+
+### Credentials file
+
+The app reads credentials from `secrets/credentials.json` by default. You can store the real file anywhere (recommended: a cloud-synced folder like OneDrive or iCloud Drive, so both your laptop and desktop share the same config) and point at it via a tiny pointer file.
+
+**To store `credentials.json` outside the repo:**
+
+Create `secrets/credentials.location.json` (git-ignored by default) with:
+
+```json
+{"path": "/absolute/path/to/your/credentials.json"}
+```
+
+The resolver handles `~` expansion and relative paths. See [`secrets.py`](src/betfair_results_downloader/secrets.py) for the full resolution rules.
+
+**Minimum fields:**
+
+```json
+{
+  "betfair": {
+    "username": "your-betfair-username",
+    "password": "your-betfair-password",
+    "app_key": "your-betfair-app-key"
+  },
+  "user": {
+    "user_id": "YourName",
+    "days": 7,
+    "include_horses": true,
+    "include_greyhounds": true,
+    "enable_azure_sql": false,
+    "dry_run": true
+  },
+  "paths": {
+    "results_csv_dir": "/absolute/path/to/output/folder"
+  }
+}
+```
+
+See [Configuration Reference](#configuration-reference) for the full schema including Azure SQL and the new `betfair.certs_dir` field for cert login.
 
 ---
 
-## Publish-only (Azure)
+### Betfair Certificate Enrollment
 
-The GUI includes a **Publish to Azure** button that publishes only from the
-canonical CSV. It does **not** download from Betfair.
+Cert-based login lets the app authenticate to Betfair **without any interactive step** — no browser, no prompts, no session timeouts mid-run. This is required for automated/scheduled use and is the approach Betfair officially supports for bot accounts.
 
-This flow:
+The GUI doesn't need certs (it uses interactive login). You only need to enroll a certificate if you want to run `python -m betfair_results_downloader auth-test` or the upcoming scheduled downloads feature.
 
-- Reads `cleared_orders_cleaned.csv`
-- Builds the Azure dataset (same filter + aggregation as a normal run)
-- Applies **incremental sync** (insert + update only)
+#### What a client certificate is (and why Betfair needs one)
 
-All Azure publish safety gates still apply.
+A client certificate is a cryptographic identity card. You generate a matching **public certificate** (`.crt`) and **private key** (`.key`) locally. You upload the `.crt` to your Betfair account — Betfair stores it and trusts any request signed by the matching private key. The `.key` file stays on your machine and must never leave it.
+
+Betfair's documented non-interactive login endpoint (`identitysso-cert.betfair.com/api/certlogin`) requires a mutually-authenticated TLS handshake using this cert pair. The `betfairlightweight` library handles the TLS plumbing automatically once you tell it where your cert directory lives.
+
+> **⚠️ Never share, commit, or upload your `.key` file.** Treat it like a password. Anyone with the `.key` can authenticate as you. If you ever suspect it has leaked, generate a new pair and replace the enrolled cert on your Betfair account immediately.
+
+#### Prerequisites
+
+- Betfair Exchange account with API access
+- A registered **app key** (found in your Betfair Developer account)
+- **Two-factor authentication enabled** on your Betfair account — Betfair will not accept a certificate upload without it
+
+#### Step 1 — Generate the cert pair
+
+Pick a safe location. A cloud-synced `secrets/certs/` folder alongside your `credentials.json` keeps both machines in sync:
+
+```bash
+CERTS_DIR="$HOME/path/to/secrets/certs"
+mkdir -p "$CERTS_DIR"
+
+openssl req -x509 -newkey rsa:2048 \
+  -keyout "$CERTS_DIR/client-2048.key" \
+  -out    "$CERTS_DIR/client-2048.crt" \
+  -days 3650 -nodes -subj "/CN=betfair"
+```
+
+**Flag-by-flag:**
+
+| Flag | Meaning |
+|---|---|
+| `req -x509` | Create a self-signed X.509 certificate (Betfair doesn't need a CA signature) |
+| `-newkey rsa:2048` | Generate a new 2048-bit RSA key pair |
+| `-keyout` | Output path for the private key |
+| `-out` | Output path for the public cert |
+| `-days 3650` | Valid for 10 years — long enough that you won't have to rotate mid-project |
+| `-nodes` | "No DES" — do not encrypt the private key with a passphrase (required, since headless runs can't prompt) |
+| `-subj "/CN=betfair"` | Non-interactive subject line; skips the prompt tour |
+
+**File naming matters.** `betfairlightweight` looks for files named exactly **`client-2048.crt`** and **`client-2048.key`** in the directory you point at. Don't rename them.
+
+Verify the files and permissions:
+
+```bash
+ls -l "$CERTS_DIR"
+# -rw-r--r--  client-2048.crt
+# -rw-------  client-2048.key   <-- note mode 600, readable only by you
+```
+
+#### Step 2 — Upload the `.crt` to Betfair
+
+1. Log in to [betfair.com](https://www.betfair.com) in a browser
+2. Navigate to **My Account → My Security → Automated Login**
+3. You'll be prompted to re-authenticate via 2FA
+4. Click **Upload Certificate** and select **only** `client-2048.crt` (never upload the `.key`)
+5. Betfair will display the SHA-256 fingerprint of the uploaded cert — you can cross-check it locally with:
+
+   ```bash
+   openssl x509 -in "$CERTS_DIR/client-2048.crt" -noout -fingerprint -sha256
+   ```
+
+6. Confirm the fingerprints match, then save
+
+Enrollment is immediate — there is no waiting period.
+
+#### Step 3 — Tell the app where the certs live
+
+Add the `certs_dir` field to the `betfair` section of your `credentials.json`:
+
+```json
+{
+  "betfair": {
+    "username": "...",
+    "password": "...",
+    "app_key": "...",
+    "certs_dir": "/absolute/path/to/secrets/certs"
+  }
+}
+```
+
+The directory must contain both `client-2048.crt` and `client-2048.key`. Tilde expansion (`~/...`) is supported.
+
+#### Step 4 — Verify with `auth-test`
+
+```bash
+python -m betfair_results_downloader auth-test
+```
+
+Expected output on success:
+
+```
+Betfair auth-test (cert-based non-interactive login)
+------------------------------------------------------------
+Credentials source : /path/to/credentials.json
+  username         : jo****ne
+  app_key          : Ab************YZ
+  certs_dir        : /path/to/secrets/certs
+  client-2048.crt  : OK
+  client-2048.key  : OK
+
+Attempting login()...
+OK: session_token obtained (length=44, masked=Ab****...****Cd)
+OK: logout() clean
+```
+
+Exit code `0` means everything works. Any non-zero exit prints an actionable error.
+
+#### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `betfair.certs_dir does not exist or is not a directory` | Path typo or wrong machine | Check the path resolves with `ls "$certs_dir"` |
+| `Cert pair incomplete in <dir>. Missing: client-2048.key` | Key file got renamed, deleted, or never generated | Re-run the `openssl` command, or confirm the filename is exactly `client-2048.key` |
+| `APIError: INVALID_USERNAME_OR_PASSWORD` | Wrong Betfair credentials, OR cert not yet enrolled on the account | Double-check username/password; re-verify the `.crt` upload in Betfair account settings |
+| `APIError: CERT_AUTH_REQUIRED` | Account has cert login required but `auth-test` received only username/password | Confirm `certs_dir` is set in `credentials.json` and points at the directory containing both files |
+| `FileNotFoundError: /certs` | `certs_dir` is unset and the library is falling back to its `/certs` default | Add `certs_dir` to the `betfair` block in `credentials.json` |
+| 2FA prompt during upload step | Expected | Complete the 2FA challenge — Betfair requires it for every cert upload |
 
 ---
 
-## Azure publishing scope (current restriction)
+### Azure SQL Publishing
 
-To reduce risk and keep the database focused, Azure publishing is currently restricted to:
+Azure publishing is **opt-in and safe by default**. It requires multiple explicit actions before any database writes can occur.
+
+#### Safety gates (current GUI mode)
+
+All of these must be true before any row is written to `dbo.MarketResults`:
+
+1. `user.enable_azure_sql: true` in credentials
+2. `user.dry_run: false` in credentials
+3. In the GUI: tick the unlock checkbox
+4. In the GUI: type `PUBLISH` exactly
+5. In the GUI: confirm the final modal dialog after reviewing the prep summary
+
+If any step is missing, the run completes as a dry run with no database writes.
+
+#### Publish-only flow
+
+The GUI has a **Publish to Azure** button that reads the existing canonical CSV and syncs it incrementally to Azure without re-downloading from Betfair. Same safety gates apply.
+
+#### Scope restriction
+
+Azure publishing is restricted in code to:
 
 - **Horse Racing** (`eventTypeId = 7`)
 - **Greyhound Racing** (`eventTypeId = 4339`)
 
-Other sports:
+Other sports are downloaded and written to CSV but excluded from Azure uploads.
 
-- are downloaded
-- are written to CSV
-- are **excluded from Azure uploads by design**
+#### Incremental sync model
 
-This restriction is enforced in code and can be expanded later if required.
+- Sync key: `(UserID, MarketID)`
+- Inserts new rows; updates changed rows; **never deletes**
+- DB-only rows (present in Azure but not in the current dataset) are left untouched
+- A filtered unique index is enforced per user to prevent duplicates
 
----
+#### Azure Tools (recovery)
 
-## Azure Data Safety & Remediation
+The GUI exposes a set of user-scoped recovery tools accessed via **Azure Tools**:
 
-Azure publishing is **incremental and non-destructive** by design:
-
-- Sync key is `(UserID, MarketID)`
-- Inserts new rows and updates changed rows only
-- Leaves DB-only rows unchanged
-
-A **filtered unique index** is enforced per user to prevent duplicates.
-Delete-then-insert is intentionally avoided.
-
-The GUI provides **Azure Tools** for safe recovery:
-
-- Read-only health check (duplicate audit)
+- Duplicate audit (read-only)
 - Scoped backup export
 - UserID normalization (padding fix)
 - Scoped unique index creation/verification
-- Emergency cleanup wizard (backup -> wipe user rows -> index -> re-audit)
+- Emergency cleanup wizard (backup → wipe user rows → index → re-audit)
 
-Azure cleanup tools are **user-scoped and guarded**. They exist for recovery,
-not routine use.
-
-## Outputs
-
-### CSV outputs
-
-Written to the configured `results_csv_dir`:
-
-- **Canonical CSV**  
-  Stable filename representing the latest full dataset
-
-- **Snapshot CSVs**  
-  Dated files (e.g. `*_2026-01-11.csv`) for historical tracking
-
-### Enrichment cache artifacts
-
-Written to the project `outputs/` directory:
-
-- Market catalogue cache (CSV)
-- Latest enrichment snapshot
-
-These paths are reported in the GUI and accessible via **Open Artifacts Folder**.
+These exist for recovery, not routine use.
 
 ---
 
-## Understanding enrichment behaviour
+### Reporting Dashboard
 
-It is normal for Betfair to return **zero market catalogues for settled markets**.
+A local Streamlit app for analyzing the canonical CSV:
 
-In this case the app will report:
-
-> “API returned 0 catalogues (common for settled markets). Enriched from cache only.”
-
-This is **expected behaviour** and not an error.
-
----
-
-## Repository structure (simplified)
-
-```
-src/
-  betfair_results_downloader/
-    gui_app.py
-    run.py
-    pipeline.py
-    downloader_core.py
-    azure_publish.py
-    secrets.py
-
-secrets/
-  credentials.template.json   # committed
-  credentials.json            # git-ignored (created by GUI)
-
-outputs/                      # git-ignored (cache + artifacts)
-README.md
-.gitignore
-```
-
----
-
-## Setup (once)
-
-Create and activate a virtual environment, then install in editable mode:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
-```
-
-Notes:
-
-- `pyodbc` is only required if Azure SQL publishing is enabled
-- The GUI runs fully without Azure enabled
-
----
-
-## Typical workflow
-
-1. Launch the GUI
-2. Complete First Run Wizard (once)
-3. Click **Run Downloader**
-4. Watch live phase progress
-5. Review structured summary blocks
-6. *(Optional)* Publish to Azure if explicitly unlocked
-7. *(Optional)* Use Azure Tools for health checks or recovery
-
----
-
-## Reporting Dashboard (Streamlit)
-
-The Reporting Dashboard is a **local, professional analytics UI** for analysing
-Betfair settled (cleared) orders using CSV outputs produced by this project.
-
-It is built with **Streamlit** and is designed for:
-
-- fast iteration
-- local-only usage
-- code-first, reproducible analysis
-- clean separation of data, transforms, and UI
-
-> **Status:** Active development  
-> **Branch:** `feature/reporting-dashboard`
-
-### Key Features
-
-- Reads **local canonical CSVs only** (no Azure dependency)
-- Timezone-aware reporting (UTC → Australia/Sydney)
-- **Sunday–Saturday weekly aggregation**
-- Sport filtering (Horses, Greyhounds)
-- Daily and weekly P&L views
-- KPI summaries (profit, strike rate, averages)
-- CSV export of all tables
-- Cached loading for large datasets
-- Clean, professional Streamlit UI
-
-### Data Requirements
-
-The dashboard expects CSVs produced by the downloader pipeline, typically:
-
-```
-cleared_orders_cleaned.csv
-cleared_orders_cleaned_YYYYMMDD.csv
-```
-
-Minimum required columns:
-
-- `betId`
-- `profit`
-- `placedDate`
-- `settledDate`
-- `eventTypeId`
-- `evt_countryCode`
-- `mkt_marketName`
-
-### Running the Dashboard
-
-From the repository root:
-
-```powershell
+```bash
 streamlit run src/betfair_results_downloader/reporting_app.py
 ```
 
-In the sidebar:
+Features:
 
-1. Select the folder containing your cleaned CSVs
-2. Choose the canonical file
-3. Navigate using the left-hand menu
-
-### Architecture Overview
-
-```
-reporting/
-  io.py          # CSV discovery, loading, caching
-  schema.py      # Normalisation and derived fields
-  filters.py     # Sidebar filters
-  transforms.py  # Aggregations (daily, weekly, monthly)
-  ui.py          # Shared UI components
-  pages/         # Individual report pages
-```
-
-This design keeps data logic separate from presentation and allows
-incremental extension without refactoring.
-
-### Reporting Roadmap
-
-- Track filtering using `evt_venue`
-- Monthly and rolling 2 / 4 / 8 week views
-- Sport / Country / Track breakdown pages
-- Drill-down from aggregates to raw bets
-- Additional UI polish and visualisations
+- Reads **local CSVs only** — no Azure dependency
+- UTC → Australia/Sydney timezone conversion
+- Sunday–Saturday weekly aggregation
+- Sport filtering (Horses, Greyhounds)
+- Daily and weekly P&L views
+- KPI summaries, CSV export, cached loading
 
 ---
 
-## Safety notes
+## CLI Reference
 
-- Real credentials and outputs are **never committed**
-- `.gitignore` intentionally ignores:
-  - `secrets/credentials.json`
-  - `outputs/`
-  - generated CSVs
+As of **0.4.0**, the package exposes a CLI entry point:
 
-Keep this behaviour intact.
+```bash
+python -m betfair_results_downloader <command> [options]
+```
+
+Or, after `pip install -e .`, the console script:
+
+```bash
+betfair-results <command> [options]
+```
+
+### `auth-test`
+
+**Status:** ✅ Implemented
+
+Verifies that cert-based non-interactive Betfair login works with your current `credentials.json`. Loads credentials via the standard resolver, attempts `client.login()` using the cert pair at `betfair.certs_dir`, and reports the outcome with all secrets masked.
+
+```bash
+python -m betfair_results_downloader auth-test
+```
+
+Exit codes: `0` success · `1` auth/runtime failure · `2` config/file-missing failure.
+
+See [Betfair Certificate Enrollment — Step 4](#step-4--verify-with-auth-test) for example output and troubleshooting.
+
+### `run`, `backfill`, `schedule`
+
+**Status:** 🚧 Stubs — defined in the CLI surface but print `"not yet implemented"` and exit `2`.
+
+These are the entry points for the upcoming scheduled downloads feature. See the [Roadmap](#roadmap-scheduled-automatic-downloads) for what each will do and the implementation phase it belongs to.
+
+Invoking them today:
+
+```bash
+python -m betfair_results_downloader run
+# 'run' is declared but not yet implemented. Scheduled for a later PR (Phase 2+).
+```
+
+The stable CLI shape is visible in `--help`:
+
+```bash
+python -m betfair_results_downloader --help
+```
+
+---
+
+## Configuration Reference
+
+Full annotated `credentials.json` schema. Fields marked **required** are mandatory for the feature they belong to; fields marked *(new in 0.4.0)* were added for cert login.
+
+### `betfair` (required)
+
+| Field | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `username` | string | — | ✅ | Betfair Exchange account username |
+| `password` | string | — | ✅ | Betfair Exchange account password |
+| `app_key` | string | — | ✅ | Registered Betfair app key |
+| `certs_dir` | string | `""` | Only for `auth-test` / scheduled mode *(new in 0.4.0)* | Absolute path to a directory containing `client-2048.crt` and `client-2048.key` |
+
+### `user` (required)
+
+| Field | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `user_id` | string | `"YourUserName"` | ✅ | Display name used in logs and GUI |
+| `db_user_id` | string | *(falls back to `user_id`)* | Only if publishing to Azure | Explicit UserID key for the `MarketResults` table |
+| `days` | integer | `7` | ✅ | Default lookback window in days (GUI) |
+| `include_horses` | bool | `true` | ✅ | Include `eventTypeId=7` in downloads |
+| `include_greyhounds` | bool | `true` | ✅ | Include `eventTypeId=4339` in downloads |
+| `enable_azure_sql` | bool | `false` | ✅ | Master toggle for Azure publishing |
+| `dry_run` | bool | `true` | ✅ | Second safety gate — must be `false` to actually write to DB |
+
+### `paths` (required)
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `results_csv_dir` | string | ✅ | Absolute path to where canonical and snapshot CSVs should be written |
+
+### `azure_sql` (required only if `user.enable_azure_sql = true`)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `server` | string | — | Azure SQL server hostname |
+| `database` | string | — | Database name |
+| `username` | string | — | SQL auth username |
+| `password` | string | — | SQL auth password |
+| `driver` | string | `"ODBC Driver 18 for SQL Server"` | ODBC driver name as installed locally |
+| `port` | integer | `1433` | Optional |
+
+### Full example
+
+```json
+{
+  "betfair": {
+    "username": "jo.bloggs",
+    "password": "hunter2!",
+    "app_key": "AbCdEfGhIjKlMnOp",
+    "certs_dir": "/Users/me/OneDrive/secrets/certs"
+  },
+  "user": {
+    "user_id": "JoBloggs",
+    "db_user_id": "JoBloggs",
+    "days": 7,
+    "include_horses": true,
+    "include_greyhounds": true,
+    "enable_azure_sql": false,
+    "dry_run": true
+  },
+  "paths": {
+    "results_csv_dir": "/Users/me/OneDrive/BF/Results Database"
+  },
+  "azure_sql": {
+    "server": "myserver.database.windows.net",
+    "database": "BettingResults",
+    "username": "sqladmin",
+    "password": "...",
+    "driver": "ODBC Driver 18 for SQL Server"
+  }
+}
+```
+
+The tracked template lives at [`secrets/credentials.template.json`](secrets/credentials.template.json) — the GUI First Run Wizard seeds from it automatically.
+
+---
+
+## Outputs
+
+### CSV outputs (`paths.results_csv_dir`)
+
+- **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the latest full dataset. Idempotent updates via `betId` dedupe.
+- **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv`. Dated copies for historical tracking.
+
+### Enrichment cache (`<repo_root>/outputs/`)
+
+- `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
+- `market_catalogue_event_latest.csv` — latest snapshot
+
+Both are git-ignored. Accessible via **Open Artifacts Folder** in the GUI.
+
+**Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
+
+---
+
+## Roadmap: Scheduled Automatic Downloads
+
+Automated daily downloads with gap detection, multi-window retry, and cross-platform installers. Rolling out across phased PRs. Each phase ships independently and documents its own additions here.
+
+| Phase | PR | Status | Delivers |
+|---|---|---|---|
+| 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented, others stubbed), `pyproject.toml` dependency fixes |
+| 1.1b | ✅ this document | | Documentation overhaul for Phase 1.1 features |
+| 1.2 | ⏳ planned | | `schedule` config block, validation, `ScheduleConfig` dataclass, `credentials.template.json` updates |
+| 2.1 | ⏳ planned | | `dbo.ScheduleState` Azure sidecar table, `scheduler/state.py`, `run_history.jsonl`, marker files |
+| 2.2 | ⏳ planned | | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
+| 3.1 | ⏳ planned | | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands |
+| 3.2 | ⏳ planned | | Windows Task Scheduler + Linux systemd/cron installers |
+| 4.1 | ⏳ planned | | Optional GUI Scheduling tab |
+
+Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:
+
+- **Source of truth for "last covered date":** new `dbo.ScheduleState` Azure table + canonical CSV fallback
+- **Retry pattern:** primary run at user-configured time (default `06:00`) with automatic retries at `09:00`, `19:00`, `23:00`; each window checks whether the day has already been covered and skips silently if so
+- **Safety:** four-gate Azure publish model (`enable_azure_sql` + `dry_run=false` + `schedule.publish_to_azure` + `schedule.allow_azure_publish`)
+- **Auth:** cert-based only — shipped in Phase 1.1, verified via `auth-test`
+- **Concurrency:** two-machine concurrent runs are accepted as safe due to full idempotency (`betId` dedupe + `(UserID, MarketID)` incremental sync)
+- **Backfill:** `python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD` for manual catch-up
+
+---
+
+## Repository Structure
+
+```
+src/betfair_results_downloader/
+  gui_app.py              # Tkinter GUI (official interactive runner)
+  run.py                  # Shared pipeline entry used by GUI + CLI
+  pipeline.py             # 4-phase orchestration: download → enrich → CSV → Azure
+  downloader_core.py      # Betfair API calls, enrichment, chunked range download
+  azure_publish.py        # Incremental sync plan + apply
+  azure_remediation.py    # User-scoped recovery tools
+  csv_utils.py            # Canonical CSV dedupe + atomic write
+  recommend.py            # Lookback recommendation from existing CSV
+  secrets.py              # Credentials resolver + validator
+  config.py               # DownloaderConfig dataclass
+  __main__.py             # CLI entry point (auth-test implemented; rest stubbed)
+  scheduler/              # Scheduled-downloads package (Phase 1.1+)
+    auth.py               # build_api_client() — cert-based login
+    date_windows.py       # chunk_date_range() — safe API windowing
+  reporting/              # Streamlit dashboard (IO, schema, filters, pages)
+  reporting_app.py        # Streamlit entry point
+
+secrets/
+  credentials.template.json   # committed seed template
+  credentials.json            # git-ignored; created by First Run Wizard
+  credentials.location.json   # optional pointer to an external credentials file
+
+tests/                    # Pytest suite
+scripts/                  # Standalone Azure remediation scripts
+outputs/                  # Enrichment cache + scheduler artifacts (git-ignored)
+```
+
+---
+
+## Troubleshooting
+
+### GUI
+
+- **First Run Wizard keeps appearing** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
+- **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
+- **Azure publish button greyed out** — verify all four GUI safety gates are satisfied (see [Azure SQL Publishing](#azure-sql-publishing)).
+
+### Cert authentication
+
+See the [Cert Enrollment Troubleshooting table](#troubleshooting) above.
+
+### Python environment
+
+- **`pyodbc` import fails on macOS** — install the ODBC driver first: `brew install unixodbc` then `brew tap microsoft/mssql-release && brew install msodbcsql18`. Only required if using Azure publishing.
+- **`ModuleNotFoundError: betfair_results_downloader`** — run `pip install -e .` from the repo root with your venv activated.
+
+---
+
+## Safety Notes
+
+- Real credentials and outputs are **never committed**. `.gitignore` excludes `secrets/credentials.json`, `secrets/credentials.location.json`, `outputs/`, and all `*.csv` / `*.parquet` / `*.xlsx` files.
+- Keep this behaviour intact when adding new files.
+- **Never share, commit, or upload your `client-2048.key`** file. Treat it like a password.
 
 ---
 
 ## Disclaimer
 
-This project is for **personal analytics and learning**.
-You are responsible for compliance with Betfair’s terms and any applicable laws or regulations.
+This project is for **personal analytics and learning**. You are responsible for compliance with Betfair's terms of service and any applicable laws or regulations in your jurisdiction.
