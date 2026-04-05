@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -128,10 +129,111 @@ def mask_value(value: str | None) -> str:
 class CredentialValidation:
     ok: bool
     errors: list[str]
+    warnings: list[str] = field(default_factory=list)
+
+
+_HH_MM_RE = re.compile(r"^\d{2}:\d{2}$")
+
+
+def _validate_schedule_section(
+    creds: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """
+    Validate the ``schedule`` block of credentials when ``schedule.enabled`` is true.
+
+    Returns ``(errors, warnings)`` — errors are blocking; warnings are informational.
+    Returns two empty lists when ``schedule.enabled`` is false (no-op).
+    """
+    from .config import parse_schedule_config
+
+    schedule_cfg = parse_schedule_config(creds)
+    if not schedule_cfg.enabled:
+        return [], []
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # --- betfair.certs_dir ---
+    certs_dir_raw = (get_nested(creds, "betfair.certs_dir") or "").strip()
+    if not certs_dir_raw:
+        errors.append("schedule.enabled=true requires betfair.certs_dir to be set")
+    else:
+        certs_path = Path(certs_dir_raw).expanduser()
+        if not certs_path.is_dir():
+            errors.append(
+                f"betfair.certs_dir does not exist or is not a directory: {certs_path}"
+            )
+        else:
+            from .scheduler.auth import CERT_FILENAME, KEY_FILENAME
+            missing = [
+                name for name, p in [
+                    (CERT_FILENAME, certs_path / CERT_FILENAME),
+                    (KEY_FILENAME, certs_path / KEY_FILENAME),
+                ]
+                if not p.exists()
+            ]
+            if missing:
+                errors.append(
+                    f"betfair.certs_dir is missing cert file(s): {', '.join(missing)}"
+                )
+
+    # --- timezone ---
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(schedule_cfg.timezone)
+    except Exception:
+        errors.append(
+            f"schedule.timezone is not a valid IANA timezone: {schedule_cfg.timezone!r}"
+        )
+
+    # --- time formats ---
+    if not _HH_MM_RE.match(schedule_cfg.primary_time):
+        errors.append(
+            f"schedule.primary_time must be HH:MM, got: {schedule_cfg.primary_time!r}"
+        )
+    for t in schedule_cfg.retry_times:
+        if not _HH_MM_RE.match(str(t)):
+            errors.append(
+                f"schedule.retry_times entry must be HH:MM, got: {t!r}"
+            )
+
+    # --- numeric bounds ---
+    if schedule_cfg.max_backfill_days > 365:
+        errors.append(
+            f"schedule.max_backfill_days must be <= 365, got: {schedule_cfg.max_backfill_days}"
+        )
+    if schedule_cfg.chunk_days > 90:
+        errors.append(
+            f"schedule.chunk_days must be <= 90, got: {schedule_cfg.chunk_days}"
+        )
+
+    # --- Azure publish warnings (not errors) ---
+    if schedule_cfg.allow_azure_publish:
+        enable_azure = bool(get_nested(creds, "user.enable_azure_sql", False))
+        dry_run = bool(get_nested(creds, "user.dry_run", True))
+        if not enable_azure:
+            warnings.append(
+                "schedule.allow_azure_publish=true but user.enable_azure_sql=false "
+                "— Azure publish will be skipped"
+            )
+        if dry_run:
+            warnings.append(
+                "schedule.allow_azure_publish=true but user.dry_run=true "
+                "— Azure publish will be skipped"
+            )
+
+    return errors, warnings
 
 
 def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
+    """
+    Validate a credentials dict, collecting all errors before returning.
+
+    Includes schedule-section validation when ``schedule.enabled`` is true;
+    skips it entirely (zero behaviour change) when ``schedule.enabled`` is false.
+    """
     errors: list[str] = []
+    warnings: list[str] = []
 
     # Betfair required
     if not get_nested(creds, "betfair.username"):
@@ -154,7 +256,12 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
             errors.append("Missing azure_sql.password (Azure enabled)")
         # driver is optional; we'll provide a default
 
-    return CredentialValidation(ok=(len(errors) == 0), errors=errors)
+    # Schedule validation (no-op when schedule.enabled=false)
+    sched_errors, sched_warnings = _validate_schedule_section(creds)
+    errors.extend(sched_errors)
+    warnings.extend(sched_warnings)
+
+    return CredentialValidation(ok=(len(errors) == 0), errors=errors, warnings=warnings)
 
 
 def default_credentials_structure() -> dict[str, Any]:
