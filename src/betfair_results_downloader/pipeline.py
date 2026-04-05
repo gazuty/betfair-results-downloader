@@ -65,9 +65,15 @@ def run_pipeline(
 
     results_dir = Path(results_dir_raw)
 
-    # Try to infer repo_root for outputs/ cache folder.
-    # If running from src/ package, outputs folder relative to cwd is OK as fallback.
-    repo_root = Path.cwd()
+    # Resolve repo_root for outputs/ cache folder using the package location
+    # (src/betfair_results_downloader/pipeline.py -> repo root). Fall back to
+    # Path.cwd() only if the package-relative path doesn't look like a real
+    # repo root (missing src/ dir).
+    pkg_repo_root = Path(__file__).resolve().parents[2]
+    if (pkg_repo_root / "src").is_dir() or (pkg_repo_root / "outputs").is_dir():
+        repo_root = pkg_repo_root
+    else:
+        repo_root = Path.cwd()
 
     # -------------------
     # 1) Download
