@@ -1,3 +1,15 @@
+## [Unreleased]
+
+### Added (Phase 1.2 — 2026-04-06)
+
+- **`ScheduleConfig` dataclass** (`config.py`) — frozen dataclass with all scheduled-download settings: `enabled`, `timezone`, `primary_time`, `retry_times`, `publish_to_azure`, `allow_azure_publish`, `max_backfill_days`, `chunk_days`, `min_coverage_overlap_days`, `log_dir`, `history_file`.
+- **`parse_schedule_config(creds)`** (`config.py`) — parses the `schedule` block from a credentials dict with all defaults applied; absent or empty block returns `ScheduleConfig(enabled=False)`.
+- **Schedule validation in `validate_credentials`** (`secrets.py`) — when `schedule.enabled=true`, validates: `betfair.certs_dir` exists and contains the cert pair; `timezone` is valid IANA; `primary_time`/`retry_times` match `HH:MM`; `max_backfill_days ≤ 365`; `chunk_days ≤ 90`; warns (does not error) if `allow_azure_publish=true` but `enable_azure_sql=false` or `dry_run=true`. All errors are collected together (no fail-fast). Skipped entirely when `schedule.enabled=false`.
+- **`CredentialValidation.warnings`** field (`secrets.py`) — new `warnings: list[str]` field (default `[]`); backward-compatible.
+- **`credentials.template.json`** updated with full `schedule` block (all safe defaults, `enabled: false`).
+
+---
+
 ## [0.4.0] - 2026-04-06
 
 Foundations for scheduled automatic downloads. Additive and backward-compatible — the GUI pipeline and all existing workflows are unchanged.

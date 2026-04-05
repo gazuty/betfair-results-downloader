@@ -383,6 +383,24 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 |---|---|---|---|
 | `results_csv_dir` | string | ✅ | Absolute path to where canonical and snapshot CSVs should be written |
 
+### `schedule` (optional — for scheduled automatic downloads)
+
+When `schedule.enabled` is `false` (default), this entire block is ignored and all schedule validation is skipped.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `enabled` | bool | `false` | Master toggle — must be `true` to activate scheduled runs |
+| `timezone` | string | `"Australia/Sydney"` | IANA timezone for time interpretation (e.g. `"America/New_York"`) |
+| `primary_time` | string | `"06:00"` | Primary daily run time, `HH:MM` format (local time in `timezone`) |
+| `retry_times` | string[] | `["09:00", "19:00", "23:00"]` | Additional daily windows if primary run was missed or failed |
+| `publish_to_azure` | bool | `true` | Whether the scheduler should attempt Azure SQL publishing |
+| `allow_azure_publish` | bool | `false` | Explicit second gate for scheduler Azure writes (see [Safety Gates](#azure-publish-safety-gates-scheduled-mode)) |
+| `max_backfill_days` | int | `90` | Maximum days to back-fill in a single run; must be ≤ 365 |
+| `chunk_days` | int | `30` | Betfair API window size in days; must be ≤ 90 |
+| `min_coverage_overlap_days` | int | `1` | Days of already-covered data to re-pull for safety overlap |
+| `log_dir` | string | `""` | Directory for `run_history.jsonl` and success-marker files (defaults to `outputs/` when empty) |
+| `history_file` | string | `""` | Override path for `run_history.jsonl` (derived from `log_dir` when empty) |
+
 ### `azure_sql` (required only if `user.enable_azure_sql = true`)
 
 | Field | Type | Default | Notes |
@@ -456,7 +474,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 |---|---|---|---|
 | 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented, others stubbed), `pyproject.toml` dependency fixes |
 | 1.1b | ✅ this document | | Documentation overhaul for Phase 1.1 features |
-| 1.2 | ⏳ planned | | `schedule` config block, validation, `ScheduleConfig` dataclass, `credentials.template.json` updates |
+| 1.2 | ✅ shipped | `b65e636` | `schedule` config block, `ScheduleConfig` dataclass, schedule validation in `secrets.py`, `credentials.template.json` updated |
 | 2.1 | ⏳ planned | | `dbo.ScheduleState` Azure sidecar table, `scheduler/state.py`, `run_history.jsonl`, marker files |
 | 2.2 | ⏳ planned | | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ⏳ planned | | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands |
