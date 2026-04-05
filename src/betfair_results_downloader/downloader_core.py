@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 import json
 import time
@@ -17,6 +17,10 @@ from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError
 
 from .csv_utils import update_csv_with_new_data
+from .scheduler.date_windows import chunk_date_range
+
+
+DateLike = Union[date, datetime]
 
 
 # -----------------------------
@@ -100,76 +104,66 @@ def _call_list_cleared_orders(
             time.sleep(sleep_s)
 
 
-def fetch_cleared_orders_df(
-    *,
-    betfair: dict[str, Any],
-    lookback_days: int,
-    page_size: int = 200,
-) -> DownloadResult:
+def _to_utc_datetime(value: DateLike, *, end_of_day: bool) -> datetime:
     """
-    Notebook Cell 2, ported:
-    - login_interactive (no certs)
-    - list_cleared_orders paginated
-    - normalize schema and add Win + Sydney timezone columns
+    Normalize a ``date`` or ``datetime`` input to a UTC-aware ``datetime``.
+
+    - ``date`` inputs expand to the UTC start-of-day (``end_of_day=False``)
+      or end-of-day (``23:59:59`` UTC, ``end_of_day=True``).
+    - Naive ``datetime`` inputs are assumed to be UTC.
+    - tz-aware ``datetime`` inputs are converted to UTC.
     """
-    username = (betfair.get("username") or "").strip()
-    password = betfair.get("password") or ""
-    app_key = (betfair.get("app_key") or "").strip()
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    # plain date
+    if end_of_day:
+        return datetime(value.year, value.month, value.day, 23, 59, 59, tzinfo=timezone.utc)
+    return datetime(value.year, value.month, value.day, 0, 0, 0, tzinfo=timezone.utc)
 
-    if not username or not password or not app_key:
-        return DownloadResult(
-            attempted=False,
-            rows_downloaded=0,
-            message="Betfair credentials missing (username/password/app_key).",
-            df_co=None,
-        )
 
-    utc_now = datetime.now(timezone.utc)
-    from_dt = (utc_now - timedelta(days=int(lookback_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
-    to_dt = utc_now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    settled_range = betfairlightweight.filters.time_range(from_=from_dt, to=to_dt)
+def _build_datetime_chunks(
+    from_dt: datetime,
+    to_dt: datetime,
+    chunk_days: int,
+) -> list[tuple[datetime, datetime]]:
+    """
+    Split a UTC ``[from_dt, to_dt]`` range into chunks of at most ``chunk_days``
+    calendar days, preserving the caller's exact start/end datetime on the
+    first/last chunk (so legacy callers that pass sub-day precision see
+    identical API-window boundaries when the whole range fits in one chunk).
+    """
+    date_chunks = chunk_date_range(from_dt.date(), to_dt.date(), chunk_days)
+    result: list[tuple[datetime, datetime]] = []
+    last = len(date_chunks) - 1
+    for i, (cf, ct) in enumerate(date_chunks):
+        c_from = from_dt if i == 0 else datetime(cf.year, cf.month, cf.day, 0, 0, 0, tzinfo=timezone.utc)
+        c_to = to_dt if i == last else datetime(ct.year, ct.month, ct.day, 23, 59, 59, tzinfo=timezone.utc)
+        result.append((c_from, c_to))
+    return result
 
-    trading = betfairlightweight.APIClient(
-        username=username,
-        password=password,
-        app_key=app_key,
-    )
-    # Interactive login: opens browser / prompts; consistent with your notebook
-    trading.login_interactive()
 
-    indexrecord = 0
-    all_rows: list[dict[str, Any]] = []
+_REQUIRED_CLEARED_ORDER_COLS: list[str] = [
+    "eventTypeId", "eventId", "marketId", "selectionId", "handicap", "betId",
+    "placedDate", "persistenceType", "orderType", "side", "betOutcome",
+    "priceRequested", "settledDate", "lastMatchedDate", "betCount",
+    "priceMatched", "priceReduced", "sizeSettled", "profit",
+    "customerOrderRef", "customerStrategyRef",
+]
 
-    while True:
-        cleared_orders = _call_list_cleared_orders(
-            trading=trading,
-            settled_range=settled_range,
-            from_record=indexrecord,
-            record_count=page_size,
-        )
 
-        data = json.loads(cleared_orders.json())
-        batch = data.get("clearedOrders", []) or []
-        if not batch:
-            break
-
-        all_rows.extend(batch)
-        indexrecord += page_size
-
-    df_co = pd.DataFrame(all_rows)
-
-    required_cols = [
-        "eventTypeId", "eventId", "marketId", "selectionId", "handicap", "betId",
-        "placedDate", "persistenceType", "orderType", "side", "betOutcome",
-        "priceRequested", "settledDate", "lastMatchedDate", "betCount",
-        "priceMatched", "priceReduced", "sizeSettled", "profit",
-        "customerOrderRef", "customerStrategyRef",
-    ]
-    for c in required_cols:
+def _normalize_cleared_orders_df(df_co: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply the same schema normalization the notebook/GUI pipeline relies on:
+    ensure required columns exist, preserve extras (including itemDescription.*),
+    add the ``Win`` column, and convert ``placedDate`` to Australia/Sydney with
+    derived date/time-only columns.
+    """
+    for c in _REQUIRED_CLEARED_ORDER_COLS:
         if c not in df_co.columns:
             df_co[c] = pd.NA
-    # Keep all columns (including itemDescription.*) while ensuring required columns exist.
-    df_co = df_co[required_cols + [c for c in df_co.columns if c not in required_cols]]
+    df_co = df_co[_REQUIRED_CLEARED_ORDER_COLS + [c for c in df_co.columns if c not in _REQUIRED_CLEARED_ORDER_COLS]]
 
     def determine_win(row: pd.Series) -> int:
         if (row["side"] == "BACK" and row["betOutcome"] == "LOST") or (row["side"] == "LAY" and row["betOutcome"] == "WON"):
@@ -181,19 +175,178 @@ def fetch_cleared_orders_df(
     else:
         df_co["Win"] = pd.Series(dtype="int")
 
-    # placedDate => Australia/Sydney
     df_co["placedDate"] = pd.to_datetime(df_co["placedDate"], utc=True, errors="coerce")
     aet_zone = pytz.timezone("Australia/Sydney")
     df_co["placedDate"] = df_co["placedDate"].dt.tz_convert(aet_zone)
     df_co["placedDateOnly"] = df_co["placedDate"].dt.date
     df_co["placedTimeOnly"] = df_co["placedDate"].dt.time
+    return df_co
+
+
+def fetch_cleared_orders_df_range(
+    *,
+    betfair: dict[str, Any],
+    from_date: DateLike,
+    to_date: DateLike,
+    chunk_days: int = 30,
+    api_client: Optional[betfairlightweight.APIClient] = None,
+    page_size: int = 200,
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> DownloadResult:
+    """
+    Download settled (cleared) orders for an explicit date range, chunked into
+    safe Betfair settledDateRange windows.
+
+    Parameters
+    ----------
+    betfair:
+        Betfair credentials dict (``username``/``password``/``app_key``, and
+        optionally ``certs_dir``). Only consulted if ``api_client`` is ``None``.
+    from_date, to_date:
+        Inclusive range. ``date`` expands to full-day UTC; ``datetime`` is used
+        as-is (naive datetimes are assumed UTC).
+    chunk_days:
+        Max calendar days per API call (default 30). Betfair's
+        ``listClearedOrders`` settledDateRange becomes increasingly timeout-prone
+        on wider windows; 30 is a conservative default.
+    api_client:
+        Optional pre-authenticated ``betfairlightweight.APIClient``. When
+        provided (e.g. from ``scheduler.auth.build_api_client``), the caller
+        owns it and we will NOT log it out. When ``None``, this function falls
+        back to ``login_interactive()`` to preserve legacy GUI behaviour and
+        logs out its own client at the end.
+    page_size:
+        Records per ``listClearedOrders`` page (default 200, matches legacy).
+    status_cb:
+        Optional progress callback invoked with short human-readable strings,
+        once per chunk. Not called by the legacy ``fetch_cleared_orders_df``
+        delegator (kept silent there for backward compatibility).
+    """
+    username = (betfair.get("username") or "").strip()
+    password = betfair.get("password") or ""
+    app_key = (betfair.get("app_key") or "").strip()
+
+    if api_client is None and not (username and password and app_key):
+        return DownloadResult(
+            attempted=False,
+            rows_downloaded=0,
+            message="Betfair credentials missing (username/password/app_key).",
+            df_co=None,
+        )
+
+    from_dt = _to_utc_datetime(from_date, end_of_day=False)
+    to_dt = _to_utc_datetime(to_date, end_of_day=True)
+
+    if from_dt > to_dt:
+        empty = _normalize_cleared_orders_df(pd.DataFrame())
+        return DownloadResult(
+            attempted=True,
+            rows_downloaded=0,
+            message=f"Empty date range: {from_dt.date()} > {to_dt.date()}.",
+            df_co=empty,
+        )
+
+    chunks = _build_datetime_chunks(from_dt, to_dt, chunk_days)
+
+    # Auth: reuse caller-provided client (scheduler path) or build+login one
+    # ourselves using the legacy interactive flow (GUI/CLI path).
+    owns_client = False
+    trading: betfairlightweight.APIClient
+    if api_client is not None:
+        trading = api_client
+    else:
+        trading = betfairlightweight.APIClient(
+            username=username,
+            password=password,
+            app_key=app_key,
+        )
+        trading.login_interactive()
+        owns_client = True
+
+    all_rows: list[dict[str, Any]] = []
+    try:
+        total_chunks = len(chunks)
+        for idx, (c_from, c_to) in enumerate(chunks, start=1):
+            if status_cb and total_chunks > 1:
+                try:
+                    status_cb(
+                        f"Download chunk {idx}/{total_chunks}: "
+                        f"{c_from.strftime('%Y-%m-%d')} -> {c_to.strftime('%Y-%m-%d')}"
+                    )
+                except Exception:
+                    pass
+
+            settled_range = betfairlightweight.filters.time_range(
+                from_=c_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                to=c_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+
+            indexrecord = 0
+            while True:
+                cleared_orders = _call_list_cleared_orders(
+                    trading=trading,
+                    settled_range=settled_range,
+                    from_record=indexrecord,
+                    record_count=page_size,
+                )
+                data = json.loads(cleared_orders.json())
+                batch = data.get("clearedOrders", []) or []
+                if not batch:
+                    break
+                all_rows.extend(batch)
+                indexrecord += page_size
+    finally:
+        if owns_client:
+            try:
+                trading.logout()
+            except Exception:
+                pass
+
+    df_co = _normalize_cleared_orders_df(pd.DataFrame(all_rows))
 
     return DownloadResult(
         attempted=True,
         rows_downloaded=len(df_co),
-        message=f"Downloaded cleared orders: {len(df_co):,} rows (lookback_days={lookback_days}).",
+        message=(
+            f"Downloaded cleared orders: {len(df_co):,} rows "
+            f"(range={from_dt.date()}->{to_dt.date()}, chunks={len(chunks)})."
+        ),
         df_co=df_co,
     )
+
+
+def fetch_cleared_orders_df(
+    *,
+    betfair: dict[str, Any],
+    lookback_days: int,
+    page_size: int = 200,
+) -> DownloadResult:
+    """
+    Legacy GUI/notebook entry point: download the last ``lookback_days`` of
+    settled orders using interactive login.
+
+    Preserved with an identical public signature so the GUI pipeline
+    (``pipeline.run_pipeline``) continues to work unchanged. Internally
+    delegates to :func:`fetch_cleared_orders_df_range` for the actual work;
+    the chunking is a transparent robustness improvement.
+    """
+    utc_now = datetime.now(timezone.utc)
+    from_dt = utc_now - timedelta(days=int(lookback_days))
+
+    result = fetch_cleared_orders_df_range(
+        betfair=betfair,
+        from_date=from_dt,
+        to_date=utc_now,
+        page_size=page_size,
+    )
+
+    # Preserve the exact legacy message format the GUI currently displays.
+    if result.attempted and result.df_co is not None:
+        result.message = (
+            f"Downloaded cleared orders: {len(result.df_co):,} rows "
+            f"(lookback_days={lookback_days})."
+        )
+    return result
 
 
 # -----------------------------
@@ -216,6 +369,7 @@ def enrich_with_market_catalogue(
     batch_size: int = 50,
     sleep_seconds: float = 0.20,
     status_cb: Optional[callable] = None,
+    api_client: Optional[betfairlightweight.APIClient] = None,
 ) -> tuple[pd.DataFrame, EnrichResult]:
     """
     Notebook Cell 3, ported:
@@ -245,7 +399,7 @@ def enrich_with_market_catalogue(
     password = betfair.get("password") or ""
     app_key = (betfair.get("app_key") or "").strip()
 
-    if not username or not password or not app_key:
+    if api_client is None and (not username or not password or not app_key):
         return df_co, EnrichResult(
             attempted=False,
             markets_requested=0,
@@ -256,8 +410,13 @@ def enrich_with_market_catalogue(
             batch_size=batch_size,
         )
 
-    trading = betfairlightweight.APIClient(username=username, password=password, app_key=app_key)
-    trading.login_interactive()
+    # Reuse caller-provided session (scheduler path; eliminates double-login)
+    # or fall back to the legacy interactive login (GUI path, unchanged).
+    if api_client is not None:
+        trading = api_client
+    else:
+        trading = betfairlightweight.APIClient(username=username, password=password, app_key=app_key)
+        trading.login_interactive()
 
     out_dir = repo_root / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)

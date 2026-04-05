@@ -9,11 +9,18 @@ description = "Download Betfair cleared orders, write canonical + snapshots, and
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "betfairlightweight",
+    "pandas",
+    "numpy",
+    "pyodbc",
     "streamlit>=1.33",
     "plotly>=5.20",
     "pytz",
     "python-dateutil",
 ]
+
+[project.scripts]
+betfair-results = "betfair_results_downloader.__main__:main"
 
 
 [tool.setuptools]
