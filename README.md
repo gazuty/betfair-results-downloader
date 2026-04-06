@@ -371,7 +371,78 @@ Exit codes: `0` = success · `1` = failure · `2` = bad arguments.
 
 ### `schedule`
 
-**Status:** 🚧 Stub — prints `"not yet implemented"` and exits `2`. Platform installer coming in Phase 3.
+**Status:** ✅ Implemented
+
+Manages the platform scheduled job that runs `betfair-results run` automatically.
+
+```bash
+python -m betfair_results_downloader schedule install
+python -m betfair_results_downloader schedule status
+python -m betfair_results_downloader schedule uninstall
+python -m betfair_results_downloader schedule logs [--tail N]
+```
+
+**Optional install overrides:**
+
+```bash
+# Override the primary run time
+python -m betfair_results_downloader schedule install --time 07:00
+
+# Override retry windows (comma-separated)
+python -m betfair_results_downloader schedule install --time 07:00 --retries 10:00,20:00
+```
+
+The Python interpreter used is `sys.executable` (the one running the command), so run from your activated venv to ensure the correct interpreter is embedded in the scheduled job.
+
+Exit codes: `0` = success · `1` = failure.
+
+---
+
+## Quick Start — Scheduled Mode
+
+**Prerequisites:** Phase 1.1 cert auth must be working (`auth-test` returns 0) and `paths.results_csv_dir` must be set in `credentials.json`.
+
+1. Enable scheduling in `credentials.json`:
+
+   ```json
+   "schedule": {
+     "enabled": true,
+     "timezone": "Australia/Sydney",
+     "primary_time": "06:00",
+     "retry_times": ["09:00", "19:00", "23:00"]
+   }
+   ```
+
+2. Test a one-off run:
+
+   ```bash
+   python -m betfair_results_downloader run
+   ```
+
+3. Install the platform scheduler:
+
+   ```bash
+   python -m betfair_results_downloader schedule install
+   python -m betfair_results_downloader schedule status
+   ```
+
+4. To remove:
+
+   ```bash
+   python -m betfair_results_downloader schedule uninstall
+   ```
+
+---
+
+## Platform Notes
+
+### macOS (launchd)
+
+- **Plist location:** `~/Library/LaunchAgents/com.betfair.results.scheduler.plist`
+- **Loaded agent:** `launchctl list | grep com.betfair.results`
+- **Logs:** `outputs/launchd.out.log` and `outputs/launchd.err.log` (relative to repo root)
+- **On sleep/wake:** launchd will run missed jobs when the machine wakes. If `today` is already marked via the success marker, the run is skipped automatically.
+- **Re-install after credential change:** run `schedule uninstall && schedule install` to pick up updated credentials.
 
 ---
 
@@ -531,7 +602,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 1.2 | ✅ shipped | `b65e636` | `schedule` config block, `ScheduleConfig` dataclass, schedule validation in `secrets.py`, `credentials.template.json` updated |
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
-| 3.1 | ⏳ planned | | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands |
+| 3.1 | ✅ shipped | `7e1d368` | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands, platform dispatch in `installers/__init__.py` |
 | 3.2 | ⏳ planned | | Windows Task Scheduler + Linux systemd/cron installers |
 | 4.1 | ⏳ planned | | Optional GUI Scheduling tab |
 

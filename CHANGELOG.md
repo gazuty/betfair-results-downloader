@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Added (Phase 3.1 — 2026-04-06)
+
+- **`scheduler/installers/__init__.py`** — `get_installer()` platform dispatch: macOS → `LaunchdInstaller`; Windows → `TaskSchedulerInstaller`; Linux+systemd → `SystemdUserInstaller`; Linux → `CronInstaller`.
+- **`scheduler/installers/launchd.py`** — `LaunchdInstaller` with `install()`, `uninstall()`, `status()`, `logs()`. Generates XML plist with `StartCalendarInterval` array from `primary_time` + `retry_times`. Defaults to `sys.executable`. `dry_run=True` skips launchctl for testing.
+- **`schedule` CLI subcommand** (`__main__.py`) — fully implemented: `install` (with `--time`/`--retries` overrides), `uninstall`, `status`, `logs --tail N`.
+
 ### Added (Phase 2.2 — 2026-04-06)
 
 - **`scheduler/gap_detector.py`** — `compute_backfill_window(creds, schedule_cfg)` with three-level cascade: Azure `ScheduleState.LastCoveredDateUtc` → CSV max `settledDate` → cold-start fallback. Caps at `max_backfill_days`, applies `min_coverage_overlap_days` re-pull.
