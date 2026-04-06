@@ -6,7 +6,10 @@ from _bootstrap import ensure_src_on_path
 
 ensure_src_on_path()
 
-from betfair_results_downloader.azure_remediation import dedupe_user_marketid, get_scoped_user_id
+from betfair_results_downloader.azure_remediation import (
+    dedupe_user_marketid,
+    get_scoped_user_id,
+)
 
 
 def main() -> None:

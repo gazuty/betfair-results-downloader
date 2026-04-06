@@ -12,9 +12,9 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
 - **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
 - **Reporting Dashboard** — local Streamlit UI for daily/weekly P&L analytics
-- **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.4.0)*
-- **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.4.0)*
-- **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.4.0)*
+- **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
+- **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
+- **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
 - **Scheduled automatic daily downloads** — gap detection, multi-window retry, cross-platform installers (macOS launchd, Windows Task Scheduler, Linux systemd/cron)
 
 ---
@@ -41,6 +41,31 @@ On first launch, the **First Run Wizard** walks you through:
 5. *(Optional)* Entering Azure SQL credentials
 
 Then click **Run Downloader** and watch the four-phase progress: download → enrich → CSV → Azure (if enabled).
+
+### Recommended GUI Workflow
+
+Follow the same order shown at the top of the GUI:
+
+1) Choose Paths (Results folder) → 2) Validate → 3) Compute Lookback → 4) Run Downloader → (Optional) 5) Publish to Azure
+
+### Lookback v2 (auto)
+
+The downloader computes an **effective lookback** before a run. Decision order:
+
+1. Missing settled-date gaps within the audit window (≤ 90 days) → recommend based on the earliest missing date in the most recent missing range.
+2. Otherwise use `run_state.json` (`last_success_utc`).
+3. Otherwise fall back to the canonical CSV latest settledDate heuristic.
+4. If no CSV and no run_state exist, default to **90 days** (Betfair maximum backfill).
+
+To force a manual value: tick **Manual override**, enter the Days value — it applies for one run only.
+
+### Run logs
+
+Each run persists a full log transcript for debugging:
+
+`<results_csv_dir>/run_logs/run_YYYYMMDD_HHMMSS.txt`
+
+These logs match the GUI output and are written in UTF-8 with ASCII-safe status lines.
 
 ---
 
@@ -305,7 +330,7 @@ Features:
 
 ## CLI Reference
 
-As of **0.4.0**, the package exposes a CLI entry point:
+As of **0.5.0**, the package exposes a CLI entry point:
 
 ```bash
 python -m betfair_results_downloader <command> [options]
@@ -496,7 +521,7 @@ If any gate is closed, CSV outputs are written and state is advanced normally, b
 
 ## Configuration Reference
 
-Full annotated `credentials.json` schema. Fields marked **required** are mandatory for the feature they belong to; fields marked *(new in 0.4.0)* were added for cert login.
+Full annotated `credentials.json` schema. Fields marked **required** are mandatory for the feature they belong to; fields marked *(new in 0.5.0)* were added for cert login.
 
 ### `betfair` (required)
 
@@ -505,7 +530,7 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | `username` | string | — | ✅ | Betfair Exchange account username |
 | `password` | string | — | ✅ | Betfair Exchange account password |
 | `app_key` | string | — | ✅ | Registered Betfair app key |
-| `certs_dir` | string | `""` | Only for `auth-test` / scheduled mode *(new in 0.4.0)* | Absolute path to a directory containing `client-2048.crt` and `client-2048.key` |
+| `certs_dir` | string | `""` | Only for `auth-test` / scheduled mode *(new in 0.5.0)* | Absolute path to a directory containing `client-2048.crt` and `client-2048.key` |
 
 ### `user` (required)
 

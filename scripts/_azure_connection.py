@@ -11,7 +11,11 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from betfair_results_downloader.secrets import credentials_path, get_nested, load_credentials
+from betfair_results_downloader.secrets import (
+    credentials_path,
+    get_nested,
+    load_credentials,
+)
 
 
 def _require(value: str | None, *, field: str) -> str:
@@ -52,9 +56,15 @@ def get_azure_connection() -> pyodbc.Connection:
         raise SystemExit("Missing azure_sql block in credentials.json")
 
     server = _require(str(azsql.get("server") or "").strip(), field="azure_sql.server")
-    database = _require(str(azsql.get("database") or "").strip(), field="azure_sql.database")
-    username = _require(str(azsql.get("username") or "").strip(), field="azure_sql.username")
-    password = _require(str(azsql.get("password") or "").strip(), field="azure_sql.password")
+    database = _require(
+        str(azsql.get("database") or "").strip(), field="azure_sql.database"
+    )
+    username = _require(
+        str(azsql.get("username") or "").strip(), field="azure_sql.username"
+    )
+    password = _require(
+        str(azsql.get("password") or "").strip(), field="azure_sql.password"
+    )
     driver = str(azsql.get("driver") or "ODBC Driver 18 for SQL Server").strip()
 
     azsql_norm = {
@@ -84,4 +94,6 @@ def get_scoped_user_id() -> str:
     if user_id:
         return user_id
 
-    raise SystemExit("Missing AZURE_SQL_USERID and no user.db_user_id/user.user_id in credentials.json")
+    raise SystemExit(
+        "Missing AZURE_SQL_USERID and no user.db_user_id/user.user_id in credentials.json"
+    )

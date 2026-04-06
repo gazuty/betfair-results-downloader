@@ -84,3 +84,7 @@ __pycache__/
 
 # Local repo inspection / briefing files
 repo_print.*
+
+# ClaudeCode workspace
+.claude/
+

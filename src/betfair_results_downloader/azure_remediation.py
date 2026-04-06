@@ -66,9 +66,15 @@ def get_azure_connection() -> pyodbc.Connection:
         raise SystemExit("Missing azure_sql block in credentials.json")
 
     server = _require(str(azsql.get("server") or "").strip(), field="azure_sql.server")
-    database = _require(str(azsql.get("database") or "").strip(), field="azure_sql.database")
-    username = _require(str(azsql.get("username") or "").strip(), field="azure_sql.username")
-    password = _require(str(azsql.get("password") or "").strip(), field="azure_sql.password")
+    database = _require(
+        str(azsql.get("database") or "").strip(), field="azure_sql.database"
+    )
+    username = _require(
+        str(azsql.get("username") or "").strip(), field="azure_sql.username"
+    )
+    password = _require(
+        str(azsql.get("password") or "").strip(), field="azure_sql.password"
+    )
     driver = str(azsql.get("driver") or "ODBC Driver 18 for SQL Server").strip()
 
     azsql_norm = {
@@ -90,7 +96,9 @@ def _normalize_table(table: str) -> str:
     return f"[{parts[0]}].[{parts[1]}]"
 
 
-def _write_csv(path: Path, rows: Iterable[Iterable[object]], headers: list[str]) -> None:
+def _write_csv(
+    path: Path, rows: Iterable[Iterable[object]], headers: list[str]
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -240,7 +248,9 @@ def delete_user_rows(user_id: str, table: str) -> dict[str, Any]:
 
             if int(post) != 0:
                 conn.rollback()
-                raise SystemExit(f"Post-delete count is not zero ({post}). Rolled back.")
+                raise SystemExit(
+                    f"Post-delete count is not zero ({post}). Rolled back."
+                )
 
             conn.commit()
             return {
@@ -325,17 +335,23 @@ def _sql_string_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def create_scoped_unique_index(user_id: str, table: str, index_name: str | None = None) -> dict[str, Any]:
+def create_scoped_unique_index(
+    user_id: str, table: str, index_name: str | None = None
+) -> dict[str, Any]:
     table_q = _normalize_table(table)
     variants = check_raw_userid_variants(user_id, table)
     if variants["variant_count"] > 1:
-        raise SystemExit("Multiple raw UserID variants detected; normalize before creating index.")
+        raise SystemExit(
+            "Multiple raw UserID variants detected; normalize before creating index."
+        )
 
     with get_azure_connection() as conn:
         cur = conn.cursor()
         dup_count = _count_duplicates(cur, table_q, user_id)
         if dup_count != 0:
-            raise SystemExit(f"Duplicates still exist ({dup_count}). Refusing to create index.")
+            raise SystemExit(
+                f"Duplicates still exist ({dup_count}). Refusing to create index."
+            )
 
         default_index = f"UX_MarketResults_UserID_MarketID_{_sanitize_index_suffix(user_id.strip())}"
         index_name = index_name or default_index
@@ -455,14 +471,18 @@ def detect_row_identifier(table: str) -> RowIdentifier | None:
     if not order_parts:
         return None
 
-    return RowIdentifier(order_by_sql=", ".join(order_parts), reason=", ".join(reason_parts))
+    return RowIdentifier(
+        order_by_sql=", ".join(order_parts), reason=", ".join(reason_parts)
+    )
 
 
 def dedupe_user_marketid(user_id: str, table: str) -> dict[str, Any]:
     table_q = _normalize_table(table)
     identifier = detect_row_identifier(table)
     if identifier is None:
-        raise SystemExit("No safe row identifier found (no timestamp, identity, or primary key). Aborting.")
+        raise SystemExit(
+            "No safe row identifier found (no timestamp, identity, or primary key). Aborting."
+        )
 
     with get_azure_connection() as conn:
         conn.autocommit = False
@@ -498,7 +518,9 @@ def dedupe_user_marketid(user_id: str, table: str) -> dict[str, Any]:
             remaining = _count_duplicates(cur, table_q, user_id)
             if remaining != 0:
                 conn.rollback()
-                raise SystemExit(f"Duplicates remain after delete ({remaining}). Rolled back.")
+                raise SystemExit(
+                    f"Duplicates remain after delete ({remaining}). Rolled back."
+                )
 
             conn.commit()
             return {
@@ -541,7 +563,9 @@ def create_unique_index(
     if scope == "global":
         global_dupes = check_global_duplicates(table)
         if global_dupes["duplicate_count"] != 0:
-            raise SystemExit("Global duplicates exist. Refusing to create unique index.")
+            raise SystemExit(
+                "Global duplicates exist. Refusing to create unique index."
+            )
 
         default_index = "UX_MarketResults_UserID_MarketID"
         index_name = index_name or default_index
@@ -557,7 +581,9 @@ def create_unique_index(
                     "created": False,
                     "message": "Index already exists.",
                 }
-            cur.execute(f"CREATE UNIQUE INDEX [{index_name}] ON {table_q} (UserID, MarketID);")
+            cur.execute(
+                f"CREATE UNIQUE INDEX [{index_name}] ON {table_q} (UserID, MarketID);"
+            )
             conn.commit()
             return {
                 "scope": scope,

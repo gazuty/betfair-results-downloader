@@ -4,7 +4,10 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 
-from betfair_results_downloader.reporting.transforms import daily_agg, weekly_agg_sun_start
+from betfair_results_downloader.reporting.transforms import (
+    daily_agg,
+    weekly_agg_sun_start,
+)
 from betfair_results_downloader.reporting.exports import download_df_as_csv
 from betfair_results_downloader.reporting.ui import kpi_row, dataframe_pretty
 

@@ -6,7 +6,11 @@ from _bootstrap import ensure_src_on_path
 
 ensure_src_on_path()
 
-from betfair_results_downloader.azure_remediation import get_scoped_user_id, normalize_userid, preview_normalize_userid
+from betfair_results_downloader.azure_remediation import (
+    get_scoped_user_id,
+    normalize_userid,
+    preview_normalize_userid,
+)
 
 
 def main() -> None:

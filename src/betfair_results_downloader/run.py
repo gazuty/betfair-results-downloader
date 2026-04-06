@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -19,6 +20,10 @@ def run_downloader(
     *,
     status_cb: Optional[Callable[[str], None]] = None,
     confirm_publish_cb: Optional[Callable[[dict[str, Any]], bool]] = None,
+    last_settled_date_utc: Optional[date] = None,
+    recommended_days: Optional[int] = None,
+    recommendation_note: Optional[str] = None,
+    lookback_source: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     GUI/CLI entrypoint:
@@ -36,6 +41,10 @@ def run_downloader(
         creds=creds,
         status_cb=status_cb,
         confirm_publish_cb=confirm_publish_cb,
+        last_settled_date_utc=last_settled_date_utc,
+        recommended_days=recommended_days,
+        recommendation_note=recommendation_note,
+        lookback_source=lookback_source,
     )
 
 
@@ -70,13 +79,23 @@ def publish_to_azure_from_canonical_incremental(
         msg = "Azure upload disabled (Enable Azure upload is unchecked)."
         publish_only["message"] = msg
         azure_result["message"] = msg
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     if config.dry_run:
         msg = "Dry run is enabled. Turn it off to publish to Azure."
         publish_only["message"] = msg
         azure_result["message"] = msg
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     paths = creds.get("paths", {}) or {}
     results_dir_raw = paths.get("results_csv_dir")
@@ -84,7 +103,12 @@ def publish_to_azure_from_canonical_incremental(
         msg = "Missing paths.results_csv_dir in secrets/credentials.json."
         publish_only["message"] = msg
         azure_result["message"] = msg
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     canonical_path = Path(results_dir_raw) / "cleared_orders_cleaned.csv"
     publish_only["canonical_path"] = str(canonical_path)
@@ -92,7 +116,12 @@ def publish_to_azure_from_canonical_incremental(
         msg = "Canonical CSV not found; run downloader first."
         publish_only["message"] = msg
         azure_result["message"] = msg
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     say("Publish-only: Loading canonical CSV...")
     try:
@@ -101,7 +130,12 @@ def publish_to_azure_from_canonical_incremental(
         msg = f"Failed to read canonical CSV: {e}"
         publish_only["message"] = msg
         azure_result["message"] = msg
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     publish_only["rows_loaded"] = len(df_co)
     publish_only["attempted"] = True
@@ -121,22 +155,49 @@ def publish_to_azure_from_canonical_incremental(
     if not prep.attempted:
         msg = prep.message or "Azure prep failed."
         publish_only["message"] = msg
-        azure_result = {**azure_prep_summary, "publish_attempted": False, "message": msg}
-        return {"ok": False, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        azure_result = {
+            **azure_prep_summary,
+            "publish_attempted": False,
+            "message": msg,
+        }
+        return {
+            "ok": False,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     if not prep.rows_to_write:
         msg = "No rows to publish (Azure prep produced 0 rows)."
         publish_only["message"] = msg
-        azure_result = {**azure_prep_summary, "publish_attempted": False, "message": msg}
-        return {"ok": True, "message": msg, "publish_only": publish_only, "azure": azure_result}
+        azure_result = {
+            **azure_prep_summary,
+            "publish_attempted": False,
+            "message": msg,
+        }
+        return {
+            "ok": True,
+            "message": msg,
+            "publish_only": publish_only,
+            "azure": azure_result,
+        }
 
     if confirm_publish_cb:
         ok = confirm_publish_cb({**azure_prep_summary, "user_id": config.user_id})
         if not ok:
             msg = "Azure publish cancelled by user (non-dry-run)."
             publish_only["message"] = msg
-            azure_result = {**azure_prep_summary, "publish_attempted": False, "message": msg}
-            return {"ok": True, "message": msg, "publish_only": publish_only, "azure": azure_result}
+            azure_result = {
+                **azure_prep_summary,
+                "publish_attempted": False,
+                "message": msg,
+            }
+            return {
+                "ok": True,
+                "message": msg,
+                "publish_only": publish_only,
+                "azure": azure_result,
+            }
 
     say("Publish-only: Syncing to Azure (incremental)...")
     az = publish_to_azure_sql(
@@ -146,7 +207,11 @@ def publish_to_azure_from_canonical_incremental(
     )
     az_dict = asdict(az)
     publish_attempted = bool(az_dict.pop("attempted", False))
-    azure_result = {**azure_prep_summary, "publish_attempted": publish_attempted, **az_dict}
+    azure_result = {
+        **azure_prep_summary,
+        "publish_attempted": publish_attempted,
+        **az_dict,
+    }
     publish_only["message"] = az.message or "Azure publish complete."
 
     return {
