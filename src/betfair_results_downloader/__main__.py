@@ -1,12 +1,10 @@
 """
 Package CLI entry point.
 
-Implemented subcommands:
-  auth-test  — cert-based non-interactive login test (Phase 1.1)
-  run        — one scheduled download (Phase 2.2)
-  backfill   — explicit date-range download (Phase 2.2)
-
-Stub subcommands (Phase 3+):
+Subcommands:
+  auth-test  — cert-based non-interactive login test
+  run        — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
+  backfill   — explicit date-range download
   schedule   — install/uninstall/status/logs for the platform scheduled job
 """
 from __future__ import annotations

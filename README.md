@@ -15,7 +15,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.4.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.4.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.4.0)*
-- **Scheduled automatic daily downloads** — *in development; see [Roadmap](#roadmap-scheduled-automatic-downloads)*
+- **Scheduled automatic daily downloads** — gap detection, multi-window retry, cross-platform installers (macOS launchd, Windows Task Scheduler, Linux systemd/cron)
 
 ---
 
@@ -111,7 +111,7 @@ See [Configuration Reference](#configuration-reference) for the full schema incl
 
 Cert-based login lets the app authenticate to Betfair **without any interactive step** — no browser, no prompts, no session timeouts mid-run. This is required for automated/scheduled use and is the approach Betfair officially supports for bot accounts.
 
-The GUI doesn't need certs (it uses interactive login). You only need to enroll a certificate if you want to run `python -m betfair_results_downloader auth-test` or the upcoming scheduled downloads feature.
+The GUI doesn't need certs (it uses interactive login). You only need to enroll a certificate if you want to run `python -m betfair_results_downloader auth-test` or the scheduled downloads feature.
 
 #### What a client certificate is (and why Betfair needs one)
 
@@ -492,12 +492,6 @@ All four gates must be open for the scheduler to write to Azure SQL:
 
 If any gate is closed, CSV outputs are written and state is advanced normally, but Azure publishing is skipped with a log message.
 
-The `--help` flag lists all subcommands:
-
-```bash
-python -m betfair_results_downloader --help
-```
-
 ---
 
 ## Configuration Reference
@@ -621,7 +615,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | Phase | PR | Status | Delivers |
 |---|---|---|---|
 | 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented), `pyproject.toml` dependency fixes |
-| 1.1b | ✅ this document | | Documentation overhaul for Phase 1.1 features |
+| 1.1b | ✅ shipped | `eb928ee` | Documentation overhaul for Phase 1.1 features |
 | 1.2 | ✅ shipped | `b65e636` | `schedule` config block, `ScheduleConfig` dataclass, schedule validation in `secrets.py`, `credentials.template.json` updated |
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
@@ -653,11 +647,20 @@ src/betfair_results_downloader/
   csv_utils.py            # Canonical CSV dedupe + atomic write
   recommend.py            # Lookback recommendation from existing CSV
   secrets.py              # Credentials resolver + validator
-  config.py               # DownloaderConfig dataclass
+  config.py               # DownloaderConfig + ScheduleConfig dataclasses
+  paths.py                # Cross-platform OneDrive path resolver
   __main__.py             # CLI entry point (auth-test, run, backfill, schedule)
-  scheduler/              # Scheduled-downloads package (Phase 1.1+)
+  scheduler/              # Scheduled-downloads package
     auth.py               # build_api_client() — cert-based login
     date_windows.py       # chunk_date_range() — safe API windowing
+    gap_detector.py       # compute_backfill_window() — Azure/CSV/cold-start
+    runner.py             # run_scheduled() / run_backfill() — headless pipeline
+    state.py              # ScheduleState read/upsert, JSONL history, markers
+    installers/           # Platform-specific scheduler installers
+      launchd.py          # macOS LaunchAgent plist
+      taskscheduler.py    # Windows Task Scheduler XML
+      systemd_user.py     # Linux systemd --user units
+      cron.py             # Linux cron fallback
   reporting/              # Streamlit dashboard (IO, schema, filters, pages)
   reporting_app.py        # Streamlit entry point
 
