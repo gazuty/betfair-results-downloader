@@ -127,7 +127,6 @@ def _run_pipeline(
     results_dir = _resolve_results_dir(creds)
 
     betfair_creds = creds.get("betfair") or {}
-    repo_root = _resolve_repo_root()
 
     run_started = datetime.now(timezone.utc)
     client = None
@@ -174,12 +173,12 @@ def _run_pipeline(
         df_co = dl.df_co
 
         # --- Phase 2: Enrich ---
-        from ..downloader_core import enrich_with_market_catalogue  # noqa: PLC0415
+        from ..downloader_core import enrich_with_market_catalogue, resolve_enrichment_cache_dir  # noqa: PLC0415
         logger.info("Enriching with market catalogue...")
         df_co, enr = enrich_with_market_catalogue(
             df_co=df_co,
             betfair=betfair_creds,
-            repo_root=repo_root,
+            cache_dir=resolve_enrichment_cache_dir(results_dir),
             enable=True,
             use_cache=True,
             api_client=client,
