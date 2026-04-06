@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..config import ScheduleConfig
+from ..paths import get_results_database_dir
 from .auth import build_api_client
 from .gap_detector import compute_backfill_window
 from .state import (
@@ -96,11 +97,9 @@ def _resolve_repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _resolve_results_dir(creds: dict[str, Any]) -> Optional[Path]:
+def _resolve_results_dir(creds: dict[str, Any]) -> Path:
     raw = (creds.get("paths") or {}).get("results_csv_dir", "")
-    if not raw:
-        return None
-    return Path(raw)
+    return Path(raw) if raw else get_results_database_dir()
 
 
 def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Path:
@@ -126,14 +125,6 @@ def _run_pipeline(
     ``finally``).
     """
     results_dir = _resolve_results_dir(creds)
-    if results_dir is None:
-        return RunResult(
-            ok=False,
-            status="failed",
-            from_date=from_date,
-            to_date=to_date,
-            message="Missing paths.results_csv_dir in credentials.",
-        )
 
     betfair_creds = creds.get("betfair") or {}
     repo_root = _resolve_repo_root()

@@ -12,6 +12,7 @@ from betfair_results_downloader.scheduler.gap_detector import compute_backfill_w
 from betfair_results_downloader.scheduler.runner import (
     RunResult,
     _azure_publish_allowed,
+    _resolve_results_dir,
     run_backfill,
 )
 from betfair_results_downloader.scheduler.state import ScheduleStateRow
@@ -242,5 +243,22 @@ class TestRunBackfillDateValidation:
             from_date=date(2026, 4, 6),
             to_date=date(2026, 4, 6),
         )
-        # Missing results_csv_dir → failed, but no exception
+        # Missing results_csv_dir → falls back to cross-platform resolver
         assert result.status in ("failed", "success", "partial")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_results_dir — fallback to get_results_database_dir
+# ---------------------------------------------------------------------------
+
+class TestResolveResultsDir:
+    def test_falls_back_to_get_results_database_dir_when_empty(self) -> None:
+        """When paths.results_csv_dir is empty, fall back to get_results_database_dir()."""
+        sentinel = Path("/mock/onedrive/results")
+        creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
+        with patch(
+            "betfair_results_downloader.scheduler.runner.get_results_database_dir",
+            return_value=sentinel,
+        ):
+            result = _resolve_results_dir(creds)
+        assert result == sentinel
