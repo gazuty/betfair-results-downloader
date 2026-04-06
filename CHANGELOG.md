@@ -45,7 +45,7 @@ Foundations for scheduled automatic downloads. Additive and backward-compatible 
 - **Chunked date-range download** (`downloader_core.fetch_cleared_orders_df_range`). Accepts explicit `date`/`datetime` endpoints, splits into safe Betfair `settledDateRange` windows (default 30 days per chunk), and supports reusing a pre-authenticated `APIClient` to eliminate double-login during enrichment.
 - **Package CLI entry point** — `python -m betfair_results_downloader` (and the `betfair-results` console script after `pip install -e .`). Implemented subcommand:
   - `auth-test` — verifies cert login end-to-end, masks all secrets, reports actionable errors
-- **Stable CLI surface for upcoming phases** — `run`, `backfill`, and `schedule` subcommands are declared and visible in `--help`; they currently print a clear "not yet implemented" message and exit `2`.
+- **Stable CLI surface** — `run`, `backfill`, and `schedule` subcommands declared and visible in `--help` (implemented in Phases 2.2 and 3.1 above).
 - **Unit tests** for date-range chunking covering single-day, exact-fit, exact-multiple, remainder, inverted, and invalid-input edge cases (`tests/test_date_windows.py`, 11 tests).
 - **`pyproject.toml` runtime dependencies** — added `betfairlightweight`, `pandas`, `numpy`, `pyodbc` (previously only in `requirements.txt`) and a `[project.scripts]` entry for the CLI.
 - **Comprehensive documentation** — README restructured around current capabilities with detailed cert enrollment guide, CLI reference, configuration reference table, and scheduled-downloads roadmap.
