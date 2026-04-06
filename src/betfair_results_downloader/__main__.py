@@ -1,9 +1,13 @@
 """
 Package CLI entry point.
 
-Phase 1.1 exposes only ``auth-test``; other subcommands are declared but raise
-``NotImplementedError`` with a clear "scheduled for a later PR" message so that
-they appear in ``--help`` and stable CLI shape is established early.
+Implemented subcommands:
+  auth-test  — cert-based non-interactive login test (Phase 1.1)
+  run        — one scheduled download (Phase 2.2)
+  backfill   — explicit date-range download (Phase 2.2)
+
+Stub subcommands (Phase 3+):
+  schedule   — install/uninstall/status/logs for the platform scheduled job
 """
 from __future__ import annotations
 
@@ -90,10 +94,109 @@ def _cmd_auth_test(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_creds_and_schedule():
+    """Load credentials and parse schedule config; shared by run/backfill."""
+    from .secrets import credentials_path, load_credentials
+    from .config import parse_schedule_config
+
+    creds_path = credentials_path()
+    if not creds_path.exists():
+        print(f"FAIL: credentials file not found at {creds_path}")
+        sys.exit(2)
+
+    try:
+        creds = load_credentials(creds_path)
+    except Exception as e:
+        print(f"FAIL: could not parse credentials.json: {type(e).__name__}: {e}")
+        sys.exit(2)
+
+    schedule_cfg = parse_schedule_config(creds)
+    return creds, schedule_cfg
+
+
+def _cmd_run(_args: argparse.Namespace) -> int:
+    """
+    Run one scheduled download.
+
+    Checks today's success marker, computes the backfill window via gap
+    detection, downloads/enriches/writes CSV, and optionally publishes to
+    Azure SQL (four-gate model).
+
+    Exit codes: 0=success or skipped, 1=failure.
+    """
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    creds, schedule_cfg = _load_creds_and_schedule()
+
+    from .scheduler.runner import run_scheduled
+    result = run_scheduled(creds, schedule_cfg)
+
+    if result.skipped:
+        print(f"Skipped: {result.skip_reason}")
+        return 0
+
+    if result.ok:
+        print(f"OK ({result.status}): {result.message}")
+        return 0
+
+    print(f"FAIL ({result.status}): {result.message}")
+    for err in result.errors:
+        print(f"  - {err}")
+    return 1
+
+
+def _cmd_backfill(args: argparse.Namespace) -> int:
+    """
+    Manual backfill for an explicit date range.
+
+    Downloads/enriches/writes CSV for [--from, --to].  Does not update
+    LastCoveredDateUtc or write a success marker.
+
+    Exit codes: 0=success, 1=failure, 2=bad arguments.
+    """
+    import logging
+    from datetime import date
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    if not args.from_date or not args.to_date:
+        print("FAIL: --from and --to are required for backfill.")
+        return 2
+
+    try:
+        from_date = date.fromisoformat(args.from_date)
+        to_date = date.fromisoformat(args.to_date)
+    except ValueError as e:
+        print(f"FAIL: invalid date format (expected YYYY-MM-DD): {e}")
+        return 2
+
+    creds, schedule_cfg = _load_creds_and_schedule()
+
+    from .scheduler.runner import run_backfill
+    result = run_backfill(creds, schedule_cfg, from_date, to_date)
+
+    if result.ok:
+        print(f"OK ({result.status}): {result.message}")
+        return 0
+
+    print(f"FAIL ({result.status}): {result.message}")
+    for err in result.errors:
+        print(f"  - {err}")
+    return 1
+
+
 def _cmd_not_implemented(args: argparse.Namespace) -> int:
     print(
         f"'{args.command}' is declared but not yet implemented. "
-        "Scheduled for a later PR (Phase 2+)."
+        "Scheduled for a later PR (Phase 3+)."
     )
     return 2
 
@@ -111,17 +214,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "run",
-        help="Run one scheduled download (not yet implemented).",
+        help="Run one scheduled download (gap-detect, fetch, enrich, CSV, optional Azure).",
     )
     bf = sub.add_parser(
         "backfill",
-        help="Manual backfill for an explicit date range (not yet implemented).",
+        help="Manual backfill for an explicit date range.",
     )
-    bf.add_argument("--from", dest="from_date", help="YYYY-MM-DD (inclusive)")
-    bf.add_argument("--to", dest="to_date", help="YYYY-MM-DD (inclusive)")
+    bf.add_argument("--from", dest="from_date", metavar="YYYY-MM-DD",
+                    help="Inclusive start date (required)")
+    bf.add_argument("--to", dest="to_date", metavar="YYYY-MM-DD",
+                    help="Inclusive end date (required)")
     sch = sub.add_parser(
         "schedule",
-        help="Install, remove, or inspect the platform scheduled job (not yet implemented).",
+        help="Install, remove, or inspect the platform scheduled job (Phase 3+, not yet implemented).",
     )
     sch.add_argument("action", choices=["install", "uninstall", "status", "logs"])
 
@@ -134,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "auth-test":
         return _cmd_auth_test(args)
+    if args.command == "run":
+        return _cmd_run(args)
+    if args.command == "backfill":
+        return _cmd_backfill(args)
     return _cmd_not_implemented(args)
 
 
