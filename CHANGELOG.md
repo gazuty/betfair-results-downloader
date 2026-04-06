@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added (Phase 2.2 — 2026-04-06)
+
+- **`scheduler/gap_detector.py`** — `compute_backfill_window(creds, schedule_cfg)` with three-level cascade: Azure `ScheduleState.LastCoveredDateUtc` → CSV max `settledDate` → cold-start fallback. Caps at `max_backfill_days`, applies `min_coverage_overlap_days` re-pull.
+- **`scheduler/runner.py`** — `run_scheduled()` (skip-marker check, gap detect, pipeline, state upsert, marker write, history append) and `run_backfill()` (explicit range, no state update). Four-gate Azure publish model. `client.logout()` in `finally`.
+- **`run` CLI subcommand** — calls `run_scheduled`; exit `0` on success/skip, `1` on failure.
+- **`backfill` CLI subcommand** — `--from YYYY-MM-DD --to YYYY-MM-DD`; calls `run_backfill`; exit `0`/`1`/`2`.
+
+### Added (Phase 2.1 — 2026-04-06)
+
+- **`scheduler/state.py`** — `read_schedule_state`, `upsert_schedule_state` (MERGE), `append_run_history` (JSONL), `check_today_success_marker`, `write_today_success_marker`. Azure failures caught and returned as `None`/`False` — callers fall back to CSV state without crashing.
+- **`scripts/azure_create_schedulestate.py`** — idempotent DDL for `dbo.ScheduleState` with `IF OBJECT_ID IS NULL` guard.
+
 ### Added (Phase 1.2 — 2026-04-06)
 
 - **`ScheduleConfig` dataclass** (`config.py`) — frozen dataclass with all scheduled-download settings: `enabled`, `timezone`, `primary_time`, `retry_times`, `publish_to_azure`, `allow_azure_publish`, `max_backfill_days`, `chunk_days`, `min_coverage_overlap_days`, `log_dir`, `history_file`.

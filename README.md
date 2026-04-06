@@ -331,20 +331,74 @@ Exit codes: `0` success · `1` auth/runtime failure · `2` config/file-missing f
 
 See [Betfair Certificate Enrollment — Step 4](#step-4--verify-with-auth-test) for example output and troubleshooting.
 
-### `run`, `backfill`, `schedule`
+### `run`
 
-**Status:** 🚧 Stubs — defined in the CLI surface but print `"not yet implemented"` and exit `2`.
+**Status:** ✅ Implemented
 
-These are the entry points for the upcoming scheduled downloads feature. See the [Roadmap](#roadmap-scheduled-automatic-downloads) for what each will do and the implementation phase it belongs to.
-
-Invoking them today:
+Runs one scheduled download for the current day.
 
 ```bash
 python -m betfair_results_downloader run
-# 'run' is declared but not yet implemented. Scheduled for a later PR (Phase 2+).
 ```
 
-The stable CLI shape is visible in `--help`:
+**What it does:**
+
+1. Checks today's success marker (`outputs/last_success_YYYY-MM-DD.marker`) — skips silently if today's data has already been covered.
+2. Computes the backfill window via gap detection (see [Gap Detection](#gap-detection-logic)).
+3. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`).
+4. Enriches with market catalogue (uses cache).
+5. Writes canonical + snapshot CSVs.
+6. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)).
+7. On success: upserts `dbo.ScheduleState`, writes today's success marker, appends to `run_history.jsonl`.
+
+Exit codes: `0` = success or already-skipped · `1` = failure.
+
+Output: structured log lines to stdout (human-readable, one-per-event format).
+
+### `backfill`
+
+**Status:** ✅ Implemented
+
+Downloads an explicit date range. No skip-marker check; does not advance `LastCoveredDateUtc`.
+
+```bash
+python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD
+```
+
+Both `--from` and `--to` are required and inclusive. Azure publish gates apply.
+
+Exit codes: `0` = success · `1` = failure · `2` = bad arguments.
+
+### `schedule`
+
+**Status:** 🚧 Stub — prints `"not yet implemented"` and exits `2`. Platform installer coming in Phase 3.
+
+---
+
+### Gap Detection Logic
+
+The backfill window is computed in three steps:
+
+1. **Azure `dbo.ScheduleState`** — reads `LastCoveredDateUtc` for this user from Azure SQL (requires `user.enable_azure_sql=true` and working `pyodbc`). Most authoritative source.
+2. **Canonical CSV** — reads the maximum `settledDate` from `cleared_orders_cleaned.csv` in `paths.results_csv_dir`.
+3. **Cold-start fallback** — `today - max_backfill_days`.
+
+In all cases the `from_date` is pulled back by `min_coverage_overlap_days` for safety re-pull, then capped at `max_backfill_days` before today.
+
+### Azure Publish Safety Gates — Scheduled Mode
+
+All four gates must be open for the scheduler to write to Azure SQL:
+
+| Gate | Credential/Config key | Description |
+|---|---|---|
+| 1 | `user.enable_azure_sql = true` | Master Azure toggle |
+| 2 | `user.dry_run = false` | Second safety gate |
+| 3 | `schedule.publish_to_azure = true` | Scheduler-level toggle |
+| 4 | `schedule.allow_azure_publish = true` | Explicit scheduler opt-in |
+
+If any gate is closed, CSV outputs are written and state is advanced normally, but Azure publishing is skipped with a log message.
+
+The `--help` flag lists all subcommands:
 
 ```bash
 python -m betfair_results_downloader --help
@@ -475,8 +529,8 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented, others stubbed), `pyproject.toml` dependency fixes |
 | 1.1b | ✅ this document | | Documentation overhaul for Phase 1.1 features |
 | 1.2 | ✅ shipped | `b65e636` | `schedule` config block, `ScheduleConfig` dataclass, schedule validation in `secrets.py`, `credentials.template.json` updated |
-| 2.1 | ⏳ planned | | `dbo.ScheduleState` Azure sidecar table, `scheduler/state.py`, `run_history.jsonl`, marker files |
-| 2.2 | ⏳ planned | | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
+| 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
+| 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ⏳ planned | | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands |
 | 3.2 | ⏳ planned | | Windows Task Scheduler + Linux systemd/cron installers |
 | 4.1 | ⏳ planned | | Optional GUI Scheduling tab |
