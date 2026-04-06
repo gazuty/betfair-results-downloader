@@ -193,11 +193,93 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     return 1
 
 
-def _cmd_not_implemented(args: argparse.Namespace) -> int:
-    print(
-        f"'{args.command}' is declared but not yet implemented. "
-        "Scheduled for a later PR (Phase 3+)."
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    """
+    Install, uninstall, query status, or show logs for the platform scheduler.
+
+    Actions: install | uninstall | status | logs [--tail N]
+    """
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
     )
+
+    from pathlib import Path
+
+    creds, schedule_cfg = _load_creds_and_schedule()
+
+    try:
+        from .scheduler.installers import get_installer
+        installer = get_installer()
+    except RuntimeError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+    action = args.action
+
+    if action == "install":
+        repo_root = Path(__file__).resolve().parents[2]
+        import sys
+        venv_python = Path(getattr(args, "python", None) or sys.executable)
+
+        # Apply CLI time overrides to schedule config if provided
+        if getattr(args, "time", None) or getattr(args, "retries", None):
+            from .config import ScheduleConfig
+            retry_list = [r.strip() for r in (args.retries or "").split(",") if r.strip()]
+            schedule_cfg = ScheduleConfig(
+                enabled=schedule_cfg.enabled,
+                timezone=schedule_cfg.timezone,
+                primary_time=args.time or schedule_cfg.primary_time,
+                retry_times=tuple(retry_list) if retry_list else schedule_cfg.retry_times,
+                publish_to_azure=schedule_cfg.publish_to_azure,
+                allow_azure_publish=schedule_cfg.allow_azure_publish,
+                max_backfill_days=schedule_cfg.max_backfill_days,
+                chunk_days=schedule_cfg.chunk_days,
+                min_coverage_overlap_days=schedule_cfg.min_coverage_overlap_days,
+                log_dir=schedule_cfg.log_dir,
+                history_file=schedule_cfg.history_file,
+            )
+
+        log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
+        log_dir = Path(log_dir_raw).expanduser()
+
+        result = installer.install(
+            schedule_cfg=schedule_cfg,
+            repo_root=repo_root,
+            venv_python_path=venv_python,
+            log_dir=log_dir,
+        )
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
+    if action == "uninstall":
+        result = installer.uninstall()
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
+    if action == "status":
+        info = installer.status()
+        print(info["message"])
+        if info.get("installed"):
+            print(f"  installed     : {info['installed']}")
+            print(f"  loaded        : {info['loaded']}")
+            print(f"  pid           : {info.get('pid', 'N/A')}")
+            print(f"  last_exit     : {info.get('last_exit', 'N/A')}")
+        return 0
+
+    if action == "logs":
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
+        log_dir = Path(log_dir_raw).expanduser()
+        tail_n = getattr(args, "tail", 50) or 50
+        output = installer.logs(log_dir=log_dir, tail_n=tail_n)
+        print(output)
+        return 0
+
+    print(f"Unknown schedule action: {action!r}")
     return 2
 
 
@@ -226,9 +308,15 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Inclusive end date (required)")
     sch = sub.add_parser(
         "schedule",
-        help="Install, remove, or inspect the platform scheduled job (Phase 3+, not yet implemented).",
+        help="Install, remove, or inspect the platform scheduled job.",
     )
     sch.add_argument("action", choices=["install", "uninstall", "status", "logs"])
+    sch.add_argument("--time", metavar="HH:MM",
+                     help="Override primary_time for this install (e.g. 07:00)")
+    sch.add_argument("--retries", metavar="HH:MM,...",
+                     help="Override retry_times (comma-separated, e.g. 10:00,20:00)")
+    sch.add_argument("--tail", type=int, default=50,
+                     help="Number of log lines to show for 'logs' action (default: 50)")
 
     return parser
 
@@ -243,7 +331,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "backfill":
         return _cmd_backfill(args)
-    return _cmd_not_implemented(args)
+    if args.command == "schedule":
+        return _cmd_schedule(args)
+    print(f"Unknown command: {args.command!r}")
+    return 2
 
 
 if __name__ == "__main__":
