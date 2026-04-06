@@ -1,6 +1,6 @@
 # Betfair Results Downloader
 
-A professional Python application for downloading settled Betfair orders, enriching them with market metadata, writing reliable CSV outputs, and optionally publishing aggregated market-level results to Azure SQL — safe by default.
+A professional Python application for downloading settled Betfair orders, enriching them with market metadata, writing reliable CSV outputs, and optionally publishing aggregated market-level results to Azure SQL and Google Sheets — safe by default.
 
 ---
 
@@ -10,6 +10,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **CSV outputs** — canonical file plus dated snapshots, idempotent updates, safe to re-run
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
+- **Google Sheets publishing** — market-level results to a shared Google Sheet with approval workflow and incremental sync
 - **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
 - **Reporting Dashboard** — local Streamlit UI for daily/weekly P&L analytics
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
@@ -309,6 +310,41 @@ These exist for recovery, not routine use.
 
 ---
 
+### Google Sheets Publishing
+
+Market-level results can also be published to a Google Sheet for shared dashboards and reporting. This is a separate output channel from Azure SQL — both read from the same canonical CSV and aggregate independently.
+
+#### Setup
+
+1. Create a Google Cloud service account with Sheets API access
+2. Share your Google Sheet with the service account email
+3. Run the setup script:
+
+   ```bash
+   python scripts/setup_sheets.py
+   ```
+
+   This adds the `google_sheets` block to your `credentials.json` with `sheet_name` and `service_account_path`.
+
+4. Test manually:
+
+   ```bash
+   python -m betfair_results_downloader publish-sheet
+   ```
+
+#### How it works
+
+- The canonical CSV is aggregated to one row per market (sum of bet-level profits, bet count, last settled date)
+- Markets are filtered through an **approval workflow**: racing + soccer are auto-approved; other sports require manual approval (because they may take weeks to fully settle)
+- The upload is **incremental** — new markets are inserted, changed markets (profit updated as more bets settle) are updated, unchanged markets are left alone
+- The sheet is always sorted by SettledDate descending
+
+#### Scheduled auto-publish
+
+When `google_sheets` is configured in `credentials.json`, every scheduled `run` automatically publishes approved markets after downloading and writing CSVs. Non-racing markets pending approval are logged but not uploaded.
+
+---
+
 ### Reporting Dashboard
 
 A local Streamlit app for analyzing the canonical CSV:
@@ -420,6 +456,32 @@ python -m betfair_results_downloader schedule install --time 07:00 --retries 10:
 The Python interpreter used is `sys.executable` (the one running the command), so run from your activated venv to ensure the correct interpreter is embedded in the scheduled job.
 
 Exit codes: `0` = success · `1` = failure.
+
+### `publish-sheet`
+
+**Status:** ✅ Implemented
+
+Aggregates the canonical CSV to market level and publishes approved markets to a Google Sheet. Uses an incremental sync — new markets are inserted, changed markets (profit updated as more bets settle) are updated, unchanged markets are left alone.
+
+```bash
+# Interactive mode — prompts to approve non-racing markets
+python -m betfair_results_downloader publish-sheet
+
+# Non-interactive — only uploads auto-approved markets (racing + soccer)
+python -m betfair_results_downloader publish-sheet --no-interactive
+
+# Custom tab name
+python -m betfair_results_downloader publish-sheet --tab "My Tab"
+```
+
+**Approval workflow:**
+- **Horse Racing**, **Greyhound Racing**, and **Soccer** markets are auto-approved (they settle quickly).
+- Other sports (golf, cricket, tennis tournaments, etc.) require manual approval via the interactive prompt, because they may take days/weeks to fully settle and uploading early shows a false result.
+- Approved market IDs are persisted in `approved_markets.json` so approvals survive across runs.
+
+**Scheduled runs:** When `google_sheets` is configured in `credentials.json`, the scheduler's `run` command auto-publishes approved markets after each download (non-interactive mode). Pending markets are logged for manual review.
+
+Exit codes: `0` = success · `1` = failure · `2` = config missing.
 
 ---
 
@@ -579,6 +641,15 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
 | `driver` | string | `"ODBC Driver 18 for SQL Server"` | ODBC driver name as installed locally |
 | `port` | integer | `1433` | Optional |
 
+### `google_sheets` (optional — for Google Sheets publishing)
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `sheet_name` | string | `""` | Name of the Google Sheet (e.g. `"Betfair Dashboard"`) |
+| `service_account_path` | string | `""` | Absolute path to the Google service account JSON file |
+
+When both fields are set, the `publish-sheet` CLI command and the scheduler's auto-publish are enabled. When empty, Sheets publishing is silently skipped.
+
 ### Full example
 
 ```json
@@ -607,6 +678,10 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
     "username": "sqladmin",
     "password": "...",
     "driver": "ODBC Driver 18 for SQL Server"
+  },
+  "google_sheets": {
+    "sheet_name": "Betfair Dashboard",
+    "service_account_path": "/path/to/service-account.json"
   }
 }
 ```
@@ -630,6 +705,15 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 Both are git-ignored. Accessible via **Open Artifacts Folder** in the GUI.
 
 **Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
+
+### Publishing outputs
+
+The canonical CSV is the source of truth. Two optional publishing channels consume it independently:
+
+- **Azure SQL** (`dbo.MarketResults`) — aggregated market-level results for horse racing and greyhound racing only. Incremental sync via `(UserID, MarketID)` key. Gated by four safety switches.
+- **Google Sheets** (`Market Results` tab) — aggregated market-level results for all approved sports. Incremental sync via `marketId`. Auto-approves racing + soccer; other sports require manual approval.
+
+Both channels can be enabled simultaneously. They read from the same CSV but aggregate and publish independently — disabling one does not affect the other.
 
 ---
 
@@ -667,8 +751,10 @@ src/betfair_results_downloader/
   run.py                  # Shared pipeline entry used by GUI + CLI
   pipeline.py             # 4-phase orchestration: download → enrich → CSV → Azure
   downloader_core.py      # Betfair API calls, enrichment, chunked range download
-  azure_publish.py        # Incremental sync plan + apply
-  azure_remediation.py    # User-scoped recovery tools
+  azure_publish.py        # Azure SQL incremental sync plan + apply
+  azure_remediation.py    # User-scoped Azure recovery tools
+  sheets_publish.py       # Google Sheets incremental market-level publisher
+  market_approval.py      # Sport-based approval workflow for Sheets publishing
   csv_utils.py            # Canonical CSV dedupe + atomic write
   recommend.py            # Lookback recommendation from existing CSV (GUI)
   audit.py                # Settled-date gap analysis
@@ -677,7 +763,7 @@ src/betfair_results_downloader/
   secrets.py              # Credentials resolver + validator
   config.py               # DownloaderConfig + ScheduleConfig dataclasses
   paths.py                # Cross-platform OneDrive path resolver
-  __main__.py             # CLI entry point (auth-test, run, backfill, schedule)
+  __main__.py             # CLI entry point (auth-test, run, backfill, schedule, publish-sheet)
   scheduler/              # Scheduled-downloads package
     auth.py               # build_api_client() — cert-based login
     date_windows.py       # chunk_date_range() — safe API windowing

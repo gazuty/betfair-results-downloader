@@ -17,6 +17,8 @@ dependencies = [
     "plotly>=5.20",
     "pytz",
     "python-dateutil",
+    "gspread>=6.0",
+    "google-auth>=2.0",
 ]
 
 [project.scripts]

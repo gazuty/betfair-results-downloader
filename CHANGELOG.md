@@ -1,6 +1,6 @@
 ## [0.5.0] - 2026-04-06
 
-Scheduled automatic downloads with gap detection, multi-window retry, and cross-platform installers.
+Scheduled automatic downloads with gap detection, multi-window retry, cross-platform installers, and Google Sheets publishing.
 
 ### Added
 
@@ -19,6 +19,10 @@ Scheduled automatic downloads with gap detection, multi-window retry, and cross-
 - **`credentials.template.json`** updated with full `schedule` block.
 - **Cross-platform path resolver** (`paths.py`) — OneDrive-aware `get_results_database_dir()`.
 - **Comprehensive documentation** — README with cert enrollment guide, CLI reference, configuration reference, platform notes, troubleshooting.
+- **Google Sheets publishing** (`sheets_publish.py`, `market_approval.py`) — market-level results uploaded to a Google Sheet with sport-based approval workflow (racing + soccer auto-approved, others require manual review). Incremental sync by `marketId` — inserts new markets, updates changed profits, leaves unchanged markets alone.
+- **`publish-sheet` CLI subcommand** — interactive or non-interactive market approval and upload. Supports `--tab` and `--no-interactive` flags.
+- **Scheduled Sheets auto-publish** — `runner.py` Phase 5 auto-publishes approved markets after each download when `google_sheets` is configured.
+- **`scripts/setup_sheets.py`** — one-command setup for Google Sheets credentials.
 
 ### Changed
 
