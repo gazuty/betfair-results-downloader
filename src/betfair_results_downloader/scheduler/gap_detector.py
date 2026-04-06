@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from ..config import ScheduleConfig
+from ..paths import resolve_results_dir
 from .state import read_schedule_state
 
 logger = logging.getLogger(__name__)
@@ -41,13 +42,14 @@ def _max_from_csv(creds: dict[str, Any]) -> Optional[date]:
     """
     Return the latest ``settledDate`` from the canonical CSV, or ``None`` on
     any failure (missing config, missing file, parse error, empty column).
+
+    Uses :func:`paths.resolve_results_dir` so the cross-platform OneDrive
+    resolver is consulted when ``paths.results_csv_dir`` is empty.
     """
     try:
         from ..recommend import recommend_lookback_days  # noqa: PLC0415
-        results_dir_raw = (creds.get("paths") or {}).get("results_csv_dir", "")
-        if not results_dir_raw:
-            return None
-        _, _, last_settled = recommend_lookback_days(Path(results_dir_raw))
+        results_dir = resolve_results_dir(creds)
+        _, _, last_settled, _ = recommend_lookback_days(results_dir)
         return last_settled
     except Exception as exc:
         logger.debug("CSV max-date lookup failed: %s", exc)
@@ -125,6 +127,12 @@ def compute_backfill_window(
         return from_date, to_date, reason
 
     # --- Path 3: Cold-start fallback ---
+    csv_dir = resolve_results_dir(creds)
+    logger.warning(
+        "CSV fallback failed: resolved results_csv_dir=%s but no valid "
+        "settledDate found. Falling through to %d-day cold-start.",
+        csv_dir, schedule_cfg.max_backfill_days,
+    )
     from_date = earliest_allowed
     reason = (
         f"Cold-start: no Azure state or CSV data found — "

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..config import ScheduleConfig
-from ..paths import get_results_database_dir
+from ..paths import resolve_results_dir
 from .auth import build_api_client
 from .gap_detector import compute_backfill_window
 from .state import (
@@ -98,8 +98,7 @@ def _resolve_repo_root() -> Path:
 
 
 def _resolve_results_dir(creds: dict[str, Any]) -> Path:
-    raw = (creds.get("paths") or {}).get("results_csv_dir", "")
-    return Path(raw) if raw else get_results_database_dir()
+    return resolve_results_dir(creds)
 
 
 def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Path:

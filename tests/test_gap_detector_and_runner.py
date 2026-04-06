@@ -129,8 +129,9 @@ class TestComputeBackfillWindow:
         assert "CSV" in reason
         assert to_d == TODAY
 
-    def test_cold_start_when_no_state_or_csv(self) -> None:
-        creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
+    def test_cold_start_when_no_state_or_csv(self, tmp_path: Path) -> None:
+        # Point to an empty dir so the resolver won't find a real CSV
+        creds = {**BASE_CREDS, "paths": {"results_csv_dir": str(tmp_path)}}
         schedule_cfg = _default_schedule_cfg(max_backfill_days=90)
         with self._patch_today(TODAY):
             with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
@@ -257,8 +258,43 @@ class TestResolveResultsDir:
         sentinel = Path("/mock/onedrive/results")
         creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
         with patch(
-            "betfair_results_downloader.scheduler.runner.get_results_database_dir",
+            "betfair_results_downloader.paths.get_results_database_dir",
             return_value=sentinel,
         ):
             result = _resolve_results_dir(creds)
         assert result == sentinel
+
+
+# ---------------------------------------------------------------------------
+# Gap detector — CSV fallback uses cross-platform resolver
+# ---------------------------------------------------------------------------
+
+class TestGapDetectorCsvFallback:
+    def _patch_today(self, target_date: date):
+        return patch(
+            "betfair_results_downloader.scheduler.gap_detector._today_utc",
+            return_value=target_date,
+        )
+
+    def test_finds_csv_via_resolver_when_results_csv_dir_empty(self, tmp_path: Path) -> None:
+        """When paths.results_csv_dir is empty but the cross-platform resolver
+        returns a directory containing a canonical CSV, the gap detector should
+        use the CSV path — NOT fall through to cold-start."""
+        import pandas as pd
+        csv_path = tmp_path / "cleared_orders_cleaned.csv"
+        df = pd.DataFrame({"settledDate": ["2026-04-05T00:00:00Z"]})
+        df.to_csv(csv_path, index=False)
+
+        creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
+        schedule_cfg = _default_schedule_cfg()
+
+        with self._patch_today(TODAY):
+            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
+                       return_value=None):
+                with patch("betfair_results_downloader.paths.get_results_database_dir",
+                           return_value=tmp_path):
+                    from_d, to_d, reason = compute_backfill_window(creds, schedule_cfg)
+
+        assert "CSV" in reason
+        assert "Cold-start" not in reason
+        assert to_d == TODAY
