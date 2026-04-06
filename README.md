@@ -499,7 +499,7 @@ Used when systemd is not available (e.g. older distros, containers).
 The backfill window is computed in three steps:
 
 1. **Azure `dbo.ScheduleState`** — reads `LastCoveredDateUtc` for this user from Azure SQL (requires `user.enable_azure_sql=true` and working `pyodbc`). Most authoritative source.
-2. **Canonical CSV** — reads the maximum `settledDate` from `cleared_orders_cleaned.csv` in `paths.results_csv_dir`.
+2. **Canonical CSV** — reads the maximum `settledDate` directly from `cleared_orders_cleaned.csv` in the resolved results directory (independent of the GUI's `run_state.json`).
 3. **Cold-start fallback** — `today - max_backfill_days`.
 
 In all cases the `from_date` is pulled back by `min_coverage_overlap_days` for safety re-pull, then capped at `max_backfill_days` before today.
@@ -548,7 +548,7 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `results_csv_dir` | string | ✅ | Absolute path to where canonical and snapshot CSVs should be written |
+| `results_csv_dir` | string | Recommended | Absolute path to where canonical and snapshot CSVs should be written. When empty, the cross-platform OneDrive resolver (`paths.py`) is used as a fallback. |
 
 ### `schedule` (optional — for scheduled automatic downloads)
 
@@ -622,7 +622,7 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the latest full dataset. Idempotent updates via `betId` dedupe.
 - **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv`. Dated copies for historical tracking.
 
-### Enrichment cache (`<repo_root>/outputs/`)
+### Enrichment cache (`<results_csv_dir>/.cache/`)
 
 - `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
 - `market_catalogue_event_latest.csv` — latest snapshot
@@ -670,7 +670,10 @@ src/betfair_results_downloader/
   azure_publish.py        # Incremental sync plan + apply
   azure_remediation.py    # User-scoped recovery tools
   csv_utils.py            # Canonical CSV dedupe + atomic write
-  recommend.py            # Lookback recommendation from existing CSV
+  recommend.py            # Lookback recommendation from existing CSV (GUI)
+  audit.py                # Settled-date gap analysis
+  state.py                # GUI run state persistence (run_state.json)
+  run_logging.py          # Per-run log transcript writer
   secrets.py              # Credentials resolver + validator
   config.py               # DownloaderConfig + ScheduleConfig dataclasses
   paths.py                # Cross-platform OneDrive path resolver
@@ -725,6 +728,12 @@ See the [Cert Enrollment Troubleshooting table](#troubleshooting) above.
 - Real credentials and outputs are **never committed**. `.gitignore` excludes `secrets/credentials.json`, `secrets/credentials.location.json`, `outputs/`, and all `*.csv` / `*.parquet` / `*.xlsx` files.
 - Keep this behaviour intact when adding new files.
 - **Never share, commit, or upload your `client-2048.key`** file. Treat it like a password.
+
+---
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for developer setup, quality checks, and release steps.
 
 ---
 

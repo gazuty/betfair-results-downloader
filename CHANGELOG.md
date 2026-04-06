@@ -24,6 +24,13 @@ Scheduled automatic downloads with gap detection, multi-window retry, and cross-
 
 - `fetch_cleared_orders_df` is now a thin delegator over `fetch_cleared_orders_df_range`. Chunking is a transparent robustness improvement.
 - `enrich_with_market_catalogue` accepts an optional `api_client` parameter so headless callers can reuse a single authenticated session.
+- Enrichment cache moved from `<repo_root>/outputs/` to `<results_csv_dir>/.cache/` (from remote 0.4.0 merge).
+
+### Fixed
+
+- Gap detector reads the canonical CSV directly instead of delegating to `recommend_lookback_days()`, which was polluted by stale GUI `run_state.json` — prevented unnecessary multi-day backfills.
+- Gap detector and runner share a single `resolve_results_dir()` function in `paths.py` — eliminates divergence when `paths.results_csv_dir` is empty.
+- Reconciled scheduler with remote 0.4.0 API changes (`enrich_with_market_catalogue` parameter rename `repo_root` → `cache_dir`).
 
 ---
 
