@@ -620,7 +620,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 
 | Phase | PR | Status | Delivers |
 |---|---|---|---|
-| 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented, others stubbed), `pyproject.toml` dependency fixes |
+| 1.1 | ✅ shipped | `ae53e3e` | Cert-based non-interactive auth (`scheduler/auth.py`), chunked date-range download (`fetch_cleared_orders_df_range`), CLI entry point (`auth-test` implemented), `pyproject.toml` dependency fixes |
 | 1.1b | ✅ this document | | Documentation overhaul for Phase 1.1 features |
 | 1.2 | ✅ shipped | `b65e636` | `schedule` config block, `ScheduleConfig` dataclass, schedule validation in `secrets.py`, `credentials.template.json` updated |
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
@@ -654,7 +654,7 @@ src/betfair_results_downloader/
   recommend.py            # Lookback recommendation from existing CSV
   secrets.py              # Credentials resolver + validator
   config.py               # DownloaderConfig dataclass
-  __main__.py             # CLI entry point (auth-test implemented; rest stubbed)
+  __main__.py             # CLI entry point (auth-test, run, backfill, schedule)
   scheduler/              # Scheduled-downloads package (Phase 1.1+)
     auth.py               # build_api_client() — cert-based login
     date_windows.py       # chunk_date_range() — safe API windowing
