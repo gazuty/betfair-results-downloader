@@ -436,6 +436,29 @@ Exit codes: `0` = success · `1` = failure.
 
 ## Platform Notes
 
+### Windows (Task Scheduler)
+
+- **Task name:** `BetfairResultsScheduler`
+- **Installed via:** `schtasks /Create /XML` — requires no admin rights for current-user tasks
+- **Uses `pythonw.exe`** (not `python.exe`) to suppress the console window flash on each run
+- **View/manage:** Task Scheduler GUI (`taskschd.msc`) or `schtasks /Query /TN BetfairResultsScheduler`
+- **Logs:** `outputs/run_history.jsonl` relative to repo root
+
+### Linux (systemd --user)
+
+- **Unit files:** `~/.config/systemd/user/betfair-results.service` and `.timer`
+- **Advantage over cron:** `Persistent=true` in the timer ensures missed runs (machine off) are retried on next login
+- **View status:** `systemctl --user status betfair-results.timer`
+- **View logs:** `journalctl --user -u betfair-results -n 50`
+
+### Linux (cron fallback)
+
+Used when systemd is not available (e.g. older distros, containers).
+
+- **Identified by marker comment:** `# BETFAIR_RESULTS_SCHEDULER` in crontab
+- **Idempotent install:** re-running `schedule install` replaces the existing entry
+- **View crontab:** `crontab -l`
+
 ### macOS (launchd)
 
 - **Plist location:** `~/Library/LaunchAgents/com.betfair.results.scheduler.plist`
@@ -603,7 +626,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ✅ shipped | `7e1d368` | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands, platform dispatch in `installers/__init__.py` |
-| 3.2 | ⏳ planned | | Windows Task Scheduler + Linux systemd/cron installers |
+| 3.2 | ✅ shipped | `41afba9` | Windows Task Scheduler (`schtasks`), Linux systemd --user, cron fallback |
 | 4.1 | ⏳ planned | | Optional GUI Scheduling tab |
 
 Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:

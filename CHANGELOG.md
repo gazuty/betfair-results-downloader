@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Added (Phase 3.2 — 2026-04-06)
+
+- **`scheduler/installers/taskscheduler.py`** — `TaskSchedulerInstaller`: `build_task_xml()` (one `CalendarTrigger` per time, utf-16 XML), install/uninstall/status via `schtasks.exe`, uses `pythonw.exe` to suppress console window.
+- **`scheduler/installers/systemd_user.py`** — `SystemdUserInstaller`: `build_service_unit()` + `build_timer_unit()` (`OnCalendar` entries, `Persistent=true`), enable/disable via `systemctl --user`.
+- **`scheduler/installers/cron.py`** — `CronInstaller`: `build_cron_line()` with `BETFAIR_RESULTS_SCHEDULER` marker, idempotent install via crontab marker-strip + append, cron.log output.
+- Platform dispatch in `installers/__init__.py` completed for Windows and Linux.
+
 ### Added (Phase 3.1 — 2026-04-06)
 
 - **`scheduler/installers/__init__.py`** — `get_installer()` platform dispatch: macOS → `LaunchdInstaller`; Windows → `TaskSchedulerInstaller`; Linux+systemd → `SystemdUserInstaller`; Linux → `CronInstaller`.
