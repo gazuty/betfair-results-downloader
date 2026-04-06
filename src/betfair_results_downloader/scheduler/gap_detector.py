@@ -8,14 +8,19 @@ a three-level cascade:
 
 1. **Azure ScheduleState** — ``dbo.ScheduleState.LastCoveredDateUtc`` for
    this user, read via :func:`state.read_schedule_state`.
-2. **Canonical CSV** — the maximum ``settledDate`` in the canonical CSV
-   located at ``credentials["paths"]["results_csv_dir"]``, read via
-   :func:`recommend.recommend_lookback_days`.
+2. **Canonical CSV** — the maximum ``settledDate`` in
+   ``cleared_orders_cleaned.csv``, read directly from the resolved results
+   directory.
 3. **Cold-start fallback** — ``max_backfill_days`` days before today.
 
 In all cases the window is capped at ``schedule_cfg.max_backfill_days`` days
 from today.  The ``min_coverage_overlap_days`` setting causes the from-date to
 be pulled back slightly to re-pull a safety overlap of already-covered data.
+
+IMPORTANT: This module must NEVER import or call recommend_lookback_days()
+or read run_state.json. The scheduler has its own state cascade
+(Azure ScheduleState → canonical CSV → cold-start) that is independent
+of the GUI's state system.
 """
 from __future__ import annotations
 
@@ -23,6 +28,8 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple
+
+import pandas as pd
 
 from ..config import ScheduleConfig
 from ..paths import resolve_results_dir
@@ -38,21 +45,29 @@ def _today_utc() -> date:
     return datetime.now(timezone.utc).date()
 
 
-def _max_from_csv(creds: dict[str, Any]) -> Optional[date]:
+def _max_settled_date_from_csv(results_dir: Path) -> Optional[date]:
     """
-    Return the latest ``settledDate`` from the canonical CSV, or ``None`` on
-    any failure (missing config, missing file, parse error, empty column).
+    Return the latest ``settledDate`` from the canonical CSV, or ``None`` if
+    the file is missing, empty, or unparseable.
 
-    Uses :func:`paths.resolve_results_dir` so the cross-platform OneDrive
-    resolver is consulted when ``paths.results_csv_dir`` is empty.
+    Reads exactly one column from one file — no hidden dependencies.
     """
+    csv_path = results_dir / "cleared_orders_cleaned.csv"
+    if not csv_path.exists():
+        return None
     try:
-        from ..recommend import recommend_lookback_days  # noqa: PLC0415
-        results_dir = resolve_results_dir(creds)
-        _, _, last_settled, _ = recommend_lookback_days(results_dir)
-        return last_settled
+        # Read only the settledDate column to minimise memory for large CSVs.
+        # For 450K+ rows this takes ~0.3s — acceptable. If performance becomes
+        # an issue, consider reading only the tail of the file.
+        df = pd.read_csv(csv_path, usecols=["settledDate"], low_memory=False)
+        if df.empty:
+            return None
+        ts = pd.to_datetime(df["settledDate"], utc=True, errors="coerce").dropna()
+        if ts.empty:
+            return None
+        return ts.max().date()
     except Exception as exc:
-        logger.debug("CSV max-date lookup failed: %s", exc)
+        logger.debug("CSV max-date lookup failed for %s: %s", csv_path, exc)
         return None
 
 
@@ -113,7 +128,8 @@ def compute_backfill_window(
         return from_date, to_date, reason
 
     # --- Path 2: Canonical CSV ---
-    csv_last = _max_from_csv(creds)
+    results_dir = resolve_results_dir(creds)
+    csv_last = _max_settled_date_from_csv(results_dir)
     if csv_last is not None:
         base_from = csv_last - timedelta(days=schedule_cfg.min_coverage_overlap_days) + timedelta(days=1)
         from_date = max(base_from, earliest_allowed)
@@ -127,11 +143,10 @@ def compute_backfill_window(
         return from_date, to_date, reason
 
     # --- Path 3: Cold-start fallback ---
-    csv_dir = resolve_results_dir(creds)
     logger.warning(
         "CSV fallback failed: resolved results_csv_dir=%s but no valid "
         "settledDate found. Falling through to %d-day cold-start.",
-        csv_dir, schedule_cfg.max_backfill_days,
+        results_dir, schedule_cfg.max_backfill_days,
     )
     from_date = earliest_allowed
     reason = (

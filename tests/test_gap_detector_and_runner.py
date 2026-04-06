@@ -8,7 +8,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from betfair_results_downloader.config import ScheduleConfig, parse_schedule_config
-from betfair_results_downloader.scheduler.gap_detector import compute_backfill_window
+from betfair_results_downloader.scheduler.gap_detector import (
+    compute_backfill_window,
+    _max_settled_date_from_csv,
+)
+from betfair_results_downloader.scheduler import gap_detector
 from betfair_results_downloader.scheduler.runner import (
     RunResult,
     _azure_publish_allowed,
@@ -263,6 +267,62 @@ class TestResolveResultsDir:
         ):
             result = _resolve_results_dir(creds)
         assert result == sentinel
+
+
+# ---------------------------------------------------------------------------
+# _max_settled_date_from_csv — direct CSV reader
+# ---------------------------------------------------------------------------
+
+class TestMaxSettledDateFromCsv:
+    def test_returns_max_date(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "cleared_orders_cleaned.csv"
+        df = pd.DataFrame({"settledDate": [
+            "2026-04-05T00:00:00Z",
+            "2026-04-03T12:00:00Z",
+            "2026-04-01T06:00:00Z",
+        ]})
+        df.to_csv(csv_path, index=False)
+        assert _max_settled_date_from_csv(tmp_path) == date(2026, 4, 5)
+
+    def test_returns_none_when_csv_missing(self, tmp_path: Path) -> None:
+        assert _max_settled_date_from_csv(tmp_path) is None
+
+    def test_returns_none_when_csv_empty(self, tmp_path: Path) -> None:
+        import pandas as pd
+        csv_path = tmp_path / "cleared_orders_cleaned.csv"
+        pd.DataFrame({"settledDate": []}).to_csv(csv_path, index=False)
+        assert _max_settled_date_from_csv(tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Gap detector — independence from GUI state
+# ---------------------------------------------------------------------------
+
+class TestGapDetectorIndependence:
+    def test_does_not_import_recommend_or_read_run_state(self) -> None:
+        """The gap detector must never import recommend_lookback_days or
+        read run_state.json. These are GUI concerns."""
+        import ast, inspect
+        source = inspect.getsource(gap_detector)
+        tree = ast.parse(source)
+        # Collect all imported names
+        imported_names: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported_names.append(alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_names.append(alias.name)
+        assert "recommend_lookback_days" not in imported_names
+        # Check no string literal in function bodies references run_state
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                        assert "run_state" not in child.value, \
+                            f"Found 'run_state' in string literal: {child.value!r}"
 
 
 # ---------------------------------------------------------------------------
