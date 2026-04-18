@@ -1,3 +1,11 @@
+## [0.5.1] - 2026-04-19
+
+### Removed
+
+- **Google Sheets publishing** moved to the `feature/google-sheets` branch as an optional enhancement. `sheets_publish.py`, `market_approval.py`, `scripts/setup_sheets.py`, the `publish-sheet` CLI subcommand, the scheduler's Phase 5 auto-publish, the `google_sheets` config block, and the `gspread` / `google-auth` dependencies are all removed from `main`. Restore by merging `feature/google-sheets`.
+
+---
+
 ## [0.5.0] - 2026-04-06
 
 Scheduled automatic downloads with gap detection, multi-window retry, cross-platform installers, and Google Sheets publishing.

@@ -243,48 +243,12 @@ def _run_pipeline(
             azure_message = f"Azure publish skipped ({', '.join(gates) or 'gates closed'})."
             logger.info(azure_message)
 
-        # --- Phase 5: Google Sheets auto-publish (non-interactive) ---
-        sheets_published = False
-        sheets_message = ""
-        gs_cfg = creds.get("google_sheets") or {}
-        gs_sheet_name = (gs_cfg.get("sheet_name") or "").strip()
-        gs_sa_path = (gs_cfg.get("service_account_path") or "").strip()
-
-        if gs_sheet_name and gs_sa_path:
-            logger.info("Google Sheets config found — auto-publishing approved markets...")
-            try:
-                from ..sheets_publish import publish_to_sheet  # noqa: PLC0415
-                sheet_result = publish_to_sheet(
-                    results_csv_dir=results_dir,
-                    sheet_name=gs_sheet_name,
-                    service_account_path=Path(gs_sa_path).expanduser(),
-                    interactive=False,  # auto-approve racing + soccer only
-                    status_cb=_say,
-                )
-                sheets_published = sheet_result.ok
-                sheets_message = sheet_result.message
-                logger.info("Sheets publish result: %s", sheets_message)
-                if sheet_result.rows_pending > 0:
-                    logger.info(
-                        "  %d non-racing markets pending manual approval "
-                        "(run 'betfair-results publish-sheet' to review)",
-                        sheet_result.rows_pending,
-                    )
-            except Exception as exc:
-                sheets_message = f"Sheets publish failed: {exc}"
-                logger.warning(sheets_message)
-                # Non-fatal — CSV + Azure are the primary outputs
-        else:
-            sheets_message = "Sheets publish skipped (google_sheets not configured)."
-            logger.info(sheets_message)
-
         run_finished = datetime.now(timezone.utc)
         elapsed = (run_finished - run_started).total_seconds()
         summary = (
             f"Scheduled run complete: {dl.rows_downloaded:,} rows downloaded, "
             f"{csvr.rows_in_canonical:,} rows in canonical, "
-            f"azure={'published' if azure_published else 'skipped'}, "
-            f"sheets={'published' if sheets_published else 'skipped'}. "
+            f"azure={'published' if azure_published else 'skipped'}. "
             f"Elapsed {elapsed:.1f}s."
         )
         logger.info(summary)

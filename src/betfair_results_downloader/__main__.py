@@ -6,7 +6,6 @@ Subcommands:
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
   backfill      — explicit date-range download
   schedule      — install/uninstall/status/logs for the platform scheduled job
-  publish-sheet — aggregate markets and upload to Google Sheets
 """
 from __future__ import annotations
 
@@ -282,78 +281,6 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     return 2
 
 
-def _cmd_publish_sheet(args: argparse.Namespace) -> int:
-    """
-    Aggregate market-level results and upload to Google Sheets.
-
-    Racing markets (Horse Racing / Greyhound Racing) are auto-approved.
-    Other sports are presented for interactive approval to avoid uploading
-    partially-settled markets.
-
-    Exit codes: 0=success, 1=failure, 2=bad config.
-    """
-    import logging
-    from pathlib import Path
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    )
-
-    creds, _ = _load_creds_and_schedule()
-
-    # Resolve paths
-    paths = creds.get("paths") or {}
-    results_csv_dir_raw = (paths.get("results_csv_dir") or "").strip()
-    if not results_csv_dir_raw:
-        print("FAIL: paths.results_csv_dir is not set in credentials.json")
-        return 2
-    results_csv_dir = Path(results_csv_dir_raw).expanduser()
-
-    # Google Sheets config
-    gs = creds.get("google_sheets") or {}
-    sheet_name = (gs.get("sheet_name") or "").strip()
-    sa_path_raw = (gs.get("service_account_path") or "").strip()
-
-    if not sheet_name:
-        print("FAIL: google_sheets.sheet_name is not set in credentials.json")
-        print("  Add a 'google_sheets' section like:")
-        print('  "google_sheets": {')
-        print('    "sheet_name": "Betfair Dashboard",')
-        print('    "service_account_path": "/path/to/service-account.json"')
-        print("  }")
-        return 2
-    if not sa_path_raw:
-        print("FAIL: google_sheets.service_account_path is not set in credentials.json")
-        return 2
-
-    service_account_path = Path(sa_path_raw).expanduser()
-
-    # Optional overrides from CLI args
-    tab_name = getattr(args, "tab", None) or "Market Results"
-    no_interactive = getattr(args, "no_interactive", False)
-
-    from .sheets_publish import publish_to_sheet
-
-    result = publish_to_sheet(
-        results_csv_dir=results_csv_dir,
-        sheet_name=sheet_name,
-        service_account_path=service_account_path,
-        tab_name=tab_name,
-        interactive=not no_interactive,
-    )
-
-    if result.ok:
-        print(f"OK: {result.message}")
-        if result.rows_pending > 0:
-            print(f"  ({result.rows_pending} non-racing markets still pending approval)")
-        return 0
-
-    print(f"FAIL: {result.message}")
-    return 1
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="betfair-results",
@@ -389,15 +316,6 @@ def _build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--tail", type=int, default=50,
                      help="Number of log lines to show for 'logs' action (default: 50)")
 
-    ps = sub.add_parser(
-        "publish-sheet",
-        help="Aggregate market-level results and upload to Google Sheets.",
-    )
-    ps.add_argument("--tab", metavar="NAME", default="Market Results",
-                    help="Google Sheet tab name (default: 'Market Results')")
-    ps.add_argument("--no-interactive", action="store_true",
-                    help="Skip interactive approval (only upload auto-approved + previously approved)")
-
     return parser
 
 
@@ -413,8 +331,6 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_backfill(args)
     if args.command == "schedule":
         return _cmd_schedule(args)
-    if args.command == "publish-sheet":
-        return _cmd_publish_sheet(args)
     print(f"Unknown command: {args.command!r}")
     return 2
 

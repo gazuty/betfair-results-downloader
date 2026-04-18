@@ -288,10 +288,6 @@ def default_credentials_structure() -> dict[str, Any]:
             "password": "",
             "driver": "ODBC Driver 18 for SQL Server",
         },
-        "google_sheets": {
-            "sheet_name": "",
-            "service_account_path": "",
-        },
     }
 
 
