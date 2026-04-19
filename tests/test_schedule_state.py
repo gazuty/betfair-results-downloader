@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from betfair_results_downloader.scheduler.state import (
-    ScheduleStateRow,
     append_run_history,
     check_today_success_marker,
     read_schedule_state,

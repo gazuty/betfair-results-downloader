@@ -17,7 +17,6 @@ Example for primary=06:00, retries=09:00,19:00,23:00::
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from betfair_results_downloader.config import ScheduleConfig, parse_schedule_config
+from betfair_results_downloader.config import parse_schedule_config
 from betfair_results_downloader.secrets import validate_credentials, _validate_schedule_section
 
 

@@ -4,14 +4,13 @@ from __future__ import annotations
 import plistlib
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from betfair_results_downloader.config import ScheduleConfig
 from betfair_results_downloader.scheduler.installers.launchd import (
     LABEL,
-    PLIST_PATH,
     LaunchdInstaller,
     _build_calendar_intervals,
     _parse_hh_mm,

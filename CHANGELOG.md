@@ -3,6 +3,16 @@
 ### Removed
 
 - **Google Sheets publishing** moved to the `feature/google-sheets` branch as an optional enhancement. `sheets_publish.py`, `market_approval.py`, `scripts/setup_sheets.py`, the `publish-sheet` CLI subcommand, the scheduler's Phase 5 auto-publish, the `google_sheets` config block, and the `gspread` / `google-auth` dependencies are all removed from `main`. Restore by merging `feature/google-sheets`.
+- Duplicate `normalize_log_line` definition in `gui_app.py` (now imports from `run_logging.py`, which was the more complete implementation).
+
+### Added
+
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) — runs `ruff check` and `pytest -q` on every push and PR to `main`, across Python 3.10 and 3.12.
+- **`RELEASE_NOTES_v0.5.1.md`** — per the release process documented in `CONTRIBUTING.md`.
+
+### Fixed
+
+- `tests/test_run_logging.py` imports `normalize_log_line` from `run_logging` (matching its own name) rather than from `gui_app`, so the test suite no longer pulls in `tkinter` at collection time — required for headless CI.
 
 ---
 

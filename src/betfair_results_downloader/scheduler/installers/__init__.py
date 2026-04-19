@@ -12,8 +12,6 @@ platform it's on.
 from __future__ import annotations
 
 import platform
-import sys
-from typing import TYPE_CHECKING
 
 
 def get_installer():

@@ -12,7 +12,6 @@ The timer uses ``OnCalendar`` entries (one per scheduled time) and
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -138,7 +137,7 @@ class SystemdUserInstaller:
                 "ok": True,
                 "service_file": str(SERVICE_FILE),
                 "timer_file": str(TIMER_FILE),
-                "message": f"Unit files written (dry-run, systemctl not called).",
+                "message": "Unit files written (dry-run, systemctl not called).",
             }
 
         # Reload daemon so systemd sees new unit files

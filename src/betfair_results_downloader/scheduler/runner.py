@@ -35,7 +35,6 @@ from .gap_detector import compute_backfill_window
 from .state import (
     append_run_history,
     check_today_success_marker,
-    read_schedule_state,
     upsert_schedule_state,
     write_today_success_marker,
 )

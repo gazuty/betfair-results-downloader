@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import textwrap
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path

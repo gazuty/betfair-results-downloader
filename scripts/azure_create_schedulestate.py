@@ -21,7 +21,7 @@ from pathlib import Path
 # Allow running directly without pip-installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from betfair_results_downloader.secrets import get_credentials_path, load_credentials, get_nested
+from betfair_results_downloader.secrets import get_credentials_path, load_credentials
 
 
 DDL = """\

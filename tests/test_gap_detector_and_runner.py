@@ -3,9 +3,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from betfair_results_downloader.config import ScheduleConfig, parse_schedule_config
 from betfair_results_downloader.scheduler.gap_detector import (
@@ -14,7 +13,6 @@ from betfair_results_downloader.scheduler.gap_detector import (
 )
 from betfair_results_downloader.scheduler import gap_detector
 from betfair_results_downloader.scheduler.runner import (
-    RunResult,
     _azure_publish_allowed,
     _resolve_results_dir,
     run_backfill,
@@ -303,7 +301,8 @@ class TestGapDetectorIndependence:
     def test_does_not_import_recommend_or_read_run_state(self) -> None:
         """The gap detector must never import recommend_lookback_days or
         read run_state.json. These are GUI concerns."""
-        import ast, inspect
+        import ast
+        import inspect
         source = inspect.getsource(gap_detector)
         tree = ast.parse(source)
         # Collect all imported names

@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from .config import DownloaderConfig
 from .run import run_downloader, publish_to_azure_from_canonical_incremental
 from .recommend import recommend_lookback_days_v2
+from .run_logging import normalize_log_line
 from .azure_remediation import (
     audit_duplicates,
     backup_user_rows,
@@ -40,10 +41,6 @@ from .secrets import (
 )
 
 DEFAULT_USER_ID = "YourUserName"
-
-
-def normalize_log_line(s: str) -> str:
-    return s.replace("…", "...")
 
 
 def kv(key: str, value: object, *, width: int = 22) -> str:

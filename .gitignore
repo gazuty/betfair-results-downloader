@@ -87,4 +87,5 @@ repo_print.*
 
 # ClaudeCode workspace
 .claude/
+.claire/
 
