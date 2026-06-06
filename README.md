@@ -420,6 +420,7 @@ Behavior:
 - computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
 - computes **Today** from the current day `12:00 AM` Australia/Sydney time
 - includes only **Horses** and **Greyhounds** in the summary
+- prefers the exact canonical CSV `cleared_orders_cleaned.csv` when present
 - prints the exact report body intended for user-facing delivery
 
 See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the morning versus evening report.
@@ -429,6 +430,13 @@ See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended sp
 **Status:** ✅ Implemented
 
 Manages the platform scheduled job that runs `betfair-results run` automatically.
+
+For this deployment, the recommended production model is:
+
+- use the OS scheduler (for example macOS launchd) for downloader cadence
+- use OpenClaw for user-facing DM report cadence
+
+The built-in `schedule` command remains available, but it is not the preferred production control plane for the current OpenClaw reporting setup.
 
 ```bash
 python -m betfair_results_downloader schedule install

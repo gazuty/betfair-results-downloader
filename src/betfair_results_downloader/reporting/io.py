@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Callable, List
 from datetime import datetime
 
 import pandas as pd
-
-try:
-    import streamlit as st
-except Exception:  # pragma: no cover - streamlit unavailable outside dashboard use
-    st = None
 
 
 CANONICAL_HINTS = [
@@ -61,26 +56,34 @@ def _read_csv_uncached(path: str) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False)
 
 
-if st is not None:
-    @st.cache_data(show_spinner=False)
-    def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
-        """
-        Cached CSV loader. The modified timestamp is included to automatically refresh the cache
-        when the file changes.
-        """
-        return _read_csv_uncached(path)
-else:
-    def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
-        return _read_csv_uncached(path)
-
-
 def load_csv(path: str) -> pd.DataFrame:
     """
-    Load selected CSV using caching keyed by last-modified time.
+    Load a CSV without any UI-framework coupling.
+
+    This is the safe loader for CLI, tests, and non-Streamlit runtime paths.
     """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"CSV not found: {path}")
 
-    modified_ts = p.stat().st_mtime
-    return _load_csv_cached(str(p), modified_ts)
+    return _read_csv_uncached(str(p))
+
+
+def build_cached_csv_loader(cache_decorator: Callable[..., Callable[[Callable[..., pd.DataFrame]], Callable[..., pd.DataFrame]]]):
+    """
+    Build a cached CSV loader using a caller-provided cache decorator.
+
+    This keeps Streamlit-specific caching out of core CLI/reporting paths while
+    still allowing the dashboard to opt into caching explicitly.
+    """
+    @cache_decorator(show_spinner=False)
+    def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
+        return _read_csv_uncached(path)
+
+    def _loader(path: str) -> pd.DataFrame:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"CSV not found: {path}")
+        return _load_csv_cached(str(p), p.stat().st_mtime)
+
+    return _loader

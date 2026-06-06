@@ -126,6 +126,13 @@ def resolve_default_results_csv(results_dir: str) -> Path:
     discovered = discover_csv_files(results_dir)
     if not discovered:
         raise FileNotFoundError(f"No cleared orders CSV files found in: {results_dir}")
+
+    canonical_exact = [
+        p for p in discovered if p.name.lower() == "cleared_orders_cleaned.csv"
+    ]
+    if canonical_exact:
+        return canonical_exact[0]
+
     return discovered[0]
 
 

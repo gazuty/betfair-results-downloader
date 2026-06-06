@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from betfair_results_downloader.__main__ import main
+from betfair_results_downloader.reporting.daily_dm_report import resolve_default_results_csv
 
 
 def test_cli_dm_report_renders_from_discovered_results_csv(tmp_path, capsys, monkeypatch) -> None:
@@ -32,3 +33,16 @@ def test_cli_dm_report_renders_from_discovered_results_csv(tmp_path, capsys, mon
     assert "Betfair results update" in out
     assert "Saturday 6 June, 9:00 PM" in out
     assert "• Total profit: $10.50" in out
+
+
+def test_resolve_default_results_csv_prefers_exact_canonical_filename(tmp_path) -> None:
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    dated = results_dir / "cleared_orders_cleaned_2026-06-05.csv"
+    dated.write_text("betId,eventTypeId,profit,settledDate\n", encoding="utf-8")
+    canonical = results_dir / "cleared_orders_cleaned.csv"
+    canonical.write_text("betId,eventTypeId,profit,settledDate\n", encoding="utf-8")
+
+    chosen = resolve_default_results_csv(str(results_dir))
+
+    assert chosen == canonical

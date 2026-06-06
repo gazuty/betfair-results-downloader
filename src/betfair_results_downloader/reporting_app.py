@@ -3,8 +3,8 @@ from __future__ import annotations
 import streamlit as st
 
 from betfair_results_downloader.reporting.io import (
+    build_cached_csv_loader,
     discover_csv_files,
-    load_csv,
     file_info,
 )
 from betfair_results_downloader.reporting.schema import normalize_cleared_orders_schema
@@ -26,6 +26,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+load_csv = build_cached_csv_loader(st.cache_data)
 
 render_app_header()
 

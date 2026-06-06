@@ -56,6 +56,8 @@ python -m betfair_results_downloader dm-report --csv /path/to/cleared_orders_cle
 
 If `--at` is provided without a timezone offset, it is interpreted as `Australia/Sydney` local time.
 
+When `--csv` is not provided, `dm-report` prefers the exact canonical filename `cleared_orders_cleaned.csv` when present. If that file is absent, it falls back to the best discovered cleared-orders CSV in the results directory.
+
 ## Example output
 
 ```text
@@ -118,6 +120,7 @@ That preserves a clean separation of concerns:
 The implementation is covered by unit tests in:
 
 - `tests/test_daily_dm_report.py`
+- `tests/test_cli_dm_report.py`
 
 Those tests verify:
 
@@ -125,3 +128,5 @@ Those tests verify:
 - same-day totals
 - Sydney timezone handling
 - exclusion of non-horse/greyhound rows
+- CLI rendering behavior
+- exact canonical CSV preference when present
