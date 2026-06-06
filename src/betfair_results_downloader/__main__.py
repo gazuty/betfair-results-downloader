@@ -6,6 +6,7 @@ Subcommands:
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
   backfill      — explicit date-range download
   schedule      — install/uninstall/status/logs for the platform scheduled job
+  dm-report     — render the OpenClaw daily DM report from local CSV results
 """
 from __future__ import annotations
 
@@ -190,6 +191,52 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_dm_report(args: argparse.Namespace) -> int:
+    """
+    Render the OpenClaw-oriented daily DM report from the local results CSV.
+
+    This command computes week-to-date from the most recent Sunday 00:00
+    Australia/Sydney time and day-to-date from the current day 00:00, then
+    prints the final message body to stdout.
+    """
+    from datetime import datetime
+
+    creds, _schedule_cfg = _load_creds_and_schedule()
+    results_dir = ((creds.get("paths") or {}).get("results_csv_dir") or "").strip()
+    if not results_dir:
+        print("FAIL: paths.results_csv_dir is not configured in credentials.json")
+        return 2
+
+    report_dt = None
+    if getattr(args, "at", None):
+        try:
+            report_dt = datetime.fromisoformat(args.at)
+        except ValueError as exc:
+            print(f"FAIL: invalid --at datetime, expected ISO-8601: {exc}")
+            return 2
+
+    from .reporting.daily_dm_report import build_daily_dm_report_from_results_dir
+
+    try:
+        report = build_daily_dm_report_from_results_dir(
+            results_dir,
+            report_dt=report_dt,
+            csv_path=getattr(args, "csv", None),
+        )
+    except FileNotFoundError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"FAIL: could not build DM report: {type(exc).__name__}: {exc}")
+        return 1
+
+    if getattr(args, "show_source", False):
+        print(f"Source CSV: {report.source_csv}")
+        print()
+    print(report.text)
+    return 0
+
+
 def _cmd_schedule(args: argparse.Namespace) -> int:
     """
     Install, uninstall, query status, or show logs for the platform scheduler.
@@ -303,6 +350,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Inclusive start date (required)")
     bf.add_argument("--to", dest="to_date", metavar="YYYY-MM-DD",
                     help="Inclusive end date (required)")
+    dm = sub.add_parser(
+        "dm-report",
+        help="Render the OpenClaw daily DM report from local results CSV.",
+    )
+    dm.add_argument(
+        "--at",
+        metavar="YYYY-MM-DDTHH:MM[:SS][+TZ]",
+        help="Optional report timestamp override in ISO-8601. Naive values are treated as Australia/Sydney time.",
+    )
+    dm.add_argument(
+        "--csv",
+        metavar="PATH",
+        help="Optional explicit CSV path. Defaults to the best discovered cleared-orders CSV in paths.results_csv_dir.",
+    )
+    dm.add_argument(
+        "--show-source",
+        action="store_true",
+        help="Print the source CSV path before the report body.",
+    )
     sch = sub.add_parser(
         "schedule",
         help="Install, remove, or inspect the platform scheduled job.",
@@ -328,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "backfill":
         return _cmd_backfill(args)
+    if args.command == "dm-report":
+        return _cmd_dm_report(args)
     if args.command == "schedule":
         return _cmd_schedule(args)
     print(f"Unknown command: {args.command!r}")
