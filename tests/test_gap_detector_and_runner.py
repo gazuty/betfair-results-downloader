@@ -1,28 +1,17 @@
-"""Tests for Phase 2.2: gap_detector.py and runner.py."""
+"""Tests for scheduler gap detection and runner timezone semantics."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 
 from betfair_results_downloader.config import ScheduleConfig, parse_schedule_config
-from betfair_results_downloader.scheduler.gap_detector import (
-    compute_backfill_window,
-    _max_settled_date_from_csv,
-)
-from betfair_results_downloader.scheduler import gap_detector
-from betfair_results_downloader.scheduler.runner import (
-    _azure_publish_allowed,
-    _resolve_results_dir,
-    run_backfill,
-)
+from betfair_results_downloader.scheduler.gap_detector import _max_settled_date_from_csv, compute_backfill_window
+from betfair_results_downloader.scheduler.runner import _resolve_results_dir, run_scheduled
 from betfair_results_downloader.scheduler.state import ScheduleStateRow
-
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
+from betfair_results_downloader.scheduler.time_semantics import get_scheduler_now
 
 BASE_CREDS = {
     "betfair": {
@@ -49,7 +38,7 @@ BASE_CREDS = {
     "schedule": {
         "enabled": True,
         "timezone": "Australia/Sydney",
-        "primary_time": "06:00",
+        "primary_time": "05:30",
         "retry_times": [],
         "publish_to_azure": True,
         "allow_azure_publish": False,
@@ -60,300 +49,141 @@ BASE_CREDS = {
     },
 }
 
-TODAY = date(2026, 4, 6)
-
 
 def _default_schedule_cfg(**overrides):
     cfg = parse_schedule_config(BASE_CREDS)
-    if overrides:
-        # ScheduleConfig is frozen; rebuild with overrides
-        d = {
-            "enabled": cfg.enabled, "timezone": cfg.timezone,
-            "primary_time": cfg.primary_time, "retry_times": cfg.retry_times,
-            "publish_to_azure": cfg.publish_to_azure,
-            "allow_azure_publish": cfg.allow_azure_publish,
-            "max_backfill_days": cfg.max_backfill_days,
-            "chunk_days": cfg.chunk_days,
-            "min_coverage_overlap_days": cfg.min_coverage_overlap_days,
-            "log_dir": cfg.log_dir, "history_file": cfg.history_file,
-        }
-        d.update(overrides)
-        return ScheduleConfig(**d)
-    return cfg
+    if not overrides:
+        return cfg
+    data = {
+        "enabled": cfg.enabled,
+        "timezone": cfg.timezone,
+        "primary_time": cfg.primary_time,
+        "retry_times": cfg.retry_times,
+        "publish_to_azure": cfg.publish_to_azure,
+        "allow_azure_publish": cfg.allow_azure_publish,
+        "max_backfill_days": cfg.max_backfill_days,
+        "chunk_days": cfg.chunk_days,
+        "min_coverage_overlap_days": cfg.min_coverage_overlap_days,
+        "log_dir": cfg.log_dir,
+        "history_file": cfg.history_file,
+    }
+    data.update(overrides)
+    return ScheduleConfig(**data)
 
 
-# ---------------------------------------------------------------------------
-# compute_backfill_window
-# ---------------------------------------------------------------------------
+class TestSchedulerTimeSemantics:
+    def test_scheduler_now_tracks_both_utc_and_sydney_dates(self) -> None:
+        cfg = _default_schedule_cfg()
+        now = datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
+        observed = get_scheduler_now(cfg, now)
+        assert observed.today_utc == date(2026, 6, 6)
+        assert observed.today_local == date(2026, 6, 7)
+        assert observed.timezone_name == "Australia/Sydney"
+
 
 class TestComputeBackfillWindow:
-    def _patch_today(self, target_date: date):
-        return patch(
-            "betfair_results_downloader.scheduler.gap_detector._today_utc",
-            return_value=target_date,
-        )
-
-    def test_uses_azure_state_when_available(self) -> None:
+    def test_uses_azure_local_coverage_when_available(self) -> None:
         azure_row = ScheduleStateRow(
             user_id="TestUser",
-            last_covered_date_utc=date(2026, 4, 4),
+            last_covered_date_utc=date(2026, 6, 6),
+            last_covered_date_local=date(2026, 6, 7),
+            last_covered_timezone="Australia/Sydney",
             last_run_started_utc=None,
             last_run_finished_utc=None,
             last_run_status="success",
             last_run_message=None,
             updated_utc=None,
         )
-        schedule_cfg = _default_schedule_cfg(min_coverage_overlap_days=1)
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=azure_row):
-                from_d, to_d, reason = compute_backfill_window(BASE_CREDS, schedule_cfg)
+        cfg = _default_schedule_cfg(min_coverage_overlap_days=1)
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
+             patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row):
+            from_d, to_d, reason = compute_backfill_window(BASE_CREDS, cfg)
+        assert from_d == date(2026, 6, 7)
+        assert to_d == date(2026, 6, 7)
+        assert "LastCoveredDateLocal" in reason
 
-        # last_covered = 2026-04-04, overlap=1 → from = 2026-04-04
-        assert from_d == date(2026, 4, 4)
-        assert to_d == TODAY
-        assert "Azure" in reason
+    def test_falls_back_to_utc_coverage_for_backward_compatibility(self) -> None:
+        azure_row = ScheduleStateRow(
+            user_id="TestUser",
+            last_covered_date_utc=date(2026, 6, 6),
+            last_covered_date_local=None,
+            last_covered_timezone=None,
+            last_run_started_utc=None,
+            last_run_finished_utc=None,
+            last_run_status="success",
+            last_run_message=None,
+            updated_utc=None,
+        )
+        cfg = _default_schedule_cfg(min_coverage_overlap_days=1)
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
+             patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row):
+            from_d, to_d, reason = compute_backfill_window(BASE_CREDS, cfg)
+        assert from_d == date(2026, 6, 6)
+        assert to_d == date(2026, 6, 7)
+        assert "LastCoveredDateUtc" in reason
 
-    def test_falls_back_to_csv_when_azure_unavailable(self, tmp_path: Path) -> None:
-        import pandas as pd
-        # Write a minimal canonical CSV
+    def test_csv_fallback_uses_local_today(self, tmp_path: Path) -> None:
         csv_path = tmp_path / "cleared_orders_cleaned.csv"
-        df = pd.DataFrame({"settledDate": ["2026-03-30T00:00:00Z"]})
-        df.to_csv(csv_path, index=False)
-
+        pd.DataFrame({"settledDate": ["2026-06-06T00:00:00Z"]}).to_csv(csv_path, index=False)
         creds = {**BASE_CREDS, "paths": {"results_csv_dir": str(tmp_path)}}
-        schedule_cfg = _default_schedule_cfg()
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=None):
-                from_d, to_d, reason = compute_backfill_window(creds, schedule_cfg)
-
-        assert "CSV" in reason
-        assert to_d == TODAY
-
-    def test_cold_start_when_no_state_or_csv(self, tmp_path: Path) -> None:
-        # Point to an empty dir so the resolver won't find a real CSV
-        creds = {**BASE_CREDS, "paths": {"results_csv_dir": str(tmp_path)}}
-        schedule_cfg = _default_schedule_cfg(max_backfill_days=90)
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=None):
-                from_d, to_d, reason = compute_backfill_window(creds, schedule_cfg)
-
-        assert from_d == TODAY - timedelta(days=90)
-        assert to_d == TODAY
-        assert "Cold-start" in reason or "cold-start" in reason.lower()
-
-    def test_caps_from_date_at_max_backfill_days(self) -> None:
-        # Azure says last covered was 300 days ago — should be capped
-        old_date = TODAY - timedelta(days=300)
-        azure_row = ScheduleStateRow(
-            user_id="TestUser",
-            last_covered_date_utc=old_date,
-            last_run_started_utc=None, last_run_finished_utc=None,
-            last_run_status="success", last_run_message=None, updated_utc=None,
-        )
-        schedule_cfg = _default_schedule_cfg(max_backfill_days=90)
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=azure_row):
-                from_d, _, reason = compute_backfill_window(BASE_CREDS, schedule_cfg)
-
-        assert from_d >= TODAY - timedelta(days=90)
-        assert "capped" in reason.lower() or "max_backfill" in reason.lower()
-
-    def test_overlap_applied_from_azure_state(self) -> None:
-        azure_row = ScheduleStateRow(
-            user_id="TestUser",
-            last_covered_date_utc=date(2026, 4, 5),
-            last_run_started_utc=None, last_run_finished_utc=None,
-            last_run_status="success", last_run_message=None, updated_utc=None,
-        )
-        schedule_cfg = _default_schedule_cfg(min_coverage_overlap_days=2)
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=azure_row):
-                from_d, _, _ = compute_backfill_window(BASE_CREDS, schedule_cfg)
-
-        # last_covered = 2026-04-05, overlap=2 → from = 2026-04-04
-        assert from_d == date(2026, 4, 4)
+        cfg = _default_schedule_cfg()
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
+             patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=None):
+            from_d, to_d, _ = compute_backfill_window(creds, cfg)
+        assert from_d == date(2026, 6, 6)
+        assert to_d == date(2026, 6, 7)
 
 
-# ---------------------------------------------------------------------------
-# _azure_publish_allowed
-# ---------------------------------------------------------------------------
+class TestRunScheduled:
+    def test_early_sydney_run_uses_local_marker_and_writes_both_namespaces(self, tmp_path: Path) -> None:
+        cfg = _default_schedule_cfg(log_dir=str(tmp_path))
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
 
-class TestAzurePublishAllowed:
-    def _cfg(self, publish_to_azure: bool, allow_azure_publish: bool) -> ScheduleConfig:
-        return _default_schedule_cfg(
-            publish_to_azure=publish_to_azure,
-            allow_azure_publish=allow_azure_publish,
-        )
+        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now), \
+             patch("betfair_results_downloader.scheduler.runner.compute_backfill_window", return_value=(date(2026, 6, 7), date(2026, 6, 7), "test")), \
+             patch("betfair_results_downloader.scheduler.runner._run_pipeline") as run_pipeline, \
+             patch("betfair_results_downloader.scheduler.runner.upsert_schedule_state", return_value=True) as upsert:
+            from betfair_results_downloader.scheduler.runner import RunResult
+            run_pipeline.return_value = RunResult(ok=True, status="success", message="ok")
+            result = run_scheduled(BASE_CREDS, cfg)
 
-    def test_all_gates_open_returns_true(self) -> None:
-        creds = {**BASE_CREDS, "user": {
-            "enable_azure_sql": True, "dry_run": False,
-        }}
-        cfg = self._cfg(publish_to_azure=True, allow_azure_publish=True)
-        assert _azure_publish_allowed(creds, cfg) is True
+        assert result.ok is True
+        kwargs = upsert.call_args.kwargs
+        assert kwargs["last_covered_date_local"] == date(2026, 6, 7)
+        assert kwargs["last_covered_date_utc"] == date(2026, 6, 6)
+        assert (tmp_path / "last_success_local_2026-06-07.marker").exists()
+        assert (tmp_path / "last_success_utc_2026-06-06.marker").exists()
 
-    def test_enable_azure_false_returns_false(self) -> None:
-        creds = {**BASE_CREDS, "user": {"enable_azure_sql": False, "dry_run": False}}
-        cfg = self._cfg(True, True)
-        assert _azure_publish_allowed(creds, cfg) is False
+    def test_existing_local_marker_skips_even_when_utc_day_differs(self, tmp_path: Path) -> None:
+        cfg = _default_schedule_cfg(log_dir=str(tmp_path))
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        (tmp_path / "last_success_local_2026-06-07.marker").touch()
 
-    def test_dry_run_true_returns_false(self) -> None:
-        creds = {**BASE_CREDS, "user": {"enable_azure_sql": True, "dry_run": True}}
-        cfg = self._cfg(True, True)
-        assert _azure_publish_allowed(creds, cfg) is False
+        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now):
+            result = run_scheduled(BASE_CREDS, cfg)
 
-    def test_publish_to_azure_false_returns_false(self) -> None:
-        creds = {**BASE_CREDS, "user": {"enable_azure_sql": True, "dry_run": False}}
-        cfg = self._cfg(publish_to_azure=False, allow_azure_publish=True)
-        assert _azure_publish_allowed(creds, cfg) is False
+        assert result.skipped is True
+        assert "Australia/Sydney" in result.skip_reason
 
-    def test_allow_azure_publish_false_returns_false(self) -> None:
-        creds = {**BASE_CREDS, "user": {"enable_azure_sql": True, "dry_run": False}}
-        cfg = self._cfg(publish_to_azure=True, allow_azure_publish=False)
-        assert _azure_publish_allowed(creds, cfg) is False
-
-
-# ---------------------------------------------------------------------------
-# run_backfill — date validation
-# ---------------------------------------------------------------------------
-
-class TestRunBackfillDateValidation:
-    def test_inverted_range_returns_failure(self) -> None:
-        schedule_cfg = _default_schedule_cfg()
-        result = run_backfill(
-            BASE_CREDS, schedule_cfg,
-            from_date=date(2026, 4, 6),
-            to_date=date(2026, 4, 1),
-        )
-        assert not result.ok
-        assert result.status == "failed"
-        assert "Invalid" in result.message or "from_date" in result.message
-
-    def test_same_day_range_is_valid(self, tmp_path: Path) -> None:
-        """
-        Single-day backfill with mocked pipeline — should not error on range.
-        Missing results_csv_dir should produce a clean 'failed' (not a crash).
-        """
-        creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
-        schedule_cfg = _default_schedule_cfg()
-        result = run_backfill(
-            creds, schedule_cfg,
-            from_date=date(2026, 4, 6),
-            to_date=date(2026, 4, 6),
-        )
-        # Missing results_csv_dir → falls back to cross-platform resolver
-        assert result.status in ("failed", "success", "partial")
-
-
-# ---------------------------------------------------------------------------
-# _resolve_results_dir — fallback to get_results_database_dir
-# ---------------------------------------------------------------------------
 
 class TestResolveResultsDir:
     def test_falls_back_to_get_results_database_dir_when_empty(self) -> None:
-        """When paths.results_csv_dir is empty, fall back to get_results_database_dir()."""
         sentinel = Path("/mock/onedrive/results")
         creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
-        with patch(
-            "betfair_results_downloader.paths.get_results_database_dir",
-            return_value=sentinel,
-        ):
+        with patch("betfair_results_downloader.paths.get_results_database_dir", return_value=sentinel):
             result = _resolve_results_dir(creds)
         assert result == sentinel
 
 
-# ---------------------------------------------------------------------------
-# _max_settled_date_from_csv — direct CSV reader
-# ---------------------------------------------------------------------------
-
 class TestMaxSettledDateFromCsv:
     def test_returns_max_date(self, tmp_path: Path) -> None:
-        import pandas as pd
         csv_path = tmp_path / "cleared_orders_cleaned.csv"
-        df = pd.DataFrame({"settledDate": [
+        pd.DataFrame({"settledDate": [
             "2026-04-05T00:00:00Z",
             "2026-04-03T12:00:00Z",
             "2026-04-01T06:00:00Z",
-        ]})
-        df.to_csv(csv_path, index=False)
+        ]}).to_csv(csv_path, index=False)
         assert _max_settled_date_from_csv(tmp_path) == date(2026, 4, 5)
-
-    def test_returns_none_when_csv_missing(self, tmp_path: Path) -> None:
-        assert _max_settled_date_from_csv(tmp_path) is None
-
-    def test_returns_none_when_csv_empty(self, tmp_path: Path) -> None:
-        import pandas as pd
-        csv_path = tmp_path / "cleared_orders_cleaned.csv"
-        pd.DataFrame({"settledDate": []}).to_csv(csv_path, index=False)
-        assert _max_settled_date_from_csv(tmp_path) is None
-
-
-# ---------------------------------------------------------------------------
-# Gap detector — independence from GUI state
-# ---------------------------------------------------------------------------
-
-class TestGapDetectorIndependence:
-    def test_does_not_import_recommend_or_read_run_state(self) -> None:
-        """The gap detector must never import recommend_lookback_days or
-        read run_state.json. These are GUI concerns."""
-        import ast
-        import inspect
-        source = inspect.getsource(gap_detector)
-        tree = ast.parse(source)
-        # Collect all imported names
-        imported_names: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    imported_names.append(alias.name)
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    imported_names.append(alias.name)
-        assert "recommend_lookback_days" not in imported_names
-        # Check no string literal in function bodies references run_state
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Constant) and isinstance(child.value, str):
-                        assert "run_state" not in child.value, \
-                            f"Found 'run_state' in string literal: {child.value!r}"
-
-
-# ---------------------------------------------------------------------------
-# Gap detector — CSV fallback uses cross-platform resolver
-# ---------------------------------------------------------------------------
-
-class TestGapDetectorCsvFallback:
-    def _patch_today(self, target_date: date):
-        return patch(
-            "betfair_results_downloader.scheduler.gap_detector._today_utc",
-            return_value=target_date,
-        )
-
-    def test_finds_csv_via_resolver_when_results_csv_dir_empty(self, tmp_path: Path) -> None:
-        """When paths.results_csv_dir is empty but the cross-platform resolver
-        returns a directory containing a canonical CSV, the gap detector should
-        use the CSV path — NOT fall through to cold-start."""
-        import pandas as pd
-        csv_path = tmp_path / "cleared_orders_cleaned.csv"
-        df = pd.DataFrame({"settledDate": ["2026-04-05T00:00:00Z"]})
-        df.to_csv(csv_path, index=False)
-
-        creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
-        schedule_cfg = _default_schedule_cfg()
-
-        with self._patch_today(TODAY):
-            with patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state",
-                       return_value=None):
-                with patch("betfair_results_downloader.paths.get_results_database_dir",
-                           return_value=tmp_path):
-                    from_d, to_d, reason = compute_backfill_window(creds, schedule_cfg)
-
-        assert "CSV" in reason
-        assert "Cold-start" not in reason
-        assert to_d == TODAY

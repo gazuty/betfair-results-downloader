@@ -152,8 +152,8 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     """
     Manual backfill for an explicit date range.
 
-    Downloads/enriches/writes CSV for [--from, --to].  Does not update
-    LastCoveredDateUtc or write a success marker.
+    Downloads/enriches/writes CSV for [--from, --to]. Does not update
+    scheduler coverage dates (UTC or local) or write a success marker.
 
     Exit codes: 0=success, 1=failure, 2=bad arguments.
     """

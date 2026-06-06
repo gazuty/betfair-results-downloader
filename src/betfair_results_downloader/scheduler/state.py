@@ -43,6 +43,8 @@ class ScheduleStateRow:
 
     user_id: str
     last_covered_date_utc: Optional[date]
+    last_covered_date_local: Optional[date]
+    last_covered_timezone: Optional[str]
     last_run_started_utc: Optional[datetime]
     last_run_finished_utc: Optional[datetime]
     last_run_status: Optional[str]
@@ -124,8 +126,8 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
         with conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT UserID, LastCoveredDateUtc, LastRunStartedUtc, "
-                "LastRunFinishedUtc, LastRunStatus, LastRunMessage, UpdatedUtc "
+                "SELECT UserID, LastCoveredDateUtc, LastCoveredDateLocal, LastCoveredTimezone, "
+                "LastRunStartedUtc, LastRunFinishedUtc, LastRunStatus, LastRunMessage, UpdatedUtc "
                 "FROM dbo.ScheduleState WHERE UserID = ?",
                 user_id,
             )
@@ -135,11 +137,13 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
             return ScheduleStateRow(
                 user_id=str(row[0]),
                 last_covered_date_utc=row[1].date() if isinstance(row[1], datetime) else row[1],
-                last_run_started_utc=row[2],
-                last_run_finished_utc=row[3],
-                last_run_status=str(row[4]) if row[4] is not None else None,
-                last_run_message=str(row[5]) if row[5] is not None else None,
-                updated_utc=row[6],
+                last_covered_date_local=row[2].date() if isinstance(row[2], datetime) else row[2],
+                last_covered_timezone=str(row[3]) if row[3] is not None else None,
+                last_run_started_utc=row[4],
+                last_run_finished_utc=row[5],
+                last_run_status=str(row[6]) if row[6] is not None else None,
+                last_run_message=str(row[7]) if row[7] is not None else None,
+                updated_utc=row[8],
             )
     except Exception as exc:
         logger.warning("Failed to read ScheduleState from Azure: %s", exc)
@@ -148,7 +152,9 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
 
 def upsert_schedule_state(
     creds: dict[str, Any],
-    last_covered_date: date,
+    last_covered_date_utc: date,
+    last_covered_date_local: date,
+    last_covered_timezone: str,
     status: str,
     message: str,
     run_started_utc: Optional[datetime] = None,
@@ -161,8 +167,12 @@ def upsert_schedule_state(
     ----------
     creds:
         Full credentials dict.
-    last_covered_date:
-        The most recent date successfully covered by this run.
+    last_covered_date_utc:
+        The most recent UTC date successfully covered by this run.
+    last_covered_date_local:
+        The most recent scheduler-local date successfully covered by this run.
+    last_covered_timezone:
+        IANA timezone name used for local scheduler day semantics.
     status:
         Short status string — ``"success"``, ``"partial"``, or ``"failed"``.
     message:
@@ -196,16 +206,18 @@ MERGE dbo.ScheduleState AS target
 USING (SELECT ? AS UserID) AS source ON target.UserID = source.UserID
 WHEN MATCHED THEN
     UPDATE SET
-        LastCoveredDateUtc  = ?,
-        LastRunStartedUtc   = ?,
-        LastRunFinishedUtc  = ?,
-        LastRunStatus       = ?,
-        LastRunMessage      = ?,
-        UpdatedUtc          = SYSUTCDATETIME()
+        LastCoveredDateUtc    = ?,
+        LastCoveredDateLocal  = ?,
+        LastCoveredTimezone   = ?,
+        LastRunStartedUtc     = ?,
+        LastRunFinishedUtc    = ?,
+        LastRunStatus         = ?,
+        LastRunMessage        = ?,
+        UpdatedUtc            = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN
-    INSERT (UserID, LastCoveredDateUtc, LastRunStartedUtc,
+    INSERT (UserID, LastCoveredDateUtc, LastCoveredDateLocal, LastCoveredTimezone, LastRunStartedUtc,
             LastRunFinishedUtc, LastRunStatus, LastRunMessage)
-    VALUES (?, ?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 """
     try:
         with conn:
@@ -213,13 +225,17 @@ WHEN NOT MATCHED THEN
             cursor.execute(
                 merge_sql,
                 user_id,
-                last_covered_date,
+                last_covered_date_utc,
+                last_covered_date_local,
+                last_covered_timezone,
                 started,
                 finished,
                 status[:16],
                 truncated_message,
                 user_id,
-                last_covered_date,
+                last_covered_date_utc,
+                last_covered_date_local,
+                last_covered_timezone,
                 started,
                 finished,
                 status[:16],
@@ -264,7 +280,11 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
         logger.warning("Failed to append to run_history.jsonl: %s", exc)
 
 
-def check_today_success_marker(log_dir: str | Path, today_date: date) -> bool:
+def _marker_filename(today_date: date, marker_namespace: str = "local") -> str:
+    return f"last_success_{marker_namespace}_{today_date.isoformat()}.marker"
+
+
+def check_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> bool:
     """
     Check whether today's success marker file exists.
 
@@ -278,14 +298,14 @@ def check_today_success_marker(log_dir: str | Path, today_date: date) -> bool:
     if not log_dir:
         return False
     try:
-        marker = Path(log_dir) / f"last_success_{today_date.isoformat()}.marker"
+        marker = Path(log_dir) / _marker_filename(today_date, marker_namespace)
         return marker.exists()
     except Exception as exc:
         logger.warning("Failed to check success marker: %s", exc)
         return False
 
 
-def write_today_success_marker(log_dir: str | Path, today_date: date) -> None:
+def write_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> None:
     """
     Write (touch) today's success marker file in ``log_dir``.
 
@@ -297,7 +317,7 @@ def write_today_success_marker(log_dir: str | Path, today_date: date) -> None:
     try:
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
-        marker = log_path / f"last_success_{today_date.isoformat()}.marker"
+        marker = log_path / _marker_filename(today_date, marker_namespace)
         marker.touch()
     except Exception as exc:
         logger.warning("Failed to write success marker: %s", exc)

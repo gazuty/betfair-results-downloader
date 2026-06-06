@@ -96,6 +96,12 @@ Current recommended downloader cadence on macOS launchd:
 - `06:00` Australia/Sydney
 - `19:35` Australia/Sydney
 
+Downloader scheduler semantics are now explicitly dual-tracked:
+
+- trigger times are interpreted in `schedule.timezone`
+- once-per-day skip logic uses the scheduler-local day in that timezone
+- UTC coverage is still recorded alongside local coverage for auditability and interoperability
+
 That preserves a clean separation of concerns:
 
 - downloader repo generates and refreshes data

@@ -1,50 +1,69 @@
 """
-azure_create_schedulestate.py
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Idempotent script that creates the ``dbo.ScheduleState`` table in the
-configured Azure SQL database. Safe to run repeatedly, using
-``IF OBJECT_ID(...) IS NULL`` to skip creation when the table already exists.
-New tables include both UTC and scheduler-local coverage fields.
+azure_upgrade_schedulestate.py
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Idempotent schema upgrade for ``dbo.ScheduleState``.
+
+Adds the dual-coverage scheduler columns introduced for local timezone-aware
+scheduled runs:
+
+- ``LastCoveredDateLocal``
+- ``LastCoveredTimezone``
+
+Safe to run repeatedly. Existing data is preserved. When legacy rows exist,
+``LastCoveredDateLocal`` is backfilled from ``LastCoveredDateUtc`` and
+``LastCoveredTimezone`` is backfilled to ``Australia/Sydney`` only when those
+fields are currently NULL.
 
 Usage::
 
-    python scripts/azure_create_schedulestate.py
-
-Credentials are loaded via the standard resolver (``secrets/credentials.location.json``
-→ ``secrets/credentials.json``).  The Azure SQL connection details come from
-``credentials.json["azure_sql"]``.
+    python scripts/azure_upgrade_schedulestate.py
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# Allow running directly without pip-installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from betfair_results_downloader.secrets import get_credentials_path, load_credentials
 
-
 DDL = """\
 IF OBJECT_ID(N'dbo.ScheduleState', N'U') IS NULL
 BEGIN
-    CREATE TABLE dbo.ScheduleState (
-        UserID                NVARCHAR(64)   NOT NULL PRIMARY KEY,
-        LastCoveredDateUtc    DATE           NULL,
-        LastCoveredDateLocal  DATE           NULL,
-        LastCoveredTimezone   NVARCHAR(64)   NULL,
-        LastRunStartedUtc     DATETIME2(0)   NULL,
-        LastRunFinishedUtc    DATETIME2(0)   NULL,
-        LastRunStatus         NVARCHAR(16)   NULL,
-        LastRunMessage        NVARCHAR(1000) NULL,
-        UpdatedUtc            DATETIME2(0)   NOT NULL DEFAULT SYSUTCDATETIME()
-    );
-    PRINT 'Created dbo.ScheduleState';
+    RAISERROR('dbo.ScheduleState does not exist. Run azure_create_schedulestate.py first.', 16, 1);
+END
+
+IF COL_LENGTH('dbo.ScheduleState', 'LastCoveredDateLocal') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleState
+    ADD LastCoveredDateLocal DATE NULL;
+    PRINT 'Added dbo.ScheduleState.LastCoveredDateLocal';
 END
 ELSE
 BEGIN
-    PRINT 'dbo.ScheduleState already exists — no action taken';
+    PRINT 'dbo.ScheduleState.LastCoveredDateLocal already exists';
 END
+
+IF COL_LENGTH('dbo.ScheduleState', 'LastCoveredTimezone') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleState
+    ADD LastCoveredTimezone NVARCHAR(64) NULL;
+    PRINT 'Added dbo.ScheduleState.LastCoveredTimezone';
+END
+ELSE
+BEGIN
+    PRINT 'dbo.ScheduleState.LastCoveredTimezone already exists';
+END
+
+UPDATE dbo.ScheduleState
+SET LastCoveredDateLocal = LastCoveredDateUtc
+WHERE LastCoveredDateUtc IS NOT NULL
+  AND LastCoveredDateLocal IS NULL;
+
+UPDATE dbo.ScheduleState
+SET LastCoveredTimezone = 'Australia/Sydney'
+WHERE LastCoveredDateLocal IS NOT NULL
+  AND LastCoveredTimezone IS NULL;
 """
 
 
