@@ -423,7 +423,7 @@ Behavior:
 - prefers the exact canonical CSV `cleared_orders_cleaned.csv` when present
 - prints the exact report body intended for user-facing delivery
 
-See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the morning versus evening report.
+See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the 6:00 am versus 7:35 pm report.
 
 ### `schedule`
 

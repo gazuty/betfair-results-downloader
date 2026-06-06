@@ -94,7 +94,7 @@ Current recommended downloader cadence on macOS launchd:
 **Reporting cadence** should be owned by OpenClaw:
 
 - `06:00` Australia/Sydney
-- `21:00` Australia/Sydney
+- `19:35` Australia/Sydney
 
 That preserves a clean separation of concerns:
 
@@ -106,7 +106,7 @@ That preserves a clean separation of concerns:
 
 - The `06:00` report is primarily valuable for the *week-to-date* section.
 - The `06:00` *today* section may legitimately be `$0.00` if no horse or greyhound settlements exist by that point.
-- The `21:00` report is expected to be the more meaningful day-level operational summary.
+- The `19:35` report is expected to be the more meaningful day-level operational summary.
 
 ### Why this design is preferred
 
