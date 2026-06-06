@@ -5,7 +5,11 @@ from typing import List
 from datetime import datetime
 
 import pandas as pd
-import streamlit as st
+
+try:
+    import streamlit as st
+except Exception:  # pragma: no cover - streamlit unavailable outside dashboard use
+    st = None
 
 
 CANONICAL_HINTS = [
@@ -53,14 +57,21 @@ def file_info(path: str) -> dict:
     }
 
 
-@st.cache_data(show_spinner=False)
-def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
-    """
-    Cached CSV loader. The modified timestamp is included to automatically refresh the cache
-    when the file changes.
-    """
-    df = pd.read_csv(path, low_memory=False)
-    return df
+def _read_csv_uncached(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, low_memory=False)
+
+
+if st is not None:
+    @st.cache_data(show_spinner=False)
+    def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
+        """
+        Cached CSV loader. The modified timestamp is included to automatically refresh the cache
+        when the file changes.
+        """
+        return _read_csv_uncached(path)
+else:
+    def _load_csv_cached(path: str, modified_ts: float) -> pd.DataFrame:
+        return _read_csv_uncached(path)
 
 
 def load_csv(path: str) -> pd.DataFrame:

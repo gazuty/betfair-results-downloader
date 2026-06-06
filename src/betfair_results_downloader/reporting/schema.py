@@ -5,11 +5,13 @@ import pandas as pd
 
 
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+HORSES_LABEL = "Horses"
+GREYHOUNDS_LABEL = "Greyhounds"
 
 # Betfair event type IDs (extend later if needed)
 EVENT_TYPE_MAP = {
-    7: "Horses",
-    4339: "Greyhounds",
+    7: HORSES_LABEL,
+    4339: GREYHOUNDS_LABEL,
 }
 
 

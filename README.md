@@ -12,6 +12,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
 - **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
 - **Reporting Dashboard** — local Streamlit UI for daily/weekly P&L analytics
+- **OpenClaw DM reporting** — repo-native week-to-date and day-to-date summary generation for agent-delivered chat updates
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
@@ -393,6 +394,35 @@ python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD
 Both `--from` and `--to` are required and inclusive. Azure publish gates apply.
 
 Exit codes: `0` = success · `1` = failure · `2` = bad arguments.
+
+### `dm-report`
+
+**Status:** ✅ Implemented
+
+Renders the OpenClaw-oriented daily DM report from the local results CSV. This command does not send a message itself, it generates the final message body for an external messenger such as OpenClaw.
+
+```bash
+python -m betfair_results_downloader dm-report
+```
+
+Optional overrides:
+
+```bash
+# Render for a specific Sydney-local or offset-aware timestamp
+python -m betfair_results_downloader dm-report --at 2026-06-06T21:00:00+10:00
+
+# Render from a specific CSV and print the source path
+python -m betfair_results_downloader dm-report --csv /path/to/cleared_orders_cleaned.csv --show-source
+```
+
+Behavior:
+
+- computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
+- computes **Today** from the current day `12:00 AM` Australia/Sydney time
+- includes only **Horses** and **Greyhounds** in the summary
+- prints the exact report body intended for user-facing delivery
+
+See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the morning versus evening report.
 
 ### `schedule`
 
