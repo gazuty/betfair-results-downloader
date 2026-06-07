@@ -139,6 +139,7 @@ def _run_pipeline(
                 rows_downloaded=0,
                 from_dt_utc=from_dt_utc,
                 to_dt_utc=to_dt_utc,
+                last_confirmed_settled_at_utc=to_dt_utc,
                 download_started_utc=run_started,
                 download_finished_utc=datetime.now(timezone.utc),
                 message=f"Download returned no rows. {dl.message}",
