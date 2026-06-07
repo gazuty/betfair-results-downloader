@@ -4,9 +4,15 @@ import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-import pyodbc
+try:
+    import pyodbc  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - environment-dependent native import
+    pyodbc = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    import pyodbc as pyodbc_types
 
 from .secrets import credentials_path, get_nested, load_credentials
 
@@ -59,7 +65,7 @@ def get_scoped_user_id() -> str:
     raise SystemExit("Missing user.db_user_id/user.user_id in credentials.json")
 
 
-def get_azure_connection() -> pyodbc.Connection:
+def get_azure_connection() -> "pyodbc_types.Connection":
     creds = _load_creds()
     azsql = creds.get("azure_sql", None)
     if not azsql:
@@ -85,6 +91,11 @@ def get_azure_connection() -> pyodbc.Connection:
         "driver": driver,
         "port": azsql.get("port", 1433),
     }
+
+    if pyodbc is None:
+        raise SystemExit(
+            "pyodbc is unavailable. Install pyodbc and unixODBC/ODBC Driver dependencies to use Azure remediation."
+        )
 
     return pyodbc.connect(_build_conn_str(azsql_norm))
 
