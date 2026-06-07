@@ -270,20 +270,13 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
         # Apply CLI time overrides to schedule config if provided
         if getattr(args, "time", None) or getattr(args, "retries", None):
-            from .config import ScheduleConfig
+            from dataclasses import replace
+
             retry_list = [r.strip() for r in (args.retries or "").split(",") if r.strip()]
-            schedule_cfg = ScheduleConfig(
-                enabled=schedule_cfg.enabled,
-                timezone=schedule_cfg.timezone,
+            schedule_cfg = replace(
+                schedule_cfg,
                 primary_time=args.time or schedule_cfg.primary_time,
                 retry_times=tuple(retry_list) if retry_list else schedule_cfg.retry_times,
-                publish_to_azure=schedule_cfg.publish_to_azure,
-                allow_azure_publish=schedule_cfg.allow_azure_publish,
-                max_backfill_days=schedule_cfg.max_backfill_days,
-                chunk_days=schedule_cfg.chunk_days,
-                min_coverage_overlap_days=schedule_cfg.min_coverage_overlap_days,
-                log_dir=schedule_cfg.log_dir,
-                history_file=schedule_cfg.history_file,
             )
 
         log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")

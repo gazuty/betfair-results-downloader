@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import pandas as pd
-import pyodbc
+
+try:
+    import pyodbc  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - environment-dependent native import
+    pyodbc = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    import pyodbc as pyodbc_types
 
 
 @dataclass
@@ -84,7 +91,7 @@ def _profits_equal(a: Decimal | None, b: Decimal | None, tol: Decimal) -> bool:
 
 
 def read_existing_marketresults(
-    conn: pyodbc.Connection, db_user_id: str
+    conn: "pyodbc_types.Connection", db_user_id: str
 ) -> pd.DataFrame:
     query = """
         SELECT RTRIM(UserID) AS UserID, MarketID, Profit, Notes
@@ -206,7 +213,7 @@ def build_sync_plan(
     )
 
 
-def apply_sync_plan(cur: pyodbc.Cursor, plan: AzureSyncPlan) -> tuple[int, int]:
+def apply_sync_plan(cur: "pyodbc_types.Cursor", plan: AzureSyncPlan) -> tuple[int, int]:
     inserted = 0
     updated = 0
 

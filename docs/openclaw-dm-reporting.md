@@ -99,8 +99,9 @@ Current recommended downloader cadence on macOS launchd:
 Downloader scheduler semantics are now explicitly dual-tracked:
 
 - trigger times are interpreted in `schedule.timezone`
-- once-per-day skip logic uses the scheduler-local day in that timezone
+- all four scheduled runs perform timestamp-based incremental download attempts
 - UTC coverage is still recorded alongside local coverage for auditability and interoperability
+- the primary incremental checkpoint is the latest confirmed settled timestamp, with a default 2-hour overlap
 
 That preserves a clean separation of concerns:
 

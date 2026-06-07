@@ -1,22 +1,18 @@
 """
 scheduler/state.py
 ~~~~~~~~~~~~~~~~~~
-Schedule state persistence layer (Phase 2.1).
+Schedule state persistence layer for scheduled downloader runs.
 
-Three storage mechanisms:
+Storage mechanisms:
 
-1. **Azure ``dbo.ScheduleState``** — remote source of truth for
-   ``LastCoveredDateUtc``.  Requires ``user.enable_azure_sql=true`` and a
-   working ``pyodbc`` connection.  Failures are caught and reported as
-   warnings; the caller falls back to CSV-based gap detection.
+1. **Azure ``dbo.ScheduleState``** — remote source of truth for both day-level
+   coverage fields and the latest confirmed settled timestamp checkpoint used by
+   intraday incremental scheduling.
 
-2. **``run_history.jsonl``** — append-only local log of every run attempt
-   (one JSON line per run).  Grows indefinitely; the caller decides whether
-   to rotate it.
+2. **``run_history.jsonl``** — append-only local log of every run attempt.
 
-3. **``last_success_YYYY-MM-DD.marker``** — zero-byte touch file that signals
-   the current calendar date has already been successfully covered.  Prevents
-   multiple runs within the same day from re-downloading data.
+3. **Marker files** — zero-byte files used for lightweight operational audit.
+   These are no longer used to suppress later intraday scheduled runs.
 
 All public functions are designed to be called from ``runner.py`` and
 ``gap_detector.py``; they never crash the caller on transient failures.
@@ -33,10 +29,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Data container
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ScheduleStateRow:
     """One row from ``dbo.ScheduleState`` for the current user."""
@@ -45,6 +37,9 @@ class ScheduleStateRow:
     last_covered_date_utc: Optional[date]
     last_covered_date_local: Optional[date]
     last_covered_timezone: Optional[str]
+    last_confirmed_settled_at_utc: Optional[datetime]
+    last_successful_download_started_utc: Optional[datetime]
+    last_successful_download_finished_utc: Optional[datetime]
     last_run_started_utc: Optional[datetime]
     last_run_finished_utc: Optional[datetime]
     last_run_status: Optional[str]
@@ -52,12 +47,7 @@ class ScheduleStateRow:
     updated_utc: Optional[datetime]
 
 
-# ---------------------------------------------------------------------------
-# Azure helpers
-# ---------------------------------------------------------------------------
-
 def _get_db_user_id(creds: dict[str, Any]) -> str:
-    """Return the Azure UserID for this user (db_user_id falls back to user_id)."""
     user = creds.get("user") or {}
     return str(user.get("db_user_id") or user.get("user_id") or "").strip()
 
@@ -77,42 +67,36 @@ def _build_conn_str(azsql: dict[str, Any]) -> str:
 
 
 def _open_azure_connection(creds: dict[str, Any]):  # type: ignore[return]
-    """
-    Open a pyodbc connection using ``credentials["azure_sql"]``.
-
-    Returns the connection object, or ``None`` if pyodbc is unavailable,
-    Azure SQL is not configured, or the connection attempt fails.
-    """
     azsql = creds.get("azure_sql") or {}
     if not azsql.get("server"):
-        logger.debug("azure_sql.server not configured — skipping Azure state.")
+        logger.debug("azure_sql.server not configured, skipping Azure state.")
         return None
 
     try:
         import pyodbc  # noqa: PLC0415
     except ImportError:
-        logger.warning("pyodbc not installed — Azure ScheduleState unavailable.")
+        logger.warning("pyodbc not installed, Azure ScheduleState unavailable.")
         return None
 
     try:
         conn_str = _build_conn_str(azsql)
         return pyodbc.connect(conn_str, autocommit=False)
     except Exception as exc:
-        logger.warning("Azure connection failed: %s — falling back to CSV state.", exc)
+        logger.warning("Azure connection failed: %s, falling back to CSV state.", exc)
         return None
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+def _coerce_optional_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return None
+
 
 def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
-    """
-    Read the ``dbo.ScheduleState`` row for the current user from Azure SQL.
-
-    Returns ``None`` if the row doesn't exist, Azure is unreachable, pyodbc is
-    not installed, or the table doesn't exist yet.  Never raises.
-    """
     user_id = _get_db_user_id(creds)
     if not user_id:
         logger.warning("Cannot read ScheduleState: db_user_id / user_id not set in credentials.")
@@ -127,6 +111,7 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT UserID, LastCoveredDateUtc, LastCoveredDateLocal, LastCoveredTimezone, "
+                "LastConfirmedSettledAtUtc, LastSuccessfulDownloadStartedUtc, LastSuccessfulDownloadFinishedUtc, "
                 "LastRunStartedUtc, LastRunFinishedUtc, LastRunStatus, LastRunMessage, UpdatedUtc "
                 "FROM dbo.ScheduleState WHERE UserID = ?",
                 user_id,
@@ -139,11 +124,14 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
                 last_covered_date_utc=row[1].date() if isinstance(row[1], datetime) else row[1],
                 last_covered_date_local=row[2].date() if isinstance(row[2], datetime) else row[2],
                 last_covered_timezone=str(row[3]) if row[3] is not None else None,
-                last_run_started_utc=row[4],
-                last_run_finished_utc=row[5],
-                last_run_status=str(row[6]) if row[6] is not None else None,
-                last_run_message=str(row[7]) if row[7] is not None else None,
-                updated_utc=row[8],
+                last_confirmed_settled_at_utc=_coerce_optional_datetime(row[4]),
+                last_successful_download_started_utc=_coerce_optional_datetime(row[5]),
+                last_successful_download_finished_utc=_coerce_optional_datetime(row[6]),
+                last_run_started_utc=_coerce_optional_datetime(row[7]),
+                last_run_finished_utc=_coerce_optional_datetime(row[8]),
+                last_run_status=str(row[9]) if row[9] is not None else None,
+                last_run_message=str(row[10]) if row[10] is not None else None,
+                updated_utc=_coerce_optional_datetime(row[11]),
             )
     except Exception as exc:
         logger.warning("Failed to read ScheduleState from Azure: %s", exc)
@@ -159,34 +147,10 @@ def upsert_schedule_state(
     message: str,
     run_started_utc: Optional[datetime] = None,
     run_finished_utc: Optional[datetime] = None,
+    last_confirmed_settled_at_utc: Optional[datetime] = None,
+    last_successful_download_started_utc: Optional[datetime] = None,
+    last_successful_download_finished_utc: Optional[datetime] = None,
 ) -> bool:
-    """
-    MERGE/upsert the ``dbo.ScheduleState`` row for the current user.
-
-    Parameters
-    ----------
-    creds:
-        Full credentials dict.
-    last_covered_date_utc:
-        The most recent UTC date successfully covered by this run.
-    last_covered_date_local:
-        The most recent scheduler-local date successfully covered by this run.
-    last_covered_timezone:
-        IANA timezone name used for local scheduler day semantics.
-    status:
-        Short status string — ``"success"``, ``"partial"``, or ``"failed"``.
-    message:
-        Human-readable summary (truncated to 1000 chars before writing).
-    run_started_utc:
-        UTC datetime the run started (defaults to now if not provided).
-    run_finished_utc:
-        UTC datetime the run finished (defaults to now if not provided).
-
-    Returns
-    -------
-    bool
-        ``True`` on success, ``False`` if upsert failed (caller logs the issue).
-    """
     user_id = _get_db_user_id(creds)
     if not user_id:
         logger.warning("Cannot upsert ScheduleState: db_user_id / user_id not set.")
@@ -196,9 +160,21 @@ def upsert_schedule_state(
     if conn is None:
         return False
 
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)  # SQL DATETIME2 is tz-naive
-    started = (run_started_utc.replace(tzinfo=None) if run_started_utc else now_utc)
-    finished = (run_finished_utc.replace(tzinfo=None) if run_finished_utc else now_utc)
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    started = run_started_utc.astimezone(timezone.utc).replace(tzinfo=None) if run_started_utc else now_utc
+    finished = run_finished_utc.astimezone(timezone.utc).replace(tzinfo=None) if run_finished_utc else now_utc
+    confirmed = (
+        last_confirmed_settled_at_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        if last_confirmed_settled_at_utc else None
+    )
+    download_started = (
+        last_successful_download_started_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        if last_successful_download_started_utc else None
+    )
+    download_finished = (
+        last_successful_download_finished_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        if last_successful_download_finished_utc else None
+    )
     truncated_message = (message or "")[:1000]
 
     merge_sql = """\
@@ -206,18 +182,22 @@ MERGE dbo.ScheduleState AS target
 USING (SELECT ? AS UserID) AS source ON target.UserID = source.UserID
 WHEN MATCHED THEN
     UPDATE SET
-        LastCoveredDateUtc    = ?,
-        LastCoveredDateLocal  = ?,
-        LastCoveredTimezone   = ?,
-        LastRunStartedUtc     = ?,
-        LastRunFinishedUtc    = ?,
-        LastRunStatus         = ?,
-        LastRunMessage        = ?,
-        UpdatedUtc            = SYSUTCDATETIME()
+        LastCoveredDateUtc                 = ?,
+        LastCoveredDateLocal               = ?,
+        LastCoveredTimezone                = ?,
+        LastConfirmedSettledAtUtc          = ?,
+        LastSuccessfulDownloadStartedUtc   = ?,
+        LastSuccessfulDownloadFinishedUtc  = ?,
+        LastRunStartedUtc                  = ?,
+        LastRunFinishedUtc                 = ?,
+        LastRunStatus                      = ?,
+        LastRunMessage                     = ?,
+        UpdatedUtc                         = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN
-    INSERT (UserID, LastCoveredDateUtc, LastCoveredDateLocal, LastCoveredTimezone, LastRunStartedUtc,
-            LastRunFinishedUtc, LastRunStatus, LastRunMessage)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    INSERT (UserID, LastCoveredDateUtc, LastCoveredDateLocal, LastCoveredTimezone,
+            LastConfirmedSettledAtUtc, LastSuccessfulDownloadStartedUtc, LastSuccessfulDownloadFinishedUtc,
+            LastRunStartedUtc, LastRunFinishedUtc, LastRunStatus, LastRunMessage)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 """
     try:
         with conn:
@@ -228,6 +208,9 @@ WHEN NOT MATCHED THEN
                 last_covered_date_utc,
                 last_covered_date_local,
                 last_covered_timezone,
+                confirmed,
+                download_started,
+                download_finished,
                 started,
                 finished,
                 status[:16],
@@ -236,6 +219,9 @@ WHEN NOT MATCHED THEN
                 last_covered_date_utc,
                 last_covered_date_local,
                 last_covered_timezone,
+                confirmed,
+                download_started,
+                download_finished,
                 started,
                 finished,
                 status[:16],
@@ -249,22 +235,8 @@ WHEN NOT MATCHED THEN
 
 
 def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
-    """
-    Append one JSON line to ``run_history.jsonl`` in ``log_dir``.
-
-    Creates the directory and file if they do not exist.  Silently skips on
-    any IO error so it never crashes the caller.
-
-    Parameters
-    ----------
-    log_dir:
-        Directory where ``run_history.jsonl`` lives (or will be created).
-    run_record:
-        Arbitrary dict — serialised as a single JSON line.  A ``"ts"`` key
-        (UTC ISO timestamp) is injected automatically if not already present.
-    """
     if not log_dir:
-        logger.debug("append_run_history: log_dir empty — skipping.")
+        logger.debug("append_run_history: log_dir empty, skipping.")
         return
 
     try:
@@ -280,21 +252,11 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
         logger.warning("Failed to append to run_history.jsonl: %s", exc)
 
 
-def _marker_filename(today_date: date, marker_namespace: str = "local") -> str:
-    return f"last_success_{marker_namespace}_{today_date.isoformat()}.marker"
+def _marker_filename(marker_date: date, marker_namespace: str = "local") -> str:
+    return f"last_success_{marker_namespace}_{marker_date.isoformat()}.marker"
 
 
 def check_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> bool:
-    """
-    Check whether today's success marker file exists.
-
-    The marker file is named ``last_success_YYYY-MM-DD.marker`` and lives
-    in ``log_dir``.  Its presence means today's data has already been fully
-    downloaded and processed.
-
-    Returns ``False`` if ``log_dir`` is empty, the marker is absent, or any
-    IO error occurs.
-    """
     if not log_dir:
         return False
     try:
@@ -306,18 +268,13 @@ def check_today_success_marker(log_dir: str | Path, today_date: date, marker_nam
 
 
 def write_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> None:
-    """
-    Write (touch) today's success marker file in ``log_dir``.
-
-    Creates the directory if it does not exist.  Silently skips on any IO error.
-    """
     if not log_dir:
-        logger.debug("write_today_success_marker: log_dir empty — skipping.")
+        logger.debug("write_today_success_marker: log_dir empty, skipping.")
         return
     try:
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
         marker = log_path / _marker_filename(today_date, marker_namespace)
-        marker.touch()
+        marker.touch(exist_ok=True)
     except Exception as exc:
         logger.warning("Failed to write success marker: %s", exc)

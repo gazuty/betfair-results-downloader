@@ -361,7 +361,7 @@ See [Betfair Certificate Enrollment — Step 4](#step-4--verify-with-auth-test) 
 
 **Status:** ✅ Implemented
 
-Runs one scheduled download for the current day.
+Runs one scheduled incremental download.
 
 ```bash
 python -m betfair_results_downloader run
@@ -369,15 +369,15 @@ python -m betfair_results_downloader run
 
 **What it does:**
 
-1. Checks today's scheduler-local success marker (`outputs/last_success_local_YYYY-MM-DD.marker`) and writes a UTC companion marker (`last_success_utc_YYYY-MM-DD.marker`) on success — skips silently if the scheduler-local day has already been covered.
-2. Computes the backfill window via gap detection (see [Gap Detection](#gap-detection-logic)).
+1. Computes the incremental download window via gap detection (see [Gap Detection](#gap-detection-logic)).
+2. Uses the latest confirmed settled timestamp as the primary checkpoint, with canonical CSV fallback and a configurable safety overlap.
 3. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`).
 4. Enriches with market catalogue (uses cache).
 5. Writes canonical + snapshot CSVs.
 6. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)).
-7. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates, writes both success markers, appends to `run_history.jsonl`.
+7. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp, writes audit markers, appends to `run_history.jsonl`.
 
-Exit codes: `0` = success or already-skipped · `1` = failure.
+Exit codes: `0` = success · `1` = failure.
 
 Output: structured log lines to stdout (human-readable, one-per-event format).
 
@@ -499,14 +499,15 @@ Exit codes: `0` = success · `1` = failure.
 
 Scheduled runs now track both:
 - *UTC coverage date* for interoperability and auditability
-- *scheduler-local coverage date* using `schedule.timezone` for once-per-day run behaviour
+- *scheduler-local coverage date* using `schedule.timezone`
+- *latest confirmed settled timestamp* for intraday incremental checkpointing
 
-For `Australia/Sydney`, this means an early morning run such as `05:30` uses the Sydney calendar day for skip logic and backfill targeting, even when UTC is still on the prior date.
+For `Australia/Sydney`, this means all four scheduled runs can perform real download attempts on the same local day. The scheduler no longer suppresses later runs just because an earlier run succeeded.
 
-State and logs therefore expose both perspectives:
-- Azure ScheduleState stores `LastCoveredDateUtc`, `LastCoveredDateLocal`, and `LastCoveredTimezone`
-- local marker files store both `last_success_local_YYYY-MM-DD.marker` and `last_success_utc_YYYY-MM-DD.marker`
-- `run_history.jsonl` records `today_local`, `today_utc`, and `schedule_timezone`
+State and logs therefore expose both day-level and timestamp-level perspectives:
+- Azure ScheduleState stores `LastCoveredDateUtc`, `LastCoveredDateLocal`, `LastCoveredTimezone`, and `LastConfirmedSettledAtUtc`
+- local marker files still store both `last_success_local_YYYY-MM-DD.marker` and `last_success_utc_YYYY-MM-DD.marker` for audit visibility
+- `run_history.jsonl` records `today_local`, `today_utc`, `schedule_timezone`, `from_dt_utc`, `to_dt_utc`, and `last_confirmed_settled_at_utc`
 
 For existing Azure deployments, run the schema upgrade before enabling this build against production:
 
@@ -546,20 +547,20 @@ Used when systemd is not available (e.g. older distros, containers).
 - **Plist location:** `~/Library/LaunchAgents/com.betfair.results.scheduler.plist`
 - **Loaded agent:** `launchctl list | grep com.betfair.results`
 - **Logs:** `outputs/launchd.out.log` and `outputs/launchd.err.log` (relative to repo root)
-- **On sleep/wake:** launchd will run missed jobs when the machine wakes. If the current scheduler-local day is already marked via the local success marker, the run is skipped automatically.
+- **On sleep/wake:** launchd will run missed jobs when the machine wakes. Later runs are not suppressed by the local success marker, so each wake-triggered scheduled invocation can still perform an incremental catch-up download.
 - **Re-install after credential change:** run `schedule uninstall && schedule install` to pick up updated credentials.
 
 ---
 
 ### Gap Detection Logic
 
-The backfill window is computed in three steps:
+The incremental window is computed in three steps:
 
-1. **Azure `dbo.ScheduleState`** — reads `LastCoveredDateLocal` for this user from Azure SQL when available, otherwise falls back to `LastCoveredDateUtc` for backward compatibility.
-2. **Canonical CSV** — reads the maximum `settledDate` directly from `cleared_orders_cleaned.csv` in the resolved results directory (independent of the GUI's `run_state.json`).
-3. **Cold-start fallback** — scheduler-local `today - max_backfill_days`.
+1. **Azure `dbo.ScheduleState`** — reads `LastConfirmedSettledAtUtc` for this user from Azure SQL when available.
+2. **Canonical CSV** — reads the maximum `settledDate` directly from `cleared_orders_cleaned.csv` in the resolved results directory.
+3. **Cold-start fallback** — current scheduler time minus `max_backfill_days`.
 
-In all cases the `from_date` is pulled back by `min_coverage_overlap_days` for safety re-pull, then capped at `max_backfill_days` before the scheduler-local day boundary.
+In all cases the checkpoint is pulled back by `min_overlap_hours` for safety re-download, then capped at `max_backfill_days` before the current time. This overlap is intended to protect against late-arriving or boundary-timestamp records while remaining safe under CSV dedupe.
 
 ### Azure ScheduleState schema maintenance
 
@@ -578,6 +579,9 @@ python scripts/azure_upgrade_schedulestate.py
 The upgrade is idempotent. It adds:
 - `LastCoveredDateLocal`
 - `LastCoveredTimezone`
+- `LastConfirmedSettledAtUtc`
+- `LastSuccessfulDownloadStartedUtc`
+- `LastSuccessfulDownloadFinishedUtc`
 
 and backfills legacy rows by copying `LastCoveredDateUtc` into `LastCoveredDateLocal` where needed, with `LastCoveredTimezone` defaulted to `Australia/Sydney` for those backfilled rows.
 
@@ -641,7 +645,8 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
 | `allow_azure_publish` | bool | `false` | Explicit second gate for scheduler Azure writes (see [Safety Gates](#azure-publish-safety-gates-scheduled-mode)) |
 | `max_backfill_days` | int | `90` | Maximum days to back-fill in a single run; must be ≤ 365 |
 | `chunk_days` | int | `30` | Betfair API window size in days; must be ≤ 90 |
-| `min_coverage_overlap_days` | int | `1` | Days of already-covered data to re-pull for safety overlap |
+| `min_coverage_overlap_days` | int | `1` | Legacy day-based overlap setting retained for compatibility |
+| `min_overlap_hours` | int | `2` | Hours to rewind before the last confirmed settled timestamp for safety overlap |
 | `log_dir` | string | `""` | Directory for `run_history.jsonl`, `last_success_local_*.marker`, and `last_success_utc_*.marker` files (defaults to `outputs/` when empty) |
 | `history_file` | string | `""` | Override path for `run_history.jsonl` (derived from `log_dir` when empty) |
 

@@ -2,24 +2,16 @@
 azure_create_schedulestate.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Idempotent script that creates the ``dbo.ScheduleState`` table in the
-configured Azure SQL database. Safe to run repeatedly, using
-``IF OBJECT_ID(...) IS NULL`` to skip creation when the table already exists.
-New tables include both UTC and scheduler-local coverage fields.
+configured Azure SQL database.
 
-Usage::
-
-    python scripts/azure_create_schedulestate.py
-
-Credentials are loaded via the standard resolver (``secrets/credentials.location.json``
-→ ``secrets/credentials.json``).  The Azure SQL connection details come from
-``credentials.json["azure_sql"]``.
+New tables include both day-level coverage fields and intraday incremental
+checkpoint fields.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# Allow running directly without pip-installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from betfair_results_downloader.secrets import get_credentials_path, load_credentials
@@ -29,21 +21,24 @@ DDL = """\
 IF OBJECT_ID(N'dbo.ScheduleState', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.ScheduleState (
-        UserID                NVARCHAR(64)   NOT NULL PRIMARY KEY,
-        LastCoveredDateUtc    DATE           NULL,
-        LastCoveredDateLocal  DATE           NULL,
-        LastCoveredTimezone   NVARCHAR(64)   NULL,
-        LastRunStartedUtc     DATETIME2(0)   NULL,
-        LastRunFinishedUtc    DATETIME2(0)   NULL,
-        LastRunStatus         NVARCHAR(16)   NULL,
-        LastRunMessage        NVARCHAR(1000) NULL,
-        UpdatedUtc            DATETIME2(0)   NOT NULL DEFAULT SYSUTCDATETIME()
+        UserID                             NVARCHAR(64)   NOT NULL PRIMARY KEY,
+        LastCoveredDateUtc                 DATE           NULL,
+        LastCoveredDateLocal               DATE           NULL,
+        LastCoveredTimezone                NVARCHAR(64)   NULL,
+        LastConfirmedSettledAtUtc          DATETIME2(0)   NULL,
+        LastSuccessfulDownloadStartedUtc   DATETIME2(0)   NULL,
+        LastSuccessfulDownloadFinishedUtc  DATETIME2(0)   NULL,
+        LastRunStartedUtc                  DATETIME2(0)   NULL,
+        LastRunFinishedUtc                 DATETIME2(0)   NULL,
+        LastRunStatus                      NVARCHAR(16)   NULL,
+        LastRunMessage                     NVARCHAR(1000) NULL,
+        UpdatedUtc                         DATETIME2(0)   NOT NULL DEFAULT SYSUTCDATETIME()
     );
     PRINT 'Created dbo.ScheduleState';
 END
 ELSE
 BEGIN
-    PRINT 'dbo.ScheduleState already exists — no action taken';
+    PRINT 'dbo.ScheduleState already exists, no action taken';
 END
 """
 

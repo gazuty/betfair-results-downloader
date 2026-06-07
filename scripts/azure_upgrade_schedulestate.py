@@ -3,20 +3,8 @@ azure_upgrade_schedulestate.py
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Idempotent schema upgrade for ``dbo.ScheduleState``.
 
-Adds the dual-coverage scheduler columns introduced for local timezone-aware
-scheduled runs:
-
-- ``LastCoveredDateLocal``
-- ``LastCoveredTimezone``
-
-Safe to run repeatedly. Existing data is preserved. When legacy rows exist,
-``LastCoveredDateLocal`` is backfilled from ``LastCoveredDateUtc`` and
-``LastCoveredTimezone`` is backfilled to ``Australia/Sydney`` only when those
-fields are currently NULL.
-
-Usage::
-
-    python scripts/azure_upgrade_schedulestate.py
+Adds intraday incremental checkpoint columns required by the timestamp-based
+scheduler.
 """
 from __future__ import annotations
 
@@ -53,6 +41,39 @@ END
 ELSE
 BEGIN
     PRINT 'dbo.ScheduleState.LastCoveredTimezone already exists';
+END
+
+IF COL_LENGTH('dbo.ScheduleState', 'LastConfirmedSettledAtUtc') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleState
+    ADD LastConfirmedSettledAtUtc DATETIME2(0) NULL;
+    PRINT 'Added dbo.ScheduleState.LastConfirmedSettledAtUtc';
+END
+ELSE
+BEGIN
+    PRINT 'dbo.ScheduleState.LastConfirmedSettledAtUtc already exists';
+END
+
+IF COL_LENGTH('dbo.ScheduleState', 'LastSuccessfulDownloadStartedUtc') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleState
+    ADD LastSuccessfulDownloadStartedUtc DATETIME2(0) NULL;
+    PRINT 'Added dbo.ScheduleState.LastSuccessfulDownloadStartedUtc';
+END
+ELSE
+BEGIN
+    PRINT 'dbo.ScheduleState.LastSuccessfulDownloadStartedUtc already exists';
+END
+
+IF COL_LENGTH('dbo.ScheduleState', 'LastSuccessfulDownloadFinishedUtc') IS NULL
+BEGIN
+    ALTER TABLE dbo.ScheduleState
+    ADD LastSuccessfulDownloadFinishedUtc DATETIME2(0) NULL;
+    PRINT 'Added dbo.ScheduleState.LastSuccessfulDownloadFinishedUtc';
+END
+ELSE
+BEGIN
+    PRINT 'dbo.ScheduleState.LastSuccessfulDownloadFinishedUtc already exists';
 END
 
 UPDATE dbo.ScheduleState

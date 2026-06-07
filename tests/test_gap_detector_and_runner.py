@@ -1,6 +1,7 @@
-"""Tests for scheduler gap detection and runner timezone semantics."""
+"""Tests for scheduler gap detection and intraday runner semantics."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -45,6 +46,7 @@ BASE_CREDS = {
         "max_backfill_days": 90,
         "chunk_days": 30,
         "min_coverage_overlap_days": 1,
+        "min_overlap_hours": 2,
         "log_dir": "",
     },
 }
@@ -64,6 +66,7 @@ def _default_schedule_cfg(**overrides):
         "max_backfill_days": cfg.max_backfill_days,
         "chunk_days": cfg.chunk_days,
         "min_coverage_overlap_days": cfg.min_coverage_overlap_days,
+        "min_overlap_hours": cfg.min_overlap_hours,
         "log_dir": cfg.log_dir,
         "history_file": cfg.history_file,
     }
@@ -71,102 +74,106 @@ def _default_schedule_cfg(**overrides):
     return ScheduleConfig(**data)
 
 
-class TestSchedulerTimeSemantics:
-    def test_scheduler_now_tracks_both_utc_and_sydney_dates(self) -> None:
-        cfg = _default_schedule_cfg()
-        now = datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
-        observed = get_scheduler_now(cfg, now)
-        assert observed.today_utc == date(2026, 6, 6)
-        assert observed.today_local == date(2026, 6, 7)
-        assert observed.timezone_name == "Australia/Sydney"
-
-
 class TestComputeBackfillWindow:
-    def test_uses_azure_local_coverage_when_available(self) -> None:
+    def test_uses_azure_confirmed_timestamp_when_available(self) -> None:
+        checkpoint = datetime(2026, 6, 6, 17, 15, tzinfo=timezone.utc)
         azure_row = ScheduleStateRow(
             user_id="TestUser",
             last_covered_date_utc=date(2026, 6, 6),
             last_covered_date_local=date(2026, 6, 7),
             last_covered_timezone="Australia/Sydney",
+            last_confirmed_settled_at_utc=checkpoint,
+            last_successful_download_started_utc=None,
+            last_successful_download_finished_utc=None,
             last_run_started_utc=None,
             last_run_finished_utc=None,
             last_run_status="success",
             last_run_message=None,
             updated_utc=None,
         )
-        cfg = _default_schedule_cfg(min_coverage_overlap_days=1)
+        cfg = _default_schedule_cfg(min_overlap_hours=2)
         fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
         with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
              patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row):
-            from_d, to_d, reason = compute_backfill_window(BASE_CREDS, cfg)
-        assert from_d == date(2026, 6, 7)
-        assert to_d == date(2026, 6, 7)
-        assert "LastCoveredDateLocal" in reason
+            from_dt, to_dt, reason = compute_backfill_window(BASE_CREDS, cfg)
+        assert from_dt == datetime(2026, 6, 6, 15, 15, tzinfo=timezone.utc)
+        assert to_dt == datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
+        assert "LastConfirmedSettledAtUtc" in reason
 
-    def test_falls_back_to_utc_coverage_for_backward_compatibility(self) -> None:
-        azure_row = ScheduleStateRow(
-            user_id="TestUser",
-            last_covered_date_utc=date(2026, 6, 6),
-            last_covered_date_local=None,
-            last_covered_timezone=None,
-            last_run_started_utc=None,
-            last_run_finished_utc=None,
-            last_run_status="success",
-            last_run_message=None,
-            updated_utc=None,
-        )
-        cfg = _default_schedule_cfg(min_coverage_overlap_days=1)
-        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
-        with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
-             patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row):
-            from_d, to_d, reason = compute_backfill_window(BASE_CREDS, cfg)
-        assert from_d == date(2026, 6, 6)
-        assert to_d == date(2026, 6, 7)
-        assert "LastCoveredDateUtc" in reason
-
-    def test_csv_fallback_uses_local_today(self, tmp_path: Path) -> None:
+    def test_csv_fallback_uses_timestamp_overlap(self, tmp_path: Path) -> None:
         csv_path = tmp_path / "cleared_orders_cleaned.csv"
-        pd.DataFrame({"settledDate": ["2026-06-06T00:00:00Z"]}).to_csv(csv_path, index=False)
+        pd.DataFrame({"settledDate": ["2026-06-06T18:20:00Z"]}).to_csv(csv_path, index=False)
         creds = {**BASE_CREDS, "paths": {"results_csv_dir": str(tmp_path)}}
-        cfg = _default_schedule_cfg()
+        cfg = _default_schedule_cfg(min_overlap_hours=2)
         fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
         with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
              patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=None):
-            from_d, to_d, _ = compute_backfill_window(creds, cfg)
-        assert from_d == date(2026, 6, 6)
-        assert to_d == date(2026, 6, 7)
+            from_dt, to_dt, _ = compute_backfill_window(creds, cfg)
+        assert from_dt == datetime(2026, 6, 6, 16, 20, tzinfo=timezone.utc)
+        assert to_dt == datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
 
 
 class TestRunScheduled:
-    def test_early_sydney_run_uses_local_marker_and_writes_both_namespaces(self, tmp_path: Path) -> None:
-        cfg = _default_schedule_cfg(log_dir=str(tmp_path))
-        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
-
-        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now), \
-             patch("betfair_results_downloader.scheduler.runner.compute_backfill_window", return_value=(date(2026, 6, 7), date(2026, 6, 7), "test")), \
-             patch("betfair_results_downloader.scheduler.runner._run_pipeline") as run_pipeline, \
-             patch("betfair_results_downloader.scheduler.runner.upsert_schedule_state", return_value=True) as upsert:
-            from betfair_results_downloader.scheduler.runner import RunResult
-            run_pipeline.return_value = RunResult(ok=True, status="success", message="ok")
-            result = run_scheduled(BASE_CREDS, cfg)
-
-        assert result.ok is True
-        kwargs = upsert.call_args.kwargs
-        assert kwargs["last_covered_date_local"] == date(2026, 6, 7)
-        assert kwargs["last_covered_date_utc"] == date(2026, 6, 6)
-        assert (tmp_path / "last_success_local_2026-06-07.marker").exists()
-        assert (tmp_path / "last_success_utc_2026-06-06.marker").exists()
-
-    def test_existing_local_marker_skips_even_when_utc_day_differs(self, tmp_path: Path) -> None:
+    def test_scheduled_run_no_longer_skips_after_local_marker_exists(self, tmp_path: Path) -> None:
         cfg = _default_schedule_cfg(log_dir=str(tmp_path))
         fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
         (tmp_path / "last_success_local_2026-06-07.marker").touch()
 
-        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now):
+        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now), \
+             patch(
+                 "betfair_results_downloader.scheduler.runner.compute_backfill_window",
+                 return_value=(
+                     datetime(2026, 6, 6, 17, 30, tzinfo=timezone.utc),
+                     datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc),
+                     "test",
+                 ),
+             ), \
+             patch("betfair_results_downloader.scheduler.runner._run_pipeline") as run_pipeline, \
+             patch("betfair_results_downloader.scheduler.runner.upsert_schedule_state", return_value=True):
+            from betfair_results_downloader.scheduler.runner import RunResult
+            run_pipeline.return_value = RunResult(
+                ok=True,
+                status="success",
+                message="ok",
+                last_confirmed_settled_at_utc=datetime(2026, 6, 6, 19, 20, tzinfo=timezone.utc),
+                download_started_utc=datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc),
+                download_finished_utc=datetime(2026, 6, 6, 19, 31, tzinfo=timezone.utc),
+            )
             result = run_scheduled(BASE_CREDS, cfg)
 
-        assert result.skipped is True
-        assert "Australia/Sydney" in result.skip_reason
+        assert result.ok is True
+        assert result.skipped is False
+
+    def test_run_history_captures_confirmed_timestamp(self, tmp_path: Path) -> None:
+        cfg = _default_schedule_cfg(log_dir=str(tmp_path))
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        confirmed = datetime(2026, 6, 6, 19, 20, tzinfo=timezone.utc)
+
+        with patch("betfair_results_downloader.scheduler.runner.get_scheduler_now", return_value=fake_now), \
+             patch(
+                 "betfair_results_downloader.scheduler.runner.compute_backfill_window",
+                 return_value=(
+                     datetime(2026, 6, 6, 17, 30, tzinfo=timezone.utc),
+                     datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc),
+                     "test",
+                 ),
+             ), \
+             patch("betfair_results_downloader.scheduler.runner._run_pipeline") as run_pipeline, \
+             patch("betfair_results_downloader.scheduler.runner.upsert_schedule_state", return_value=True):
+            from betfair_results_downloader.scheduler.runner import RunResult
+            run_pipeline.return_value = RunResult(
+                ok=True,
+                status="success",
+                message="ok",
+                last_confirmed_settled_at_utc=confirmed,
+                download_started_utc=datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc),
+                download_finished_utc=datetime(2026, 6, 6, 19, 31, tzinfo=timezone.utc),
+            )
+            run_scheduled(BASE_CREDS, cfg)
+
+        record = json.loads((tmp_path / "run_history.jsonl").read_text().strip())
+        assert record["last_confirmed_settled_at_utc"] == confirmed.isoformat()
+        assert record["from_dt_utc"] == "2026-06-06T17:30:00+00:00"
 
 
 class TestResolveResultsDir:

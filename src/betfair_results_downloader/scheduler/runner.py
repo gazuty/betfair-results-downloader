@@ -1,24 +1,10 @@
 """
 scheduler/runner.py
 ~~~~~~~~~~~~~~~~~~~
-Headless scheduled download runner (Phase 2.2).
+Headless scheduled download runner.
 
-Public entry points:
-
-- :func:`run_scheduled` — called by the ``run`` CLI subcommand. Checks
-  scheduler-local success markers, computes the backfill window via gap detection,
-  runs the pipeline, and updates state on success.
-
-- :func:`run_backfill` — called by the ``backfill`` CLI subcommand. Same
-  pipeline with an explicit date range override; no skip-marker check.
-
-Both functions respect the four-gate Azure publish matrix::
-
-    user.enable_azure_sql AND NOT user.dry_run
-    AND schedule.publish_to_azure AND schedule.allow_azure_publish
-
-If any gate is closed, CSV outputs are written but Azure publishing is
-skipped silently.
+Scheduled runs now use timestamp-based incremental checkpoints so all four
+configured daily run times can perform real download attempts.
 """
 from __future__ import annotations
 
@@ -28,16 +14,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import pandas as pd
+
 from ..config import ScheduleConfig
 from ..paths import resolve_results_dir
 from .auth import build_api_client
-from .gap_detector import compute_backfill_window
-from .state import (
-    append_run_history,
-    check_today_success_marker,
-    upsert_schedule_state,
-    write_today_success_marker,
-)
+from .gap_detector import compute_backfill_window, derive_coverage_dates
+from .state import append_run_history, upsert_schedule_state, write_today_success_marker
 from .time_semantics import get_scheduler_now
 
 logger = logging.getLogger(__name__)
@@ -45,8 +28,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RunResult:
-    """Summary returned by :func:`run_scheduled` and :func:`run_backfill`."""
-
     ok: bool
     skipped: bool = False
     skip_reason: str = ""
@@ -58,6 +39,11 @@ class RunResult:
     azure_published: bool = False
     message: str = ""
     errors: list[str] = field(default_factory=list)
+    from_dt_utc: Optional[datetime] = None
+    to_dt_utc: Optional[datetime] = None
+    last_confirmed_settled_at_utc: Optional[datetime] = None
+    download_started_utc: Optional[datetime] = None
+    download_finished_utc: Optional[datetime] = None
 
 
 def _azure_publish_allowed(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> bool:
@@ -87,11 +73,23 @@ def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Pat
     return repo_root / "outputs"
 
 
+def _extract_max_settled_at_utc(df: pd.DataFrame) -> Optional[datetime]:
+    if df is None or df.empty or "settledDate" not in df.columns:
+        return None
+    ts = pd.to_datetime(df["settledDate"], utc=True, errors="coerce").dropna()
+    if ts.empty:
+        return None
+    max_ts = ts.max().to_pydatetime()
+    if max_ts.tzinfo is None:
+        max_ts = max_ts.replace(tzinfo=timezone.utc)
+    return max_ts.astimezone(timezone.utc)
+
+
 def _run_pipeline(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
-    from_date: date,
-    to_date: date,
+    from_dt_utc: datetime,
+    to_dt_utc: datetime,
 ) -> RunResult:
     results_dir = _resolve_results_dir(creds)
     betfair_creds = creds.get("betfair") or {}
@@ -105,20 +103,29 @@ def _run_pipeline(
         except Exception as exc:
             msg = f"Betfair authentication failed: {exc}"
             logger.error(msg)
-            return RunResult(ok=False, status="failed", from_date=from_date,
-                             to_date=to_date, message=msg)
+            return RunResult(
+                ok=False,
+                status="failed",
+                from_dt_utc=from_dt_utc,
+                to_dt_utc=to_dt_utc,
+                message=msg,
+            )
 
         from ..downloader_core import fetch_cleared_orders_df_range  # noqa: PLC0415
-        logger.info("Downloading cleared orders %s → %s (chunk_days=%d)...",
-                    from_date, to_date, schedule_cfg.chunk_days)
+        logger.info(
+            "Downloading cleared orders %s → %s (chunk_days=%d)...",
+            from_dt_utc,
+            to_dt_utc,
+            schedule_cfg.chunk_days,
+        )
 
         def _say(msg: str) -> None:
             logger.info(msg)
 
         dl = fetch_cleared_orders_df_range(
             betfair=betfair_creds,
-            from_date=from_date,
-            to_date=to_date,
+            from_date=from_dt_utc,
+            to_date=to_dt_utc,
             chunk_days=schedule_cfg.chunk_days,
             api_client=client,
             status_cb=_say,
@@ -129,9 +136,11 @@ def _run_pipeline(
             return RunResult(
                 ok=True,
                 status="success",
-                from_date=from_date,
-                to_date=to_date,
                 rows_downloaded=0,
+                from_dt_utc=from_dt_utc,
+                to_dt_utc=to_dt_utc,
+                download_started_utc=run_started,
+                download_finished_utc=datetime.now(timezone.utc),
                 message=f"Download returned no rows. {dl.message}",
             )
 
@@ -155,9 +164,11 @@ def _run_pipeline(
         csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=_say)
         logger.info("CSV result: %s", csvr.message)
 
+        max_settled_at_utc = _extract_max_settled_at_utc(df_co)
+
         azure_published = False
         if _azure_publish_allowed(creds, schedule_cfg):
-            logger.info("Azure publish gates open — publishing...")
+            logger.info("Azure publish gates open, publishing...")
             try:
                 from ..downloader_core import prepare_azure_dataset  # noqa: PLC0415
                 from ..azure_publish import publish_to_azure_sql  # noqa: PLC0415
@@ -177,11 +188,14 @@ def _run_pipeline(
                 return RunResult(
                     ok=True,
                     status="partial",
-                    from_date=from_date,
-                    to_date=to_date,
                     rows_downloaded=dl.rows_downloaded,
                     rows_in_canonical=csvr.rows_in_canonical,
                     azure_published=False,
+                    from_dt_utc=from_dt_utc,
+                    to_dt_utc=to_dt_utc,
+                    last_confirmed_settled_at_utc=max_settled_at_utc,
+                    download_started_utc=run_started,
+                    download_finished_utc=datetime.now(timezone.utc),
                     message=(
                         f"CSV written ({csvr.rows_in_canonical:,} rows canonical). "
                         f"Azure publish failed: {exc}"
@@ -213,12 +227,15 @@ def _run_pipeline(
         return RunResult(
             ok=True,
             status="success",
-            from_date=from_date,
-            to_date=to_date,
             rows_downloaded=dl.rows_downloaded,
             rows_in_canonical=csvr.rows_in_canonical,
             azure_published=azure_published,
             message=summary,
+            from_dt_utc=from_dt_utc,
+            to_dt_utc=to_dt_utc,
+            last_confirmed_settled_at_utc=max_settled_at_utc,
+            download_started_utc=run_started,
+            download_finished_utc=run_finished,
         )
 
     finally:
@@ -240,53 +257,60 @@ def run_scheduled(
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
-    if check_today_success_marker(log_dir, today_local, marker_namespace="local"):
-        msg = (
-            f"Today ({today_local}) already covered in {schedule_cfg.timezone} "
-            f"— skipping. UTC day={today_utc}."
-        )
-        logger.info(msg)
-        return RunResult(ok=True, skipped=True, skip_reason=msg, status="skipped", message=msg)
+    logger.info("Computing incremental backfill window...")
+    from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
+    logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
-    logger.info("Computing backfill window...")
-    from_date, to_date, gap_reason = compute_backfill_window(creds, schedule_cfg)
-    logger.info("Backfill window: %s → %s (%s)", from_date, to_date, gap_reason)
-
-    result = _run_pipeline(creds, schedule_cfg, from_date, to_date)
-    result.from_date = from_date
-    result.to_date = to_date
+    result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    result.from_dt_utc = from_dt_utc
+    result.to_dt_utc = to_dt_utc
+    result.from_date = from_dt_utc.date()
+    result.to_date = to_dt_utc.date()
 
     run_finished = datetime.now(timezone.utc)
 
     if result.ok and result.status == "success":
+        covered_utc, covered_local = derive_coverage_dates(from_dt_utc, to_dt_utc, schedule_cfg.timezone)
         upsert_schedule_state(
             creds,
-            last_covered_date_utc=today_utc,
-            last_covered_date_local=today_local,
+            last_covered_date_utc=covered_utc,
+            last_covered_date_local=covered_local,
             last_covered_timezone=schedule_cfg.timezone,
             status="success",
             message=result.message,
             run_started_utc=run_started,
             run_finished_utc=run_finished,
+            last_confirmed_settled_at_utc=result.last_confirmed_settled_at_utc,
+            last_successful_download_started_utc=result.download_started_utc,
+            last_successful_download_finished_utc=result.download_finished_utc,
         )
         write_today_success_marker(log_dir, today_local, marker_namespace="local")
         write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 
-    append_run_history(str(log_dir), {
-        "status": result.status,
-        "from_date": str(from_date),
-        "to_date": str(to_date),
-        "rows_downloaded": result.rows_downloaded,
-        "rows_in_canonical": result.rows_in_canonical,
-        "azure_published": result.azure_published,
-        "gap_reason": gap_reason,
-        "message": result.message,
-        "run_started": run_started.isoformat(),
-        "run_finished": run_finished.isoformat(),
-        "schedule_timezone": schedule_cfg.timezone,
-        "today_local": today_local.isoformat(),
-        "today_utc": today_utc.isoformat(),
-    })
+    append_run_history(
+        str(log_dir),
+        {
+            "status": result.status,
+            "from_date": str(result.from_date),
+            "to_date": str(result.to_date),
+            "from_dt_utc": from_dt_utc.isoformat(),
+            "to_dt_utc": to_dt_utc.isoformat(),
+            "rows_downloaded": result.rows_downloaded,
+            "rows_in_canonical": result.rows_in_canonical,
+            "azure_published": result.azure_published,
+            "gap_reason": gap_reason,
+            "message": result.message,
+            "run_started": run_started.isoformat(),
+            "run_finished": run_finished.isoformat(),
+            "schedule_timezone": schedule_cfg.timezone,
+            "today_local": today_local.isoformat(),
+            "today_utc": today_utc.isoformat(),
+            "last_confirmed_settled_at_utc": (
+                result.last_confirmed_settled_at_utc.isoformat()
+                if result.last_confirmed_settled_at_utc is not None else None
+            ),
+        },
+    )
 
     return result
 
@@ -300,31 +324,44 @@ def run_backfill(
     if from_date > to_date:
         msg = f"Invalid backfill range: from_date ({from_date}) > to_date ({to_date})."
         logger.error(msg)
-        return RunResult(ok=False, status="failed", from_date=from_date,
-                         to_date=to_date, message=msg)
+        return RunResult(ok=False, status="failed", from_date=from_date, to_date=to_date, message=msg)
 
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = datetime.now(timezone.utc)
 
-    logger.info("Backfill run: %s → %s", from_date, to_date)
-    result = _run_pipeline(creds, schedule_cfg, from_date, to_date)
+    from_dt_utc = datetime(from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc)
+    to_dt_utc = datetime(to_date.year, to_date.month, to_date.day, 23, 59, 59, tzinfo=timezone.utc)
+
+    logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
+    result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
     result.from_date = from_date
     result.to_date = to_date
+    result.from_dt_utc = from_dt_utc
+    result.to_dt_utc = to_dt_utc
 
     run_finished = datetime.now(timezone.utc)
 
-    append_run_history(str(log_dir), {
-        "mode": "backfill",
-        "status": result.status,
-        "from_date": str(from_date),
-        "to_date": str(to_date),
-        "rows_downloaded": result.rows_downloaded,
-        "rows_in_canonical": result.rows_in_canonical,
-        "azure_published": result.azure_published,
-        "message": result.message,
-        "run_started": run_started.isoformat(),
-        "run_finished": run_finished.isoformat(),
-        "schedule_timezone": schedule_cfg.timezone,
-    })
+    append_run_history(
+        str(log_dir),
+        {
+            "mode": "backfill",
+            "status": result.status,
+            "from_date": str(from_date),
+            "to_date": str(to_date),
+            "from_dt_utc": from_dt_utc.isoformat(),
+            "to_dt_utc": to_dt_utc.isoformat(),
+            "rows_downloaded": result.rows_downloaded,
+            "rows_in_canonical": result.rows_in_canonical,
+            "azure_published": result.azure_published,
+            "message": result.message,
+            "run_started": run_started.isoformat(),
+            "run_finished": run_finished.isoformat(),
+            "schedule_timezone": schedule_cfg.timezone,
+            "last_confirmed_settled_at_utc": (
+                result.last_confirmed_settled_at_utc.isoformat()
+                if result.last_confirmed_settled_at_utc is not None else None
+            ),
+        },
+    )
 
     return result
