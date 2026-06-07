@@ -72,13 +72,6 @@ def compute_backfill_window(
         if azure_state.last_confirmed_settled_at_utc is not None:
             checkpoint = azure_state.last_confirmed_settled_at_utc.astimezone(timezone.utc)
             checkpoint_source = "LastConfirmedSettledAtUtc"
-        elif azure_state.last_covered_date_local is not None:
-            checkpoint = datetime.combine(
-                azure_state.last_covered_date_local,
-                datetime.min.time(),
-                tzinfo=timezone.utc,
-            )
-            checkpoint_source = "LastCoveredDateLocal (legacy bootstrap)"
         elif azure_state.last_covered_date_utc is not None:
             checkpoint = datetime.combine(
                 azure_state.last_covered_date_utc,
@@ -86,6 +79,14 @@ def compute_backfill_window(
                 tzinfo=timezone.utc,
             )
             checkpoint_source = "LastCoveredDateUtc (legacy bootstrap)"
+        elif azure_state.last_covered_date_local is not None:
+            checkpoint = datetime.combine(
+                azure_state.last_covered_date_local,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            checkpoint = min(checkpoint, now_utc)
+            checkpoint_source = "LastCoveredDateLocal (legacy bootstrap, capped)"
 
         if checkpoint is not None and checkpoint_source is not None:
             base_from = checkpoint - timedelta(hours=schedule_cfg.min_overlap_hours)
