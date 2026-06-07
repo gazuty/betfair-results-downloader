@@ -65,19 +65,40 @@ def compute_backfill_window(
     earliest_allowed = now_utc - timedelta(days=schedule_cfg.max_backfill_days)
 
     azure_state = read_schedule_state(creds)
-    if azure_state is not None and azure_state.last_confirmed_settled_at_utc is not None:
-        checkpoint = azure_state.last_confirmed_settled_at_utc.astimezone(timezone.utc)
-        base_from = checkpoint - timedelta(hours=schedule_cfg.min_overlap_hours)
-        from_dt = max(base_from, earliest_allowed)
-        reason = (
-            "Azure ScheduleState (LastConfirmedSettledAtUtc): "
-            f"checkpoint={checkpoint.isoformat()}, overlap={schedule_cfg.min_overlap_hours}h "
-            f"→ from={from_dt.isoformat()}"
-        )
-        if base_from < earliest_allowed:
-            reason += f" (capped at max_backfill_days={schedule_cfg.max_backfill_days})"
-        logger.info("Gap detection via Azure checkpoint: %s", reason)
-        return from_dt, now_utc, reason
+    if azure_state is not None:
+        checkpoint: Optional[datetime] = None
+        checkpoint_source: Optional[str] = None
+
+        if azure_state.last_confirmed_settled_at_utc is not None:
+            checkpoint = azure_state.last_confirmed_settled_at_utc.astimezone(timezone.utc)
+            checkpoint_source = "LastConfirmedSettledAtUtc"
+        elif azure_state.last_covered_date_local is not None:
+            checkpoint = datetime.combine(
+                azure_state.last_covered_date_local,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            checkpoint_source = "LastCoveredDateLocal (legacy bootstrap)"
+        elif azure_state.last_covered_date_utc is not None:
+            checkpoint = datetime.combine(
+                azure_state.last_covered_date_utc,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            checkpoint_source = "LastCoveredDateUtc (legacy bootstrap)"
+
+        if checkpoint is not None and checkpoint_source is not None:
+            base_from = checkpoint - timedelta(hours=schedule_cfg.min_overlap_hours)
+            from_dt = max(base_from, earliest_allowed)
+            reason = (
+                f"Azure ScheduleState ({checkpoint_source}): "
+                f"checkpoint={checkpoint.isoformat()}, overlap={schedule_cfg.min_overlap_hours}h "
+                f"→ from={from_dt.isoformat()}"
+            )
+            if base_from < earliest_allowed:
+                reason += f" (capped at max_backfill_days={schedule_cfg.max_backfill_days})"
+            logger.info("Gap detection via Azure checkpoint: %s", reason)
+            return from_dt, now_utc, reason
 
     results_dir = resolve_results_dir(creds)
     csv_last = _max_settled_datetime_from_csv(results_dir)
