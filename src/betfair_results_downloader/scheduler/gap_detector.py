@@ -18,6 +18,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 
@@ -80,13 +81,19 @@ def compute_backfill_window(
             )
             checkpoint_source = "LastCoveredDateUtc (legacy bootstrap)"
         elif azure_state.last_covered_date_local is not None:
+            tz_name = azure_state.last_covered_timezone or schedule_cfg.timezone
+            try:
+                legacy_tz = ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                legacy_tz = timezone.utc
+                tz_name = "UTC"
             checkpoint = datetime.combine(
                 azure_state.last_covered_date_local,
                 datetime.min.time(),
-                tzinfo=timezone.utc,
-            )
+                tzinfo=legacy_tz,
+            ).astimezone(timezone.utc)
             checkpoint = min(checkpoint, now_utc)
-            checkpoint_source = "LastCoveredDateLocal (legacy bootstrap, capped)"
+            checkpoint_source = f"LastCoveredDateLocal (legacy bootstrap, tz={tz_name}, capped)"
 
         if checkpoint is not None and checkpoint_source is not None:
             base_from = checkpoint - timedelta(hours=schedule_cfg.min_overlap_hours)
