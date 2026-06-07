@@ -1,8 +1,8 @@
-"""Tests for Phase 2.1: scheduler/state.py state layer."""
+"""Tests for scheduler/state.py state layer."""
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -55,13 +55,17 @@ class TestReadScheduleState:
         with patch("betfair_results_downloader.scheduler.state._open_azure_connection", return_value=mock_conn):
             assert read_schedule_state(BASE_CREDS) is None
 
-    def test_returns_state_row_when_found_with_dual_coverage_fields(self) -> None:
+    def test_returns_state_row_when_found_with_incremental_fields(self) -> None:
         run_dt = datetime(2026, 4, 5, 6, 0, 0)
+        confirmed_dt = datetime(2026, 4, 5, 5, 45, 0)
         mock_row = (
             "TestUser",
             date(2026, 4, 5),
             date(2026, 4, 6),
             "Australia/Sydney",
+            confirmed_dt,
+            run_dt,
+            run_dt,
             run_dt,
             run_dt,
             "success",
@@ -76,6 +80,7 @@ class TestReadScheduleState:
         assert result.last_covered_date_utc == date(2026, 4, 5)
         assert result.last_covered_date_local == date(2026, 4, 6)
         assert result.last_covered_timezone == "Australia/Sydney"
+        assert result.last_confirmed_settled_at_utc == confirmed_dt.replace(tzinfo=timezone.utc)
 
 
 class TestUpsertScheduleState:
@@ -86,6 +91,7 @@ class TestUpsertScheduleState:
 
     def test_returns_true_on_success(self) -> None:
         mock_conn, mock_cursor = _make_mock_conn()
+        confirmed = datetime(2026, 4, 6, 8, 15, tzinfo=timezone.utc)
         with patch("betfair_results_downloader.scheduler.state._open_azure_connection", return_value=mock_conn):
             result = upsert_schedule_state(
                 BASE_CREDS,
@@ -94,12 +100,14 @@ class TestUpsertScheduleState:
                 "Australia/Sydney",
                 "success",
                 "all good",
+                last_confirmed_settled_at_utc=confirmed,
             )
         assert result is True
         params = mock_cursor.execute.call_args[0][1:]
         assert TODAY in params
         assert TODAY + timedelta(days=1) in params
         assert "Australia/Sydney" in params
+        assert confirmed.replace(tzinfo=None) in params
 
     def test_message_truncated_to_1000_chars(self) -> None:
         mock_conn, mock_cursor = _make_mock_conn()

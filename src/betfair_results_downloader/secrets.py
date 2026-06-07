@@ -206,6 +206,10 @@ def _validate_schedule_section(
         errors.append(
             f"schedule.chunk_days must be <= 90, got: {schedule_cfg.chunk_days}"
         )
+    if schedule_cfg.min_overlap_hours < 0:
+        errors.append(
+            f"schedule.min_overlap_hours must be >= 0, got: {schedule_cfg.min_overlap_hours}"
+        )
 
     # --- Azure publish warnings (not errors) ---
     if schedule_cfg.allow_azure_publish:
