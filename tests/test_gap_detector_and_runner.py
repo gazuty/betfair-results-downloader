@@ -112,7 +112,7 @@ class TestComputeBackfillWindow:
         assert from_dt == datetime(2026, 6, 6, 16, 20, tzinfo=timezone.utc)
         assert to_dt == datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
 
-    def test_uses_legacy_azure_local_coverage_when_confirmed_timestamp_missing(self) -> None:
+    def test_uses_legacy_azure_utc_coverage_when_confirmed_timestamp_missing(self) -> None:
         azure_row = ScheduleStateRow(
             user_id="TestUser",
             last_covered_date_utc=date(2026, 6, 5),
@@ -133,9 +133,35 @@ class TestComputeBackfillWindow:
              patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row), \
              patch("betfair_results_downloader.scheduler.gap_detector.resolve_results_dir", return_value=Path("/nonexistent")):
             from_dt, to_dt, reason = compute_backfill_window(BASE_CREDS, cfg)
-        assert from_dt == datetime(2026, 6, 5, 22, 0, tzinfo=timezone.utc)
+        assert from_dt == datetime(2026, 6, 4, 22, 0, tzinfo=timezone.utc)
         assert to_dt == datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
-        assert "LastCoveredDateLocal (legacy bootstrap)" in reason
+        assert "LastCoveredDateUtc (legacy bootstrap)" in reason
+
+    def test_local_legacy_bootstrap_is_capped_to_avoid_future_checkpoint(self) -> None:
+        azure_row = ScheduleStateRow(
+            user_id="TestUser",
+            last_covered_date_utc=None,
+            last_covered_date_local=date(2026, 6, 7),
+            last_covered_timezone="Australia/Sydney",
+            last_confirmed_settled_at_utc=None,
+            last_successful_download_started_utc=None,
+            last_successful_download_finished_utc=None,
+            last_run_started_utc=None,
+            last_run_finished_utc=None,
+            last_run_status="success",
+            last_run_message=None,
+            updated_utc=None,
+        )
+        cfg = _default_schedule_cfg(min_overlap_hours=2)
+        fake_now = get_scheduler_now(cfg, datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc))
+        with patch("betfair_results_downloader.scheduler.gap_detector.get_scheduler_now", return_value=fake_now), \
+             patch("betfair_results_downloader.scheduler.gap_detector.read_schedule_state", return_value=azure_row), \
+             patch("betfair_results_downloader.scheduler.gap_detector.resolve_results_dir", return_value=Path("/nonexistent")):
+            from_dt, to_dt, reason = compute_backfill_window(BASE_CREDS, cfg)
+        assert to_dt == datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
+        assert from_dt == datetime(2026, 6, 6, 17, 30, tzinfo=timezone.utc)
+        assert from_dt <= to_dt
+        assert "LastCoveredDateLocal (legacy bootstrap, capped)" in reason
 
 
 class TestRunScheduled:
