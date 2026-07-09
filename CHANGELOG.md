@@ -1,3 +1,24 @@
+## [0.6.0] - 2026-07-09
+
+Data lifecycle management. Unbounded full-copy snapshots (~25 GB across 94 files) had pushed the OneDrive-hosted results folder into dataless placeholder eviction, taking down both scheduled downloads (cert reads) and DM reports (CSV reads). This release keeps the results folder permanently small.
+
+### Added
+
+- **Snapshot retention** — dated snapshots beyond `user.snapshot_retention_days` (default 14) are deleted after each run (`prune_snapshot_files`). `0` disables.
+- **Snapshot compression** — snapshots are written as `cleared_orders_cleaned_YYYY-MM-DD.csv.gz` (~18× smaller). Opt out with `user.compress_snapshots: false`.
+- **Yearly canonical archival** — rows settled more than `user.canonical_archive_months` ago (default 12) move from the canonical CSV into `cleared_orders_archive_YYYY.csv.gz`, deduplicated on `betId` and safe to re-run after a partial failure (`archive_old_canonical_rows`). `0` disables.
+
+### Changed
+
+- **`itemDescription` is no longer downloaded** (`include_item_description=False`). The JSON blob accounted for ~45% of canonical file size on disk and nothing downstream reads it — event/market names come from the enrichment columns. The presence smoke-check was removed with it. Existing canonical files keep the column until manually stripped; new rows simply won't have it.
+- README recommends storing Betfair certs in a local non-cloud-synced directory (e.g. `~/.betfair/certs`) — cloud sync clients can evict cert files to online-only placeholders, breaking non-interactive login with `OSError: [Errno 11] Resource deadlock avoided`.
+
+### Fixed
+
+- **`scripts/azure_upgrade_schedulestate.py` could never succeed** — it sent the `ALTER TABLE`s and the backfill `UPDATE`s as a single T-SQL batch, which SQL Server rejects at compile time (`Invalid column name`) because the `UPDATE` references columns added earlier in the same batch. The DDL and backfill now run as separate batches. Anyone running the intraday scheduler (0.5.x June builds) should re-run this script: until it succeeds, every scheduled run logs `Failed to upsert ScheduleState` and the Azure checkpoint silently never advances.
+
+---
+
 ## [0.5.1] - 2026-04-19
 
 ### Removed
