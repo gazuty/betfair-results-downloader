@@ -624,6 +624,8 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | `include_greyhounds` | bool | `true` | ✅ | Include `eventTypeId=4339` in downloads |
 | `enable_azure_sql` | bool | `false` | ✅ | Master toggle for Azure publishing |
 | `dry_run` | bool | `true` | ✅ | Second safety gate — must be `false` to actually write to DB |
+| `snapshot_retention_days` | integer | `14` | Optional | Number of dated snapshot files to keep; older snapshots are deleted after each run. Set to `0` to disable pruning |
+| `compress_snapshots` | bool | `true` | Optional | Write dated snapshots as gzip (`.csv.gz`, ~18× smaller). The canonical CSV is always uncompressed |
 
 ### `paths` (required)
 

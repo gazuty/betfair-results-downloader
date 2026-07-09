@@ -185,7 +185,14 @@ def run_pipeline(
     # -------------------
     say("Phase 3/4: Writing CSV outputs...")
     rows_after_dedupe = len(clean_and_remove_duplicates(df_co, status_cb=say))
-    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=say)
+    user = creds.get("user", {}) or {}
+    csvr = write_csv_outputs(
+        df_co=df_co,
+        results_csv_dir=results_dir,
+        status_cb=say,
+        snapshot_retention=int(user.get("snapshot_retention_days", 14)),
+        compress_snapshots=bool(user.get("compress_snapshots", True)),
+    )
     csv_summary = {
         "canonical_path": str(csvr.canonical_path),
         "snapshot_path": str(csvr.snapshot_path),

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 import json
+import re
 import time
 
 import pandas as pd
@@ -606,28 +607,80 @@ def _log_item_description_smoke_check(
         emit(f"SMOKE: samples {c}: {vals}")
 
 
+_SNAPSHOT_NAME_RE = re.compile(
+    r"^cleared_orders_cleaned_(\d{4}-\d{2}-\d{2})\.csv(\.gz)?$"
+)
+
+
+def prune_snapshot_files(
+    results_csv_dir: Path,
+    keep: int = 14,
+    status_cb: Optional[callable] = None,
+) -> list[Path]:
+    """
+    Delete dated snapshot files beyond the ``keep`` most recent.
+
+    Only files matching ``cleared_orders_cleaned_YYYY-MM-DD.csv[.gz]`` are
+    considered; the canonical file is never touched. ``keep <= 0`` disables
+    pruning. Returns the list of deleted paths.
+    """
+    if keep <= 0:
+        return []
+
+    snapshots: list[tuple[str, Path]] = []
+    for f in results_csv_dir.iterdir():
+        m = _SNAPSHOT_NAME_RE.match(f.name)
+        if m:
+            snapshots.append((m.group(1), f))
+
+    snapshots.sort(key=lambda t: (t[0], t[1].name), reverse=True)
+    stale = [path for _, path in snapshots[keep:]]
+
+    deleted: list[Path] = []
+    for path in stale:
+        try:
+            path.unlink()
+            deleted.append(path)
+        except OSError as exc:
+            if status_cb:
+                status_cb(f"Snapshot prune: could not delete {path.name}: {exc}")
+
+    if deleted and status_cb:
+        status_cb(
+            f"Snapshot prune: deleted {len(deleted)} snapshot(s) older than the "
+            f"{keep} most recent."
+        )
+    return deleted
+
+
 def write_csv_outputs(
     *,
     df_co: pd.DataFrame,
     results_csv_dir: Path,
     status_cb: Optional[callable] = None,
+    snapshot_retention: int = 14,
+    compress_snapshots: bool = True,
 ) -> CsvWriteResult:
     """
     Notebook Cells 7–8, ported:
     - canonical: cleared_orders_cleaned.csv (idempotent update)
-    - snapshot: cleared_orders_cleaned_YYYY-MM-DD.csv (copy of canonical)
+    - snapshot: cleared_orders_cleaned_YYYY-MM-DD.csv[.gz] (copy of canonical)
+    - retention: dated snapshots beyond ``snapshot_retention`` are deleted
     """
     results_csv_dir.mkdir(parents=True, exist_ok=True)
 
     canonical_path = results_csv_dir / "cleared_orders_cleaned.csv"
     today_str = datetime.now(timezone.utc).date().isoformat()
-    snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}.csv"
+    suffix = ".csv.gz" if compress_snapshots else ".csv"
+    snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}{suffix}"
 
     update_csv_with_new_data(canonical_path, df_co, status_cb=status_cb)
 
     df_canonical = pd.read_csv(canonical_path)
     _log_item_description_smoke_check(df_canonical, status_cb)
     df_canonical.to_csv(snapshot_path, index=False)
+
+    prune_snapshot_files(results_csv_dir, keep=snapshot_retention, status_cb=status_cb)
 
     return CsvWriteResult(
         canonical_path=canonical_path,
