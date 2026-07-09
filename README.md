@@ -7,7 +7,8 @@ A professional Python application for downloading settled Betfair orders, enrich
 ## Features
 
 - **GUI-first downloader** — Tkinter desktop app with First Run Wizard, live phase progress, and structured summaries
-- **CSV outputs** — canonical file plus dated snapshots, idempotent updates, safe to re-run
+- **CSV outputs** — canonical file plus dated gzip snapshots, idempotent updates, safe to re-run
+- **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
 - **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
@@ -155,10 +156,10 @@ Betfair's documented non-interactive login endpoint (`identitysso-cert.betfair.c
 
 #### Step 1 — Generate the cert pair
 
-Pick a safe location. A cloud-synced `secrets/certs/` folder alongside your `credentials.json` keeps both machines in sync:
+Pick a safe location. Prefer a **local, non-cloud-synced** directory such as `~/.betfair/certs` — cloud sync clients (OneDrive, iCloud) can evict files to online-only placeholders, which breaks non-interactive login until the file is re-downloaded. If you run scheduled downloads on more than one machine, generate or copy the pair to the same local path on each.
 
 ```bash
-CERTS_DIR="$HOME/path/to/secrets/certs"
+CERTS_DIR="$HOME/.betfair/certs"
 mkdir -p "$CERTS_DIR"
 
 openssl req -x509 -newkey rsa:2048 \
@@ -373,7 +374,7 @@ python -m betfair_results_downloader run
 2. Uses the latest confirmed settled timestamp as the primary checkpoint, with canonical CSV fallback and a configurable safety overlap.
 3. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`).
 4. Enriches with market catalogue (uses cache).
-5. Writes canonical + snapshot CSVs.
+5. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
 6. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)).
 7. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp, writes audit markers, appends to `run_history.jsonl`.
 
@@ -585,6 +586,8 @@ The upgrade is idempotent. It adds:
 
 and backfills legacy rows by copying `LastCoveredDateUtc` into `LastCoveredDateLocal` where needed, with `LastCoveredTimezone` defaulted to `Australia/Sydney` for those backfilled rows.
 
+> **Note:** versions before 0.6.0 shipped a broken upgrade script (the DDL and backfill ran in a single T-SQL batch, so it always failed with `Invalid column name`). If your scheduler logs show `Failed to upsert ScheduleState ... Invalid column name 'LastCoveredDateLocal'`, upgrade and re-run the script — the scheduler otherwise silently falls back to the CSV checkpoint on every run.
+
 ### Azure Publish Safety Gates — Scheduled Mode
 
 All four gates must be open for the scheduler to write to Azure SQL:
@@ -624,6 +627,9 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | `include_greyhounds` | bool | `true` | ✅ | Include `eventTypeId=4339` in downloads |
 | `enable_azure_sql` | bool | `false` | ✅ | Master toggle for Azure publishing |
 | `dry_run` | bool | `true` | ✅ | Second safety gate — must be `false` to actually write to DB |
+| `snapshot_retention_days` | integer | `14` | Optional | Number of dated snapshot files to keep; older snapshots are deleted after each run. Set to `0` to disable pruning |
+| `compress_snapshots` | bool | `true` | Optional | Write dated snapshots as gzip (`.csv.gz`, ~18× smaller). The canonical CSV is always uncompressed |
+| `canonical_archive_months` | integer | `12` | Optional | Rows settled longer ago than this move from the canonical CSV into yearly `cleared_orders_archive_YYYY.csv.gz` files after each run. Set to `0` to disable archival |
 
 ### `paths` (required)
 
@@ -701,8 +707,9 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 
 ### CSV outputs (`paths.results_csv_dir`)
 
-- **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the latest full dataset. Idempotent updates via `betId` dedupe.
-- **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv`. Dated copies for historical tracking.
+- **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the rolling dataset (last `user.canonical_archive_months` months, default 12). Idempotent updates via `betId` dedupe.
+- **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv.gz`. Dated gzip copies of the canonical for short-term rollback; only the newest `user.snapshot_retention_days` (default 14) are kept, older ones are deleted after each run.
+- **Yearly archives** — `cleared_orders_archive_YYYY.csv.gz`. Rows settled more than `user.canonical_archive_months` ago are moved here from the canonical, deduplicated on `betId`. Read them with `pandas.read_csv` directly (gzip is transparent).
 
 ### Enrichment cache (`<results_csv_dir>/.cache/`)
 

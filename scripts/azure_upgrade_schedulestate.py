@@ -15,7 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from betfair_results_downloader.secrets import get_credentials_path, load_credentials
 
-DDL = """\
+# Each batch is executed separately: SQL Server compiles a batch before running
+# it, so statements referencing columns added earlier in the same batch fail
+# with "Invalid column name". DDL and the backfill UPDATEs must not share a batch.
+DDL_BATCHES = [
+    """\
 IF OBJECT_ID(N'dbo.ScheduleState', N'U') IS NULL
 BEGIN
     RAISERROR('dbo.ScheduleState does not exist. Run azure_create_schedulestate.py first.', 16, 1);
@@ -75,7 +79,8 @@ ELSE
 BEGIN
     PRINT 'dbo.ScheduleState.LastSuccessfulDownloadFinishedUtc already exists';
 END
-
+""",
+    """\
 UPDATE dbo.ScheduleState
 SET LastCoveredDateLocal = LastCoveredDateUtc
 WHERE LastCoveredDateUtc IS NOT NULL
@@ -85,7 +90,8 @@ UPDATE dbo.ScheduleState
 SET LastCoveredTimezone = 'Australia/Sydney'
 WHERE LastCoveredDateLocal IS NOT NULL
   AND LastCoveredTimezone IS NULL;
-"""
+""",
+]
 
 
 def _build_conn_str(azsql: dict) -> str:
@@ -126,9 +132,10 @@ def main() -> int:
     try:
         with pyodbc.connect(conn_str, autocommit=True) as conn:
             cursor = conn.cursor()
-            cursor.execute(DDL)
-            while cursor.nextset():
-                pass
+            for batch in DDL_BATCHES:
+                cursor.execute(batch)
+                while cursor.nextset():
+                    pass
             print("Done.")
     except Exception as e:
         print(f"ERROR: {type(e).__name__}: {e}")

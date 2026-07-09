@@ -11,7 +11,6 @@ from .csv_utils import clean_and_remove_duplicates
 from .downloader_core import (
     fetch_cleared_orders_df,
     enrich_with_market_catalogue,
-    _log_item_description_smoke_check,
     prepare_azure_dataset,
     write_csv_outputs,
     resolve_enrichment_cache_dir,
@@ -106,7 +105,6 @@ def run_pipeline(
         }
 
     df_co = dl.df_co
-    _log_item_description_smoke_check(df_co, status_cb)
 
     def _unique_markets(df) -> int:
         try:
@@ -185,7 +183,15 @@ def run_pipeline(
     # -------------------
     say("Phase 3/4: Writing CSV outputs...")
     rows_after_dedupe = len(clean_and_remove_duplicates(df_co, status_cb=say))
-    csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=say)
+    user = creds.get("user", {}) or {}
+    csvr = write_csv_outputs(
+        df_co=df_co,
+        results_csv_dir=results_dir,
+        status_cb=say,
+        snapshot_retention=int(user.get("snapshot_retention_days", 14)),
+        compress_snapshots=bool(user.get("compress_snapshots", True)),
+        archive_months=int(user.get("canonical_archive_months", 12)),
+    )
     csv_summary = {
         "canonical_path": str(csvr.canonical_path),
         "snapshot_path": str(csvr.snapshot_path),

@@ -63,7 +63,7 @@ def test_snapshot_uses_utc_date(tmp_path: Path, monkeypatch):
     )
 
     # Verify snapshot uses UTC date (2026-01-26), not local date
-    expected_snapshot_name = "cleared_orders_cleaned_2026-01-26.csv"
+    expected_snapshot_name = "cleared_orders_cleaned_2026-01-26.csv.gz"
 
     assert result.snapshot_path.name == expected_snapshot_name
     assert result.snapshot_path.exists()

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 import json
+import re
 import time
 
 import pandas as pd
@@ -16,7 +17,7 @@ import betfairlightweight
 from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError
 
-from .csv_utils import update_csv_with_new_data
+from .csv_utils import clean_and_remove_duplicates, update_csv_with_new_data
 from .scheduler.date_windows import chunk_date_range
 
 
@@ -111,7 +112,7 @@ def _call_list_cleared_orders(
                 settled_date_range=settled_range,
                 from_record=from_record,
                 record_count=record_count,
-                include_item_description=True,  # include itemDescription fields (event/market/runner names) for downstream features
+                include_item_description=False,  # verbose JSON blob (~30% of CSV size); names come from enrichment columns instead
             )
         except APIError as e:
             msg = str(e)
@@ -174,9 +175,9 @@ _REQUIRED_CLEARED_ORDER_COLS: list[str] = [
 def _normalize_cleared_orders_df(df_co: pd.DataFrame) -> pd.DataFrame:
     """
     Apply the same schema normalization the notebook/GUI pipeline relies on:
-    ensure required columns exist, preserve extras (including itemDescription.*),
-    add the ``Win`` column, and convert ``placedDate`` to Australia/Sydney with
-    derived date/time-only columns.
+    ensure required columns exist, preserve extras, add the ``Win`` column, and
+    convert ``placedDate`` to Australia/Sydney with derived date/time-only
+    columns.
     """
     for c in _REQUIRED_CLEARED_ORDER_COLS:
         if c not in df_co.columns:
@@ -584,26 +585,98 @@ def enrich_with_market_catalogue(
 # -----------------------------
 
 
-def _log_item_description_smoke_check(
-    df: pd.DataFrame,
-    status_cb: Optional[callable] = None,
-) -> None:
-    emit = status_cb or print
-    cols = [c for c in df.columns if c.startswith("itemDescription")]
-    if not cols:
-        emit(
-            "SMOKE: WARNING - no itemDescription* columns present in cleared orders dataframe."
-        )
-        return
+_SNAPSHOT_NAME_RE = re.compile(
+    r"^cleared_orders_cleaned_(\d{4}-\d{2}-\d{2})\.csv(\.gz)?$"
+)
 
-    emit(f"SMOKE: itemDescription columns found: {len(cols)} (e.g. {cols[:5]})")
-    for c in cols[:2]:
-        s = df[c].dropna().astype(str)
-        if s.empty:
-            continue
-        vals = s.head(3).tolist()
-        vals = [v[:120] + ("..." if len(v) > 120 else "") for v in vals]
-        emit(f"SMOKE: samples {c}: {vals}")
+
+def prune_snapshot_files(
+    results_csv_dir: Path,
+    keep: int = 14,
+    status_cb: Optional[callable] = None,
+) -> list[Path]:
+    """
+    Delete dated snapshot files beyond the ``keep`` most recent.
+
+    Only files matching ``cleared_orders_cleaned_YYYY-MM-DD.csv[.gz]`` are
+    considered; the canonical file is never touched. ``keep <= 0`` disables
+    pruning. Returns the list of deleted paths.
+    """
+    if keep <= 0:
+        return []
+
+    snapshots: list[tuple[str, Path]] = []
+    for f in results_csv_dir.iterdir():
+        m = _SNAPSHOT_NAME_RE.match(f.name)
+        if m:
+            snapshots.append((m.group(1), f))
+
+    snapshots.sort(key=lambda t: (t[0], t[1].name), reverse=True)
+    stale = [path for _, path in snapshots[keep:]]
+
+    deleted: list[Path] = []
+    for path in stale:
+        try:
+            path.unlink()
+            deleted.append(path)
+        except OSError as exc:
+            if status_cb:
+                status_cb(f"Snapshot prune: could not delete {path.name}: {exc}")
+
+    if deleted and status_cb:
+        status_cb(
+            f"Snapshot prune: deleted {len(deleted)} snapshot(s) older than the "
+            f"{keep} most recent."
+        )
+    return deleted
+
+
+def archive_old_canonical_rows(
+    df_canonical: pd.DataFrame,
+    results_csv_dir: Path,
+    archive_months: int = 12,
+    status_cb: Optional[callable] = None,
+) -> pd.DataFrame:
+    """
+    Move rows settled more than ``archive_months`` ago into yearly compressed
+    archives (``cleared_orders_archive_YYYY.csv.gz``) and return the trimmed
+    canonical dataframe.
+
+    Rows with an unparseable ``settledDate`` are always kept in the canonical.
+    Archives are deduplicated on append, so re-running after a partial failure
+    is safe. ``archive_months <= 0`` disables archival.
+    """
+    if archive_months <= 0 or df_canonical.empty or "settledDate" not in df_canonical.columns:
+        return df_canonical
+
+    settled = pd.to_datetime(df_canonical["settledDate"], utc=True, errors="coerce")
+    cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(months=archive_months)
+    old_mask = settled.notna() & (settled < cutoff)
+    if not old_mask.any():
+        return df_canonical
+
+    for year in sorted(settled[old_mask].dt.year.unique()):
+        year_mask = old_mask & (settled.dt.year == year)
+        chunk = df_canonical[year_mask]
+        archive_path = results_csv_dir / f"cleared_orders_archive_{year}.csv.gz"
+        if archive_path.exists():
+            existing = pd.read_csv(archive_path, low_memory=False)
+            cols = sorted(set(existing.columns).union(set(chunk.columns)))
+            chunk = pd.concat(
+                [existing.reindex(columns=cols), chunk.reindex(columns=cols)],
+                ignore_index=True,
+            )
+        chunk = clean_and_remove_duplicates(chunk, status_cb=status_cb)
+        tmp_path = archive_path.with_name(archive_path.name + ".tmp")
+        chunk.to_csv(tmp_path, index=False, compression="gzip")
+        tmp_path.replace(archive_path)
+        if status_cb:
+            status_cb(
+                f"Archive: moved {int(year_mask.sum()):,} rows settled before "
+                f"{cutoff.date()} into {archive_path.name} (now {len(chunk):,} rows)."
+            )
+
+    return df_canonical[~old_mask].reset_index(drop=True)
 
 
 def write_csv_outputs(
@@ -611,29 +684,44 @@ def write_csv_outputs(
     df_co: pd.DataFrame,
     results_csv_dir: Path,
     status_cb: Optional[callable] = None,
+    snapshot_retention: int = 14,
+    compress_snapshots: bool = True,
+    archive_months: int = 12,
 ) -> CsvWriteResult:
     """
     Notebook Cells 7–8, ported:
     - canonical: cleared_orders_cleaned.csv (idempotent update)
-    - snapshot: cleared_orders_cleaned_YYYY-MM-DD.csv (copy of canonical)
+    - archival: rows older than ``archive_months`` move to yearly .csv.gz archives
+    - snapshot: cleared_orders_cleaned_YYYY-MM-DD.csv[.gz] (copy of canonical)
+    - retention: dated snapshots beyond ``snapshot_retention`` are deleted
     """
     results_csv_dir.mkdir(parents=True, exist_ok=True)
 
     canonical_path = results_csv_dir / "cleared_orders_cleaned.csv"
     today_str = datetime.now(timezone.utc).date().isoformat()
-    snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}.csv"
+    suffix = ".csv.gz" if compress_snapshots else ".csv"
+    snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}{suffix}"
 
     update_csv_with_new_data(canonical_path, df_co, status_cb=status_cb)
 
     df_canonical = pd.read_csv(canonical_path)
-    _log_item_description_smoke_check(df_canonical, status_cb)
-    df_canonical.to_csv(snapshot_path, index=False)
+    df_trimmed = archive_old_canonical_rows(
+        df_canonical, results_csv_dir, archive_months=archive_months, status_cb=status_cb
+    )
+    if len(df_trimmed) < len(df_canonical):
+        tmp_path = canonical_path.with_suffix(canonical_path.suffix + ".tmp")
+        df_trimmed.to_csv(tmp_path, index=False)
+        tmp_path.replace(canonical_path)
+
+    df_trimmed.to_csv(snapshot_path, index=False)
+
+    prune_snapshot_files(results_csv_dir, keep=snapshot_retention, status_cb=status_cb)
 
     return CsvWriteResult(
         canonical_path=canonical_path,
         snapshot_path=snapshot_path,
-        rows_in_canonical=len(df_canonical),
-        message=f"Wrote canonical + snapshot CSV. canonical_rows={len(df_canonical):,}.",
+        rows_in_canonical=len(df_trimmed),
+        message=f"Wrote canonical + snapshot CSV. canonical_rows={len(df_trimmed):,}.",
     )
 
 

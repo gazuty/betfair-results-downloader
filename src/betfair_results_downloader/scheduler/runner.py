@@ -162,7 +162,15 @@ def _run_pipeline(
 
         from ..downloader_core import write_csv_outputs  # noqa: PLC0415
         logger.info("Writing CSV outputs to %s...", results_dir)
-        csvr = write_csv_outputs(df_co=df_co, results_csv_dir=results_dir, status_cb=_say)
+        user = creds.get("user", {}) or {}
+        csvr = write_csv_outputs(
+            df_co=df_co,
+            results_csv_dir=results_dir,
+            status_cb=_say,
+            snapshot_retention=int(user.get("snapshot_retention_days", 14)),
+            compress_snapshots=bool(user.get("compress_snapshots", True)),
+            archive_months=int(user.get("canonical_archive_months", 12)),
+        )
         logger.info("CSV result: %s", csvr.message)
 
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)
