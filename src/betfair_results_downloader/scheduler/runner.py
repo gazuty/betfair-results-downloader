@@ -169,6 +169,7 @@ def _run_pipeline(
             status_cb=_say,
             snapshot_retention=int(user.get("snapshot_retention_days", 14)),
             compress_snapshots=bool(user.get("compress_snapshots", True)),
+            archive_months=int(user.get("canonical_archive_months", 12)),
         )
         logger.info("CSV result: %s", csvr.message)
 

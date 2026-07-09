@@ -155,10 +155,10 @@ Betfair's documented non-interactive login endpoint (`identitysso-cert.betfair.c
 
 #### Step 1 — Generate the cert pair
 
-Pick a safe location. A cloud-synced `secrets/certs/` folder alongside your `credentials.json` keeps both machines in sync:
+Pick a safe location. Prefer a **local, non-cloud-synced** directory such as `~/.betfair/certs` — cloud sync clients (OneDrive, iCloud) can evict files to online-only placeholders, which breaks non-interactive login until the file is re-downloaded. If you run scheduled downloads on more than one machine, generate or copy the pair to the same local path on each.
 
 ```bash
-CERTS_DIR="$HOME/path/to/secrets/certs"
+CERTS_DIR="$HOME/.betfair/certs"
 mkdir -p "$CERTS_DIR"
 
 openssl req -x509 -newkey rsa:2048 \
@@ -626,6 +626,7 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | `dry_run` | bool | `true` | ✅ | Second safety gate — must be `false` to actually write to DB |
 | `snapshot_retention_days` | integer | `14` | Optional | Number of dated snapshot files to keep; older snapshots are deleted after each run. Set to `0` to disable pruning |
 | `compress_snapshots` | bool | `true` | Optional | Write dated snapshots as gzip (`.csv.gz`, ~18× smaller). The canonical CSV is always uncompressed |
+| `canonical_archive_months` | integer | `12` | Optional | Rows settled longer ago than this move from the canonical CSV into yearly `cleared_orders_archive_YYYY.csv.gz` files after each run. Set to `0` to disable archival |
 
 ### `paths` (required)
 
