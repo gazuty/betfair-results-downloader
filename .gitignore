@@ -42,6 +42,7 @@ tmp_fix_customer_order_ref.patch
 outputs/
 data/
 *.csv
+*.csv.gz
 *.parquet
 *.feather
 *.xlsx
