@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 
 import pandas as pd
-import pytest
 
 from betfair_results_downloader.downloader_core import _extract_item_description_fields
 
