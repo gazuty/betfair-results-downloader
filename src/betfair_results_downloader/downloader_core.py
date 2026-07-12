@@ -112,7 +112,7 @@ def _call_list_cleared_orders(
                 settled_date_range=settled_range,
                 from_record=from_record,
                 record_count=record_count,
-                include_item_description=False,  # verbose JSON blob (~30% of CSV size); names come from enrichment columns instead
+                include_item_description=True,
             )
         except APIError as e:
             msg = str(e)
@@ -121,6 +121,43 @@ def _call_list_cleared_orders(
                 raise
             sleep_s = min(2**attempt, 20)
             time.sleep(sleep_s)
+
+
+def _extract_item_description_fields(order: dict) -> dict:
+    """
+    Flatten ``itemDescription`` fields from a cleared-order dict into
+    top-level columns and remove the raw nested blob.
+
+    If the order has no ``itemDescription`` key the dict is returned
+    unchanged.  Missing sub-fields inside the description are silently
+    skipped so the function is safe to call on partial responses.
+    """
+    desc = order.pop("itemDescription", None)
+    if not desc or not isinstance(desc, dict):
+        return order
+
+    # Required mappings (always expected in a well-formed response)
+    _FIELD_MAP = {
+        "eventDesc": "evt_eventName",
+        "marketDesc": "mkt_marketName",
+        "runnerDesc": "runner_name",
+        "marketType": "market_type",
+    }
+    # Optional mappings (may or may not be present)
+    _OPTIONAL_MAP = {
+        "eachWayDivisor": "each_way_divisor",
+        "countryCode": "evt_countryCode",
+    }
+
+    for src_key, dest_key in _FIELD_MAP.items():
+        if src_key in desc:
+            order[dest_key] = desc[src_key]
+
+    for src_key, dest_key in _OPTIONAL_MAP.items():
+        if src_key in desc:
+            order[dest_key] = desc[src_key]
+
+    return order
 
 
 def _to_utc_datetime(value: DateLike, *, end_of_day: bool) -> datetime:
@@ -314,7 +351,7 @@ def fetch_cleared_orders_df_range(
                 batch = data.get("clearedOrders", []) or []
                 if not batch:
                     break
-                all_rows.extend(batch)
+                all_rows.extend(_extract_item_description_fields(row) for row in batch)
                 indexrecord += page_size
     finally:
         if owns_client:
@@ -535,7 +572,16 @@ def enrich_with_market_catalogue(
     cache_rows = len(df_new_cache) if not df_new_cache.empty else 0
 
     if not df_new_cache.empty:
-        df_out = df_work.merge(df_new_cache, on="marketId", how="left")
+        # Columns that may already exist from itemDescription extraction
+        overlap_cols = [c for c in df_new_cache.columns if c != "marketId" and c in df_work.columns]
+        df_out = df_work.merge(df_new_cache, on="marketId", how="left", suffixes=("", "_cat"))
+
+        # Coalesce: prefer itemDescription values, fall back to catalogue
+        for col in overlap_cols:
+            cat_col = f"{col}_cat"
+            if cat_col in df_out.columns:
+                df_out[col] = df_out[col].fillna(df_out[cat_col])
+                df_out.drop(columns=[cat_col], inplace=True)
 
         # --- Message clarity tweak (cache-only vs API) ---
         if returned_total == 0 and cache_hits > 0:
