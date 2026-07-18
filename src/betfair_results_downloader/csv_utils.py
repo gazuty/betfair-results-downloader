@@ -54,14 +54,31 @@ def clean_and_remove_duplicates(
             )
 
         if out["betId"].notna().any():
-            # stable ordering improves reproducibility
-            sort_cols = [
-                c
-                for c in ["settledDate", "placedDate", "marketId", "betId"]
-                if c in out.columns
-            ]
-            if sort_cols:
-                out = out.sort_values(sort_cols, kind="mergesort")
+            # Stable ordering improves reproducibility. Sort on typed
+            # temporary keys rather than the raw columns: date columns
+            # round-trip through CSV as strings whose rendering can differ
+            # for the same instant (e.g. "2026-07-13 04:58:46+00:00" vs
+            # "2026-07-13T04:58:46Z"), so a lexicographic sort could place
+            # a stale existing row after the fresh incoming one and
+            # keep="last" would keep the stale row. With typed keys, equal
+            # instants compare equal and the stable mergesort preserves
+            # input order (existing before incoming), so incoming wins.
+            sort_key_parsers: dict[str, Callable[[pd.Series], pd.Series]] = {
+                "settledDate": lambda s: pd.to_datetime(s, utc=True, errors="coerce"),
+                "placedDate": lambda s: pd.to_datetime(s, utc=True, errors="coerce"),
+                "marketId": lambda s: pd.to_numeric(s, errors="coerce"),
+                "betId": lambda s: s,  # already numeric (coerced above)
+            }
+            sort_keys = []
+            for col, parse in sort_key_parsers.items():
+                if col in out.columns:
+                    key = f"_sort_{col}"
+                    out[key] = parse(out[col])
+                    sort_keys.append(key)
+            if sort_keys:
+                out = out.sort_values(sort_keys, kind="mergesort").drop(
+                    columns=sort_keys
+                )
 
             out = out.drop_duplicates(subset=["betId"], keep="last").reset_index(
                 drop=True
