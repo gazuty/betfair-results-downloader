@@ -695,7 +695,9 @@ def archive_old_canonical_rows(
     if archive_months <= 0 or df_canonical.empty or "settledDate" not in df_canonical.columns:
         return df_canonical
 
-    settled = pd.to_datetime(df_canonical["settledDate"], utc=True, errors="coerce")
+    settled = pd.to_datetime(
+        df_canonical["settledDate"], utc=True, errors="coerce", format="ISO8601"
+    )
     cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(months=archive_months)
     old_mask = settled.notna() & (settled < cutoff)
     if not old_mask.any():
