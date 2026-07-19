@@ -14,7 +14,7 @@ import logging
 import sys
 import time
 import traceback
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 
 # Add src to path so we can import the package
