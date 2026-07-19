@@ -6,13 +6,12 @@ A professional Python application for downloading settled Betfair orders, enrich
 
 ## Features
 
-- **GUI-first downloader** — Tkinter desktop app with First Run Wizard, live phase progress, and structured summaries
+- **Headless CLI downloader** — `betfair-results run / backfill` with structured logs and idempotent re-runs
 - **CSV outputs** — canonical file plus dated gzip snapshots, idempotent updates, safe to re-run
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **Azure Tools** — read-only health checks, scoped backups, emergency cleanup wizard
-- **Reporting Dashboard** — local Streamlit UI for daily/weekly P&L analytics
+- **Azure recovery library** — read-only health checks, scoped backups, dedupe/normalization tools (`azure_remediation.py`)
 - **OpenClaw DM reporting** — repo-native week-to-date and day-to-date summary generation for agent-delivered chat updates
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
@@ -21,9 +20,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 
 ---
 
-## Quick Start (GUI mode)
-
-The GUI is the supported interactive entry point.
+## Quick Start
 
 ```bash
 git clone https://github.com/<your-org>/betfair-results-downloader.git
@@ -31,35 +28,18 @@ cd betfair-results-downloader
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -e .
-python -m betfair_results_downloader.gui_app
 ```
 
-On first launch, the **First Run Wizard** walks you through:
+Then:
 
-1. Choosing where to save `credentials.json`
-2. Selecting a results output folder
-3. Entering Betfair credentials
-4. Setting run defaults (lookback days, sports)
-5. *(Optional)* Entering Azure SQL credentials
+1. Create your credentials file (see [Credentials file](#credentials-file)) — copy `secrets/credentials.template.json` as a starting point.
+2. Enroll a Betfair client certificate (see [Betfair Certificate Enrollment](#betfair-certificate-enrollment)) and verify with `betfair-results auth-test`.
+3. Run a one-off download: `betfair-results run` — four phases: download → enrich → CSV → Azure (if enabled).
+4. *(Optional)* Install the daily scheduled job: `betfair-results schedule install`.
 
-Then click **Run Downloader** and watch the four-phase progress: download → enrich → CSV → Azure (if enabled).
+### Lookback (auto)
 
-### Recommended GUI Workflow
-
-Follow the same order shown at the top of the GUI:
-
-1) Choose Paths (Results folder) → 2) Validate → 3) Compute Lookback → 4) Run Downloader → (Optional) 5) Publish to Azure
-
-### Lookback v2 (auto)
-
-The downloader computes an **effective lookback** before a run. Decision order:
-
-1. Missing settled-date gaps within the audit window (≤ 90 days) → recommend based on the earliest missing date in the most recent missing range.
-2. Otherwise use `run_state.json` (`last_success_utc`).
-3. Otherwise fall back to the canonical CSV latest settledDate heuristic.
-4. If no CSV and no run_state exist, default to **90 days** (Betfair maximum backfill).
-
-To force a manual value: tick **Manual override**, enter the Days value — it applies for one run only.
+Scheduled runs compute their own incremental window via gap detection (see [Gap Detection](#gap-detection-logic)). For manual catch-up over an explicit range use `betfair-results backfill --from YYYY-MM-DD --to YYYY-MM-DD`.
 
 ### Run logs
 
@@ -67,7 +47,7 @@ Each run persists a full log transcript for debugging:
 
 `<results_csv_dir>/run_logs/run_YYYYMMDD_HHMMSS.txt`
 
-These logs match the GUI output and are written in UTF-8 with ASCII-safe status lines.
+These logs are written in UTF-8 with ASCII-safe status lines.
 
 ---
 
@@ -136,9 +116,7 @@ See [Configuration Reference](#configuration-reference) for the full schema incl
 
 ### Betfair Certificate Enrollment
 
-Cert-based login lets the app authenticate to Betfair **without any interactive step** — no browser, no prompts, no session timeouts mid-run. This is required for automated/scheduled use and is the approach Betfair officially supports for bot accounts.
-
-The GUI doesn't need certs (it uses interactive login). You only need to enroll a certificate if you want to run `python -m betfair_results_downloader auth-test` or the scheduled downloads feature.
+Cert-based login lets the app authenticate to Betfair **without any interactive step** — no browser, no prompts, no session timeouts mid-run. This is required for automated/scheduled use and is the approach Betfair officially supports for bot accounts. All download paths (`run`, `backfill`, scheduled mode) use cert-based auth.
 
 #### What a client certificate is (and why Betfair needs one)
 
@@ -265,21 +243,20 @@ Exit code `0` means everything works. Any non-zero exit prints an actionable err
 
 Azure publishing is **opt-in and safe by default**. It requires multiple explicit actions before any database writes can occur.
 
-#### Safety gates (current GUI mode)
+#### Safety gates
 
-All of these must be true before any row is written to `dbo.MarketResults`:
+All four gates must be open before any row is written to `dbo.MarketResults` (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)):
 
 1. `user.enable_azure_sql: true` in credentials
 2. `user.dry_run: false` in credentials
-3. In the GUI: tick the unlock checkbox
-4. In the GUI: type `PUBLISH` exactly
-5. In the GUI: confirm the final modal dialog after reviewing the prep summary
+3. `schedule.publish_to_azure: true`
+4. `schedule.allow_azure_publish: true`
 
-If any step is missing, the run completes as a dry run with no database writes.
+If any gate is closed, the run completes as a dry run with no database writes.
 
 #### Publish-only flow
 
-The GUI has a **Publish to Azure** button that reads the existing canonical CSV and syncs it incrementally to Azure without re-downloading from Betfair. Same safety gates apply.
+`publish_to_azure_from_canonical_incremental()` in [`run.py`](src/betfair_results_downloader/run.py) reads the existing canonical CSV and syncs it incrementally to Azure without re-downloading from Betfair. Same safety gates apply.
 
 #### Scope restriction
 
@@ -297,36 +274,17 @@ Other sports are downloaded and written to CSV but excluded from Azure uploads.
 - DB-only rows (present in Azure but not in the current dataset) are left untouched
 - A filtered unique index is enforced per user to prevent duplicates
 
-#### Azure Tools (recovery)
+#### Azure recovery tools
 
-The GUI exposes a set of user-scoped recovery tools accessed via **Azure Tools**:
+[`azure_remediation.py`](src/betfair_results_downloader/azure_remediation.py) provides user-scoped recovery functions (fully covered by tests):
 
 - Duplicate audit (read-only)
 - Scoped backup export
 - UserID normalization (padding fix)
 - Scoped unique index creation/verification
-- Emergency cleanup wizard (backup → wipe user rows → index → re-audit)
+- Scoped dedupe and row deletion (backup first)
 
-These exist for recovery, not routine use.
-
----
-
-### Reporting Dashboard
-
-A local Streamlit app for analyzing the canonical CSV:
-
-```bash
-streamlit run src/betfair_results_downloader/reporting_app.py
-```
-
-Features:
-
-- Reads **local CSVs only** — no Azure dependency
-- UTC → Australia/Sydney timezone conversion
-- Sunday–Saturday weekly aggregation
-- Sport filtering (Horses, Greyhounds)
-- Daily and weekly P&L views
-- KPI summaries, CSV export, cached loading
+These exist for recovery, not routine use. Invoke them from a Python session or a short ad-hoc script; completed one-off wrapper scripts are preserved in git history.
 
 ---
 
@@ -620,9 +578,9 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 
 | Field | Type | Default | Required | Notes |
 |---|---|---|---|---|
-| `user_id` | string | `"YourUserName"` | ✅ | Display name used in logs and GUI |
+| `user_id` | string | `"YourUserName"` | ✅ | Display name used in logs |
 | `db_user_id` | string | *(falls back to `user_id`)* | Only if publishing to Azure | Explicit UserID key for the `MarketResults` table |
-| `days` | integer | `7` | ✅ | Default lookback window in days (GUI) |
+| `days` | integer | `7` | ✅ | Default lookback window in days |
 | `include_horses` | bool | `true` | ✅ | Include `eventTypeId=7` in downloads |
 | `include_greyhounds` | bool | `true` | ✅ | Include `eventTypeId=4339` in downloads |
 | `enable_azure_sql` | bool | `false` | ✅ | Master toggle for Azure publishing |
@@ -699,7 +657,7 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
 }
 ```
 
-The tracked template lives at [`secrets/credentials.template.json`](secrets/credentials.template.json) — the GUI First Run Wizard seeds from it automatically.
+The tracked template lives at [`secrets/credentials.template.json`](secrets/credentials.template.json) — copy it to `secrets/credentials.json` (or an external path referenced by `credentials.location.json`) and fill it in.
 
 ---
 
@@ -716,7 +674,7 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
 - `market_catalogue_event_latest.csv` — latest snapshot
 
-Both are git-ignored. Accessible via **Open Artifacts Folder** in the GUI.
+Both are git-ignored.
 
 **Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
 
@@ -741,7 +699,6 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ✅ shipped | `7e1d368` | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands, platform dispatch in `installers/__init__.py` |
 | 3.2 | ✅ shipped | `41afba9` | Windows Task Scheduler (`schtasks`), Linux systemd --user, cron fallback |
-| 4.1 | ⏳ planned | | Optional GUI Scheduling tab |
 
 Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:
 
@@ -758,16 +715,15 @@ Full design document (architecture, config schema, safety gates, state model, er
 
 ```
 src/betfair_results_downloader/
-  gui_app.py              # Tkinter GUI (official interactive runner)
-  run.py                  # Shared pipeline entry used by GUI + CLI
+  run.py                  # Shared pipeline entry (run + publish-only)
   pipeline.py             # 4-phase orchestration: download → enrich → CSV → Azure
   downloader_core.py      # Betfair API calls, enrichment, chunked range download
   azure_publish.py        # Azure SQL incremental sync plan + apply
   azure_remediation.py    # User-scoped Azure recovery tools
   csv_utils.py            # Canonical CSV dedupe + atomic write
-  recommend.py            # Lookback recommendation from existing CSV (GUI)
+  recommend.py            # Lookback recommendation from existing CSV
   audit.py                # Settled-date gap analysis
-  state.py                # GUI run state persistence (run_state.json)
+  state.py                # Run state persistence (run_state.json)
   run_logging.py          # Per-run log transcript writer
   secrets.py              # Credentials resolver + validator
   config.py               # DownloaderConfig + ScheduleConfig dataclasses
@@ -784,16 +740,15 @@ src/betfair_results_downloader/
       taskscheduler.py    # Windows Task Scheduler XML
       systemd_user.py     # Linux systemd --user units
       cron.py             # Linux cron fallback
-  reporting/              # Streamlit dashboard (IO, schema, filters, pages)
-  reporting_app.py        # Streamlit entry point
+  reporting/              # DM report generation (IO, schema, daily report)
 
 secrets/
   credentials.template.json   # committed seed template
-  credentials.json            # git-ignored; created by First Run Wizard
+  credentials.json            # git-ignored; copy from the template
   credentials.location.json   # optional pointer to an external credentials file
 
 tests/                    # Pytest suite
-scripts/                  # Standalone Azure remediation scripts
+scripts/                  # ScheduleState DDL scripts + DM report renderer
 outputs/                  # Enrichment cache + scheduler artifacts (git-ignored)
 ```
 
@@ -801,11 +756,11 @@ outputs/                  # Enrichment cache + scheduler artifacts (git-ignored)
 
 ## Troubleshooting
 
-### GUI
+### Downloads
 
-- **First Run Wizard keeps appearing** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
+- **Credentials not found** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
 - **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
-- **Azure publish button greyed out** — verify all four GUI safety gates are satisfied (see [Azure SQL Publishing](#azure-sql-publishing)).
+- **Azure publish silently skipped** — verify all four safety gates are open (see [Azure SQL Publishing](#azure-sql-publishing)).
 
 ### Cert authentication
 

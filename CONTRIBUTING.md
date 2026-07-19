@@ -20,16 +20,9 @@ pytest -q
 
 ## Running the App
 
-GUI:
-
 ```powershell
-python -m betfair_results_downloader.gui_app
-```
-
-Dashboard:
-
-```powershell
-streamlit run src/betfair_results_downloader/reporting_app.py
+python -m betfair_results_downloader run
+python -m betfair_results_downloader dm-report
 ```
 
 ## Line Endings
@@ -55,6 +48,6 @@ git update-index --no-skip-worktree notebooks/betfair_results_downloader.ipynb
 ## Release Process (Lightweight)
 
 - Bump version in `pyproject.toml`
-- Add `RELEASE_NOTES_vX.Y.Z.md`
+- Add a section for the version to `CHANGELOG.md`
 - Run `ruff check .`, `ruff format .`, `pytest -q`
 - `git tag -a vX.Y.Z -m "..."` and `git push --follow-tags`

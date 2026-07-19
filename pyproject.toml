@@ -13,9 +13,6 @@ dependencies = [
     "pandas",
     "numpy",
     "pyodbc",
-    "streamlit>=1.33",
-    "plotly>=5.20",
-    "pytz",
     "python-dateutil",
 ]
 

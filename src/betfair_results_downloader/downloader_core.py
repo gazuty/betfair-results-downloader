@@ -9,9 +9,9 @@ from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 import json
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytz
 
 import betfairlightweight
 from betfairlightweight import filters
@@ -234,7 +234,7 @@ def _normalize_cleared_orders_df(df_co: pd.DataFrame) -> pd.DataFrame:
         df_co["Win"] = pd.Series(dtype="int")
 
     df_co["placedDate"] = pd.to_datetime(df_co["placedDate"], utc=True, errors="coerce")
-    aet_zone = pytz.timezone("Australia/Sydney")
+    aet_zone = ZoneInfo("Australia/Sydney")
     df_co["placedDate"] = df_co["placedDate"].dt.tz_convert(aet_zone)
     df_co["placedDateOnly"] = df_co["placedDate"].dt.date
     df_co["placedTimeOnly"] = df_co["placedDate"].dt.time
