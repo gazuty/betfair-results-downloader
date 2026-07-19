@@ -9,9 +9,9 @@ from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 import json
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytz
 
 import betfairlightweight
 from betfairlightweight import filters
@@ -234,7 +234,7 @@ def _normalize_cleared_orders_df(df_co: pd.DataFrame) -> pd.DataFrame:
         df_co["Win"] = pd.Series(dtype="int")
 
     df_co["placedDate"] = pd.to_datetime(df_co["placedDate"], utc=True, errors="coerce")
-    aet_zone = pytz.timezone("Australia/Sydney")
+    aet_zone = ZoneInfo("Australia/Sydney")
     df_co["placedDate"] = df_co["placedDate"].dt.tz_convert(aet_zone)
     df_co["placedDateOnly"] = df_co["placedDate"].dt.date
     df_co["placedTimeOnly"] = df_co["placedDate"].dt.time
@@ -695,7 +695,9 @@ def archive_old_canonical_rows(
     if archive_months <= 0 or df_canonical.empty or "settledDate" not in df_canonical.columns:
         return df_canonical
 
-    settled = pd.to_datetime(df_canonical["settledDate"], utc=True, errors="coerce")
+    settled = pd.to_datetime(
+        df_canonical["settledDate"], utc=True, errors="coerce", format="ISO8601"
+    )
     cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(months=archive_months)
     old_mask = settled.notna() & (settled < cutoff)
     if not old_mask.any():

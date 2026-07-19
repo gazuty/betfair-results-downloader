@@ -64,8 +64,12 @@ def clean_and_remove_duplicates(
             # instants compare equal and the stable mergesort preserves
             # input order (existing before incoming), so incoming wins.
             sort_key_parsers: dict[str, Callable[[pd.Series], pd.Series]] = {
-                "settledDate": lambda s: pd.to_datetime(s, utc=True, errors="coerce"),
-                "placedDate": lambda s: pd.to_datetime(s, utc=True, errors="coerce"),
+                "settledDate": lambda s: pd.to_datetime(
+                    s, utc=True, errors="coerce", format="ISO8601"
+                ),
+                "placedDate": lambda s: pd.to_datetime(
+                    s, utc=True, errors="coerce", format="ISO8601"
+                ),
                 "marketId": lambda s: pd.to_numeric(s, errors="coerce"),
                 "betId": lambda s: s,  # already numeric (coerced above)
             }
