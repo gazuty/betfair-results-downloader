@@ -1,3 +1,21 @@
+# Changelog
+
+## [Unreleased]
+
+### Removed
+
+- **Tkinter GUI** (`gui_app.py`) and **Streamlit reporting dashboard** (`reporting_app.py`, `reporting/ui.py`, `reporting/filters.py`, `reporting/exports.py`, `reporting/transforms.py`, `reporting/pages/`, plus the never-imported `reporting/derive.py` and `reporting/metrics.py`). The project is headless-only: CLI subcommands plus scheduled jobs. The `dm-report` path (`reporting/daily_dm_report.py`, `io.py`, `schema.py`) is unchanged.
+- **`streamlit`, `plotly`, and `pytz` dependencies** — the GUI/dashboard consumers are gone and the single `pytz` use is replaced with stdlib `zoneinfo`.
+- **Completed one-off scripts** — the itemDescription backfill/enrichment set and the Azure remediation wrapper scripts (logic lives on in `azure_remediation.py` and git history). The tested `ScheduleState` DDL scripts and `render_dm_report.sh` remain.
+- **Per-version `RELEASE_NOTES_*.md` files** — release notes are now sections in this changelog.
+
+### Fixed
+
+- **Unused imports in `scripts/backfill_item_descriptions.py`** that broke CI lint on `main` (ruff F401).
+- **Timestamp parsing warning** — the archival and dedupe sort-key paths now parse round-tripped CSV timestamps with `format="ISO8601"`, handling both historical renderings of the same instant (`2026-07-13 04:58:46+00:00` and `2026-07-13T04:58:46Z`) without the per-element dateutil fallback.
+
+---
+
 ## [0.6.0] - 2026-07-09
 
 Data lifecycle management. Unbounded full-copy snapshots (~25 GB across 94 files) had pushed the OneDrive-hosted results folder into dataless placeholder eviction, taking down both scheduled downloads (cert reads) and DM reports (CSV reads). This release keeps the results folder permanently small.
@@ -16,6 +34,11 @@ Data lifecycle management. Unbounded full-copy snapshots (~25 GB across 94 files
 ### Fixed
 
 - **`scripts/azure_upgrade_schedulestate.py` could never succeed** — it sent the `ALTER TABLE`s and the backfill `UPDATE`s as a single T-SQL batch, which SQL Server rejects at compile time (`Invalid column name`) because the `UPDATE` references columns added earlier in the same batch. The DDL and backfill now run as separate batches. Anyone running the intraday scheduler (0.5.x June builds) should re-run this script: until it succeeds, every scheduled run logs `Failed to upsert ScheduleState` and the Azure checkpoint silently never advances.
+
+### Upgrade notes
+
+- Existing uncompressed snapshots are pruned by the retention policy as new runs happen; no manual cleanup is required (deleting old ones by hand reclaims space immediately).
+- If the results folder syncs via OneDrive/iCloud: keep the sync client running at login, consider pinning `cleared_orders_cleaned.csv` and `run_state.json` ("Always Keep on This Device"), and store certs in a local non-synced directory.
 
 ---
 
