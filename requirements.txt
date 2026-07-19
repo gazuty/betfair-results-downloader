@@ -1,7 +1,7 @@
 # Notebook / development environment dependencies.
 # For the installable package, see pyproject.toml.
 betfairlightweight
-pandas
+pandas>=2.0
 numpy
 SQLAlchemy
 pyodbc
