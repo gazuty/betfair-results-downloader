@@ -243,6 +243,14 @@ the smaller, honest change.
 
 Strong suite overall. Gaps worth closing, in value order:
 
+- **E0. CI lint was version-drifting** *(found and fixed during this review)* —
+  CI installs unpinned latest ruff, and ruff 0.16 expanded its default rule
+  set, turning previously-green runs into 216 lint errors with no code change.
+  Fixed by pinning `[tool.ruff.lint] select = ["E4","E7","E9","F"]` (the prior
+  defaults) in `pyproject.toml`. The newly-flagged rules (BLE001 blind
+  excepts, DTZ naive datetimes, PLW1510 `subprocess.run` without `check`)
+  overlap heavily with findings A2/B2/B4 — adopting them incrementally is
+  worthwhile Phase-5 work.
 - **E1. CI doesn't enforce formatting** — add `ruff format --check .` to CI so
   the CONTRIBUTING contract is real.
 - **E2. No tests for the download loop** — `fetch_cleared_orders_df_range`
