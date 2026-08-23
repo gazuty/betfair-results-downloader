@@ -273,14 +273,15 @@ def default_credentials_structure() -> dict[str, Any]:
     Canonical fallback structure used when no template exists.
     """
     return {
-        "betfair": {"username": "", "password": "", "app_key": ""},
+        "betfair": {"username": "", "password": "", "app_key": "", "certs_dir": ""},
         "user": {
             "user_id": "YourUserName",
-            "days": 7,
-            "include_horses": True,
-            "include_greyhounds": True,
+            "db_user_id": "",
             "enable_azure_sql": False,
             "dry_run": True,
+            "snapshot_retention_days": 14,
+            "compress_snapshots": True,
+            "canonical_archive_months": 12,
         },
         "paths": {
             "results_csv_dir": "",

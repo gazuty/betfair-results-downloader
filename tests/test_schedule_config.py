@@ -22,7 +22,6 @@ class TestParseScheduleConfig:
         assert cfg.allow_azure_publish is False
         assert cfg.max_backfill_days == 90
         assert cfg.chunk_days == 30
-        assert cfg.min_coverage_overlap_days == 1
         assert cfg.min_overlap_hours == 2
         assert cfg.log_dir == ""
         assert cfg.history_file == ""
@@ -46,7 +45,6 @@ class TestParseScheduleConfig:
                 "allow_azure_publish": True,
                 "max_backfill_days": 30,
                 "chunk_days": 14,
-                "min_coverage_overlap_days": 2,
                 "min_overlap_hours": 4,
                 "log_dir": "/tmp/logs",
                 "history_file": "/tmp/history.jsonl",
@@ -61,7 +59,6 @@ class TestParseScheduleConfig:
         assert cfg.allow_azure_publish is True
         assert cfg.max_backfill_days == 30
         assert cfg.chunk_days == 14
-        assert cfg.min_coverage_overlap_days == 2
         assert cfg.min_overlap_hours == 4
         assert cfg.log_dir == "/tmp/logs"
         assert cfg.history_file == "/tmp/history.jsonl"

@@ -24,7 +24,6 @@ def get_results_database_dir() -> Path:
         ]
     elif system == "Windows":
         candidates = [
-            Path("C:/Users/Mark/OneDrive") / _ONEDRIVE_RELATIVE,
             Path.home() / "OneDrive" / _ONEDRIVE_RELATIVE,
         ]
     else:

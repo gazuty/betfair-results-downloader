@@ -32,7 +32,6 @@ def _cfg(**overrides) -> ScheduleConfig:
         allow_azure_publish=False,
         max_backfill_days=90,
         chunk_days=30,
-        min_coverage_overlap_days=1,
         log_dir="",
         history_file="",
     )

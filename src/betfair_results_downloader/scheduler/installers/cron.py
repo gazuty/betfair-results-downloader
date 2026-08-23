@@ -7,13 +7,16 @@ Used on Linux systems without systemd (or when systemd is not available).
 Installs a crontab entry with an idempotent marker comment so repeat installs
 don't add duplicate lines.
 
-The generated crontab line runs ``betfair-results run`` at each scheduled
-time (primary + retries).  Hours are derived from the HH:MM time strings.
+The generated crontab entries run ``betfair-results run`` at each scheduled
+time (primary + retries).  Times sharing a minute are grouped onto one line;
+distinct minutes get their own line, so exact HH:MM times are honoured.
+Every managed command line carries the marker as a trailing shell comment so
+install/uninstall can find and replace the whole block idempotently.
 
 Example for primary=06:00, retries=09:00,19:00,23:00::
 
     # BETFAIR_RESULTS_SCHEDULER
-    0 6,9,19,23 * * * cd /path/to/repo && /path/to/python -m betfair_results_downloader run >> /path/to/outputs/cron.log 2>&1
+    0 6,9,19,23 * * * cd /path/to/repo && /path/to/python -m betfair_results_downloader run >> /path/to/outputs/cron.log 2>&1 # BETFAIR_RESULTS_SCHEDULER
 """
 from __future__ import annotations
 
@@ -35,10 +38,12 @@ def build_cron_line(
     log_dir: Path,
 ) -> str:
     """
-    Build the crontab entry for the given schedule config.
+    Build the managed crontab block for the given schedule config.
 
-    One line per hour derived from all scheduled times (primary + retries).
-    Minutes from the primary_time are used; retries use the same minute.
+    Scheduled times (primary + retries) are grouped by minute: each distinct
+    minute produces one cron line covering all its hours, so exact HH:MM
+    times are honoured (previously all retries were forced onto the primary
+    time's minute).
 
     Parameters
     ----------
@@ -54,32 +59,56 @@ def build_cron_line(
     Returns
     -------
     str
-        Crontab entry (two lines: marker comment + cron expression).
+        Crontab block: marker comment plus one cron line per distinct minute,
+        each tagged with the marker as a trailing shell comment.
     """
     all_times = [schedule_cfg.primary_time] + list(schedule_cfg.retry_times)
-    hours: list[int] = []
-    minute = 0
-    seen: set[int] = set()
-    for i, t in enumerate(all_times):
+    hours_by_minute: dict[int, list[int]] = {}
+    for t in all_times:
         t = t.strip()
         if not t:
             continue
         parts = t.split(":")
         h = int(parts[0])
-        if i == 0:
-            minute = int(parts[1]) if len(parts) > 1 else 0
-        if h not in seen:
-            seen.add(h)
+        m = int(parts[1]) if len(parts) > 1 else 0
+        hours = hours_by_minute.setdefault(m, [])
+        if h not in hours:
             hours.append(h)
 
-    hours_str = ",".join(str(h) for h in hours)
     log_file = log_dir / "cron.log"
-    cron_expr = (
-        f"{minute} {hours_str} * * * "
+    command = (
         f"cd {repo_root} && {python_path} -m betfair_results_downloader run "
-        f">> {log_file} 2>&1"
+        f">> {log_file} 2>&1 {MARKER_COMMENT}"
     )
-    return f"{MARKER_COMMENT}\n{cron_expr}"
+    cron_lines = [
+        f"{minute} {','.join(str(h) for h in hours)} * * * {command}"
+        for minute, hours in sorted(hours_by_minute.items())
+    ]
+    return "\n".join([MARKER_COMMENT, *cron_lines])
+
+
+def _strip_managed_lines(lines: list[str]) -> list[str]:
+    """
+    Remove previously managed crontab lines.
+
+    Handles both the current format (marker appears as a trailing shell
+    comment on each managed line) and the legacy format (a standalone marker
+    comment followed by exactly one unmarked command line).
+    """
+    cleaned: list[str] = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            if MARKER_COMMENT not in line:
+                continue  # legacy unmarked command line
+        if line.strip() == MARKER_COMMENT:
+            skip_next = True
+            continue
+        if MARKER_COMMENT in line:
+            continue
+        cleaned.append(line)
+    return cleaned
 
 
 class CronInstaller:
@@ -117,18 +146,8 @@ class CronInstaller:
         )
         existing = existing_result.stdout if existing_result.returncode == 0 else ""
 
-        # Remove any previous managed entry (marker + next line)
-        lines = existing.splitlines()
-        cleaned: list[str] = []
-        skip_next = False
-        for line in lines:
-            if skip_next:
-                skip_next = False
-                continue
-            if line.strip() == MARKER_COMMENT:
-                skip_next = True
-                continue
-            cleaned.append(line)
+        # Remove any previous managed entry (current or legacy format)
+        cleaned = _strip_managed_lines(existing.splitlines())
 
         # Append new entry
         cleaned_str = "\n".join(cleaned).rstrip("\n")
@@ -161,17 +180,7 @@ class CronInstaller:
         if existing_result.returncode != 0:
             return {"ok": True, "message": "No crontab found — nothing to remove."}
 
-        lines = existing_result.stdout.splitlines()
-        cleaned: list[str] = []
-        skip_next = False
-        for line in lines:
-            if skip_next:
-                skip_next = False
-                continue
-            if line.strip() == MARKER_COMMENT:
-                skip_next = True
-                continue
-            cleaned.append(line)
+        cleaned = _strip_managed_lines(existing_result.stdout.splitlines())
 
         new_crontab = "\n".join(cleaned).strip() + "\n"
         subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)

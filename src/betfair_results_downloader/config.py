@@ -4,36 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Betfair event type IDs. Downloads fetch all settled orders regardless of
+# sport; Azure publishing is fixed to these two IDs (see
+# downloader_core.DEFAULT_AZURE_EVENT_TYPE_IDS).
 EVENTTYPE_HORSES = 7
 EVENTTYPE_GREYHOUNDS = 4339
-
-
-@dataclass(frozen=True)
-class DownloaderConfig:
-    days: int = 1
-    include_horses: bool = True
-    include_greyhounds: bool = True
-    enable_azure_sql: bool = False
-    dry_run: bool = True
-    user_id: str | None = None
-
-    def selected_event_type_ids(self) -> list[int]:
-        ids: list[int] = []
-        if self.include_horses:
-            ids.append(EVENTTYPE_HORSES)
-        if self.include_greyhounds:
-            ids.append(EVENTTYPE_GREYHOUNDS)
-        return ids
-
-    def validate(self) -> None:
-        if not isinstance(self.days, int):
-            raise ValueError("days must be an integer")
-        if self.days < 1 or self.days > 365:
-            raise ValueError("days must be between 1 and 365")
-        if not (self.include_horses or self.include_greyhounds):
-            raise ValueError("Select at least one of Horses or Greyhounds.")
-        if self.enable_azure_sql and self.dry_run is False:
-            pass
 
 
 @dataclass(frozen=True)
@@ -46,7 +21,6 @@ class ScheduleConfig:
     allow_azure_publish: bool = False
     max_backfill_days: int = 90
     chunk_days: int = 30
-    min_coverage_overlap_days: int = 1
     min_overlap_hours: int = 2
     log_dir: str = ""
     history_file: str = ""
@@ -64,7 +38,6 @@ def parse_schedule_config(creds: dict[str, Any]) -> ScheduleConfig:
         allow_azure_publish=bool(s.get("allow_azure_publish", False)),
         max_backfill_days=int(s.get("max_backfill_days", 90)),
         chunk_days=int(s.get("chunk_days", 30)),
-        min_coverage_overlap_days=int(s.get("min_coverage_overlap_days", 1)),
         min_overlap_hours=int(s.get("min_overlap_hours", 2)),
         log_dir=str(s.get("log_dir", "")),
         history_file=str(s.get("history_file", "")),

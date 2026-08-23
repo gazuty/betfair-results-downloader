@@ -108,3 +108,25 @@ def test_daily_dm_report_returns_zeroes_when_no_horse_or_greyhound_rows_in_windo
     assert report.week_to_date.total_profit == 0.0
     assert report.day_to_date.total_profit == 0.0
     assert "• Total profit: $0.00" in report.text
+
+
+def test_daily_dm_report_heading_is_portable_and_unpadded() -> None:
+    """The heading must not rely on glibc-only %-d/%-I strftime codes."""
+    df = pd.DataFrame(
+        [{"betId": "1", "eventTypeId": 7, "profit": 1.0, "settledDate": "2026-06-02T20:00:00Z"}]
+    )
+    report = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 3, 6, 5, tzinfo=SYDNEY_TZ),
+    )
+    assert "Wednesday 3 June, 6:05 AM" in report.text
+
+
+def test_daily_dm_report_heading_noon_and_midnight() -> None:
+    df = pd.DataFrame(
+        [{"betId": "1", "eventTypeId": 7, "profit": 1.0, "settledDate": "2026-06-02T20:00:00Z"}]
+    )
+    noon = build_daily_dm_report_from_dataframe(df, report_dt=datetime(2026, 6, 3, 12, 0, tzinfo=SYDNEY_TZ))
+    midnight = build_daily_dm_report_from_dataframe(df, report_dt=datetime(2026, 6, 3, 0, 0, tzinfo=SYDNEY_TZ))
+    assert "12:00 PM" in noon.text
+    assert "12:00 AM" in midnight.text

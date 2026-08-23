@@ -38,8 +38,20 @@ def _money(value: float) -> str:
     return f"{sign}${abs(quantized):,.2f}"
 
 
+def _format_heading(dt: datetime) -> str:
+    """
+    Format e.g. ``Saturday 6 June, 9:00 PM`` portably.
+
+    ``%-d``/``%-I`` are glibc-only strftime extensions and fail on Windows,
+    so the unpadded day and 12-hour clock are built by hand.
+    """
+    hour12 = dt.hour % 12 or 12
+    meridiem = "AM" if dt.hour < 12 else "PM"
+    return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}, {hour12}:{dt.minute:02d} {meridiem}"
+
+
 def _format_report(report_dt: datetime, week_to_date: ProfitBreakdown, day_to_date: ProfitBreakdown) -> str:
-    heading = report_dt.strftime("%A %-d %B, %-I:%M %p")
+    heading = _format_heading(report_dt)
     lines = [
         "Betfair results update",
         "",

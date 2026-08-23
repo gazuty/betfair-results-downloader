@@ -1,14 +1,17 @@
-#!/bin/zsh
+#!/usr/bin/env bash
+# Render the OpenClaw daily DM report from the repo this script lives in.
+# Overrides: REPO_ROOT, PYTHON_BIN, REPORT_AT (ISO-8601 timestamp).
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/Users/markmcfarlane/Projects/betfair-results-downloader/.claude/worktrees/openclaw-scheduled-dm-reporting}"
-PYTHON_BIN="${PYTHON_BIN:-/Users/markmcfarlane/Projects/betfair-results-downloader/.venv/bin/python}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(dirname "$SCRIPT_DIR")}"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 REPORT_AT="${REPORT_AT:-}"
 
 cd "$REPO_ROOT"
 
 if [[ -n "$REPORT_AT" ]]; then
-  PYTHONPATH=src "$PYTHON_BIN" -m betfair_results_downloader dm-report --at "$REPORT_AT"
+  "$PYTHON_BIN" -m betfair_results_downloader dm-report --at "$REPORT_AT"
 else
-  PYTHONPATH=src "$PYTHON_BIN" -m betfair_results_downloader dm-report
+  "$PYTHON_BIN" -m betfair_results_downloader dm-report
 fi

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from betfair_results_downloader.scheduler.state import (
     append_run_history,
-    check_today_success_marker,
+    _marker_filename,
     read_schedule_state,
     upsert_schedule_state,
     write_today_success_marker,
@@ -103,6 +103,9 @@ class TestUpsertScheduleState:
                 last_confirmed_settled_at_utc=confirmed,
             )
         assert result is True
+        sql = mock_cursor.execute.call_args[0][0]
+        assert "WITH (HOLDLOCK)" in sql
+        assert "CASE" in sql  # checkpoint is monotonic / NULL-preserving
         params = mock_cursor.execute.call_args[0][1:]
         assert TODAY in params
         assert TODAY + timedelta(days=1) in params
@@ -133,20 +136,17 @@ class TestAppendRunHistory:
 
 
 class TestSuccessMarker:
-    def test_returns_false_when_no_marker(self, tmp_path: Path) -> None:
-        assert check_today_success_marker(tmp_path, TODAY) is False
-
-    def test_returns_true_after_write_local(self, tmp_path: Path) -> None:
+    def test_write_creates_local_marker_file(self, tmp_path: Path) -> None:
         write_today_success_marker(tmp_path, TODAY, marker_namespace="local")
-        assert check_today_success_marker(tmp_path, TODAY, marker_namespace="local") is True
+        assert (tmp_path / _marker_filename(TODAY, "local")).exists()
 
-    def test_returns_true_after_write_utc(self, tmp_path: Path) -> None:
+    def test_write_creates_utc_marker_file(self, tmp_path: Path) -> None:
         write_today_success_marker(tmp_path, TODAY, marker_namespace="utc")
-        assert check_today_success_marker(tmp_path, TODAY, marker_namespace="utc") is True
+        assert (tmp_path / _marker_filename(TODAY, "utc")).exists()
 
     def test_different_namespace_isolated(self, tmp_path: Path) -> None:
         write_today_success_marker(tmp_path, TODAY, marker_namespace="local")
-        assert check_today_success_marker(tmp_path, TODAY, marker_namespace="utc") is False
+        assert not (tmp_path / _marker_filename(TODAY, "utc")).exists()
 
     def test_marker_filename_format(self, tmp_path: Path) -> None:
         write_today_success_marker(tmp_path, TODAY, marker_namespace="local")

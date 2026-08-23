@@ -26,6 +26,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from ..azure_common import build_conn_str as _build_conn_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,20 +52,6 @@ class ScheduleStateRow:
 def _get_db_user_id(creds: dict[str, Any]) -> str:
     user = creds.get("user") or {}
     return str(user.get("db_user_id") or user.get("user_id") or "").strip()
-
-
-def _build_conn_str(azsql: dict[str, Any]) -> str:
-    port = azsql.get("port", 1433)
-    return (
-        f"DRIVER={{{azsql['driver']}}};"
-        f"SERVER={azsql['server']},{port};"
-        f"DATABASE={azsql['database']};"
-        f"UID={azsql['username']};"
-        f"PWD={azsql['password']};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
-    )
 
 
 def _open_azure_connection(creds: dict[str, Any]):  # type: ignore[return]
@@ -177,15 +165,25 @@ def upsert_schedule_state(
     )
     truncated_message = (message or "")[:1000]
 
+    # WITH (HOLDLOCK): serialize concurrent MERGEs from two machines so the
+    # classic MERGE upsert race cannot raise a duplicate-key error.
+    # LastConfirmedSettledAtUtc is monotonic non-decreasing: a NULL parameter
+    # keeps the stored checkpoint (e.g. an empty download confirmed nothing),
+    # and an older value never rewinds it.
     merge_sql = """\
-MERGE dbo.ScheduleState AS target
+MERGE dbo.ScheduleState WITH (HOLDLOCK) AS target
 USING (SELECT ? AS UserID) AS source ON target.UserID = source.UserID
 WHEN MATCHED THEN
     UPDATE SET
         LastCoveredDateUtc                 = ?,
         LastCoveredDateLocal               = ?,
         LastCoveredTimezone                = ?,
-        LastConfirmedSettledAtUtc          = ?,
+        LastConfirmedSettledAtUtc          = CASE
+            WHEN ? IS NULL THEN target.LastConfirmedSettledAtUtc
+            WHEN target.LastConfirmedSettledAtUtc IS NULL
+                 OR ? > target.LastConfirmedSettledAtUtc THEN ?
+            ELSE target.LastConfirmedSettledAtUtc
+        END,
         LastSuccessfulDownloadStartedUtc   = ?,
         LastSuccessfulDownloadFinishedUtc  = ?,
         LastRunStartedUtc                  = ?,
@@ -208,6 +206,8 @@ WHEN NOT MATCHED THEN
                 last_covered_date_utc,
                 last_covered_date_local,
                 last_covered_timezone,
+                confirmed,
+                confirmed,
                 confirmed,
                 download_started,
                 download_finished,
@@ -254,17 +254,6 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
 
 def _marker_filename(marker_date: date, marker_namespace: str = "local") -> str:
     return f"last_success_{marker_namespace}_{marker_date.isoformat()}.marker"
-
-
-def check_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> bool:
-    if not log_dir:
-        return False
-    try:
-        marker = Path(log_dir) / _marker_filename(today_date, marker_namespace)
-        return marker.exists()
-    except Exception as exc:
-        logger.warning("Failed to check success marker: %s", exc)
-        return False
 
 
 def write_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> None:

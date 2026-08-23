@@ -17,6 +17,7 @@ import betfairlightweight
 from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError
 
+from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
 from .csv_utils import clean_and_remove_duplicates, update_csv_with_new_data
 from .scheduler.date_windows import chunk_date_range
 
@@ -49,8 +50,8 @@ class DownloadResult:
     rows_downloaded: int
     message: str
     df_co: Optional[pd.DataFrame] = None
-    from_utc: Optional[str] = None
-    to_utc: Optional[str] = None
+    from_utc: Optional[datetime] = None
+    to_utc: Optional[datetime] = None
 
 
 @dataclass
@@ -165,7 +166,9 @@ def _to_utc_datetime(value: DateLike, *, end_of_day: bool) -> datetime:
     Normalize a ``date`` or ``datetime`` input to a UTC-aware ``datetime``.
 
     - ``date`` inputs expand to the UTC start-of-day (``end_of_day=False``)
-      or end-of-day (``23:59:59`` UTC, ``end_of_day=True``).
+      or the *exclusive* end-of-day — midnight of the following day —
+      (``end_of_day=True``), so a full day is covered with no sub-second
+      blind spot before midnight.
     - Naive ``datetime`` inputs are assumed to be UTC.
     - tz-aware ``datetime`` inputs are converted to UTC.
     """
@@ -175,7 +178,8 @@ def _to_utc_datetime(value: DateLike, *, end_of_day: bool) -> datetime:
         return value.astimezone(timezone.utc)
     # plain date
     if end_of_day:
-        return datetime(value.year, value.month, value.day, 23, 59, 59, tzinfo=timezone.utc)
+        next_day = value + timedelta(days=1)
+        return datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc)
     return datetime(value.year, value.month, value.day, 0, 0, 0, tzinfo=timezone.utc)
 
 
@@ -185,17 +189,22 @@ def _build_datetime_chunks(
     chunk_days: int,
 ) -> list[tuple[datetime, datetime]]:
     """
-    Split a UTC ``[from_dt, to_dt]`` range into chunks of at most ``chunk_days``
-    calendar days, preserving the caller's exact start/end datetime on the
-    first/last chunk (so legacy callers that pass sub-day precision see
-    identical API-window boundaries when the whole range fits in one chunk).
+    Split a UTC ``[from_dt, to_dt)`` range into half-open chunks of at most
+    ``chunk_days`` calendar days: each chunk's exclusive end is exactly the
+    next chunk's start, so orders settled with sub-second precision near
+    midnight cannot fall between chunks. The caller's exact start/end
+    datetimes are preserved on the first/last chunk.
     """
     date_chunks = chunk_date_range(from_dt.date(), to_dt.date(), chunk_days)
     result: list[tuple[datetime, datetime]] = []
     last = len(date_chunks) - 1
     for i, (cf, ct) in enumerate(date_chunks):
         c_from = from_dt if i == 0 else datetime(cf.year, cf.month, cf.day, 0, 0, 0, tzinfo=timezone.utc)
-        c_to = to_dt if i == last else datetime(ct.year, ct.month, ct.day, 23, 59, 59, tzinfo=timezone.utc)
+        if i == last:
+            c_to = to_dt
+        else:
+            next_day = ct + timedelta(days=1)
+            c_to = datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc)
         result.append((c_from, c_to))
     return result
 
@@ -261,8 +270,10 @@ def fetch_cleared_orders_df_range(
         Betfair credentials dict (``username``/``password``/``app_key``, and
         optionally ``certs_dir``). Only consulted if ``api_client`` is ``None``.
     from_date, to_date:
-        Inclusive range. ``date`` expands to full-day UTC; ``datetime`` is used
-        as-is (naive datetimes are assumed UTC).
+        Inclusive range. ``date`` inputs expand to full-day UTC (``to_date``
+        becomes an exclusive bound at midnight of the following day, so the
+        whole final day is covered); ``datetime`` is used as-is (naive
+        datetimes are assumed UTC).
     chunk_days:
         Max calendar days per API call (default 30). Betfair's
         ``listClearedOrders`` settledDateRange becomes increasingly timeout-prone
@@ -295,12 +306,12 @@ def fetch_cleared_orders_df_range(
     from_dt = _to_utc_datetime(from_date, end_of_day=False)
     to_dt = _to_utc_datetime(to_date, end_of_day=True)
 
-    if from_dt > to_dt:
+    if from_dt >= to_dt:
         empty = _normalize_cleared_orders_df(pd.DataFrame())
         return DownloadResult(
             attempted=True,
             rows_downloaded=0,
-            message=f"Empty date range: {from_dt.date()} > {to_dt.date()}.",
+            message=f"Empty date range: {from_dt.date()} >= {to_dt.date()}.",
             df_co=empty,
         )
 
@@ -329,7 +340,7 @@ def fetch_cleared_orders_df_range(
                 try:
                     status_cb(
                         f"Download chunk {idx}/{total_chunks}: "
-                        f"{c_from.strftime('%Y-%m-%d')} -> {c_to.strftime('%Y-%m-%d')}"
+                        f"{c_from.strftime('%Y-%m-%d %H:%M')} -> {c_to.strftime('%Y-%m-%d %H:%M')} (exclusive)"
                     )
                 except Exception:
                     pass
@@ -362,12 +373,14 @@ def fetch_cleared_orders_df_range(
 
     df_co = _normalize_cleared_orders_df(pd.DataFrame(all_rows))
 
+    # to_dt is an exclusive bound; show the last covered instant's date.
+    to_display = (to_dt - timedelta(microseconds=1)).date()
     return DownloadResult(
         attempted=True,
         rows_downloaded=len(df_co),
         message=(
             f"Downloaded cleared orders: {len(df_co):,} rows "
-            f"(range={from_dt.date()}->{to_dt.date()}, chunks={len(chunks)})."
+            f"(range={from_dt.date()}->{to_display}, chunks={len(chunks)})."
         ),
         df_co=df_co,
         from_utc=from_dt,
@@ -420,6 +433,31 @@ def _chunked(seq: Iterable[str], n: int) -> Iterable[list[str]]:
         yield seq[i : i + n]
 
 
+def _call_list_market_catalogue(
+    *,
+    trading: betfairlightweight.APIClient,
+    market_ids: list[str],
+    max_retries: int = 5,
+) -> Any:
+    """
+    Call listMarketCatalogue with the same TIMEOUT_ERROR retry/backoff policy
+    as :func:`_call_list_cleared_orders`.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            return trading.betting.list_market_catalogue(
+                filter=filters.market_filter(market_ids=market_ids),
+                max_results=1000,
+                market_projection=["MARKET_START_TIME", "EVENT"],
+            )
+        except APIError as e:
+            msg = str(e)
+            is_timeout = ("TIMEOUT_ERROR" in msg) or ("ANGX-0010" in msg)
+            if (not is_timeout) or attempt == max_retries:
+                raise
+            time.sleep(min(2**attempt, 20))
+
+
 def enrich_with_market_catalogue(
     *,
     df_co: pd.DataFrame,
@@ -429,14 +467,18 @@ def enrich_with_market_catalogue(
     use_cache: bool = True,
     batch_size: int = 50,
     sleep_seconds: float = 0.20,
-    status_cb: Optional[callable] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
     api_client: Optional[betfairlightweight.APIClient] = None,
 ) -> tuple[pd.DataFrame, EnrichResult]:
     """
-    Notebook Cell 3, ported:
-    - list_market_catalogue by marketId batches
+    Enrich cleared orders with market catalogue metadata:
+    - list_market_catalogue by marketId batches (timeout retry/backoff)
     - cache at <cache_dir>/market_catalogue_event_cache.csv
     - deterministic column names: mkt_*, evt_*
+
+    A mid-fetch API failure does not raise: rows fetched before the failure
+    are still written to the cache and merged, and the failure is reported in
+    the returned :class:`EnrichResult` message.
     """
 
     def say(msg: str) -> None:
@@ -515,43 +557,49 @@ def enrich_with_market_catalogue(
 
     fetched_rows: list[dict[str, Any]] = []
     returned_total = 0
+    fetch_error: Optional[str] = None
 
     total_batches = (
         (len(missing_market_ids) + batch_size - 1) // batch_size
         if batch_size > 0
         else 0
     )
-    for idx, batch in enumerate(_chunked(missing_market_ids, batch_size), start=1):
-        if total_batches > 0:
-            say(
-                f"Enrichment: fetching batch {idx}/{total_batches} (batch_size={len(batch):,})..."
-            )
-        time.sleep(sleep_seconds)
+    try:
+        for idx, batch in enumerate(_chunked(missing_market_ids, batch_size), start=1):
+            if total_batches > 0:
+                say(
+                    f"Enrichment: fetching batch {idx}/{total_batches} (batch_size={len(batch):,})..."
+                )
+            time.sleep(sleep_seconds)
 
-        cats = trading.betting.list_market_catalogue(
-            filter=filters.market_filter(market_ids=batch),
-            max_results=1000,
-            market_projection=["MARKET_START_TIME", "EVENT"],
+            cats = _call_list_market_catalogue(trading=trading, market_ids=batch)
+            returned_total += len(cats)
+
+            for cat in cats:
+                fetched_rows.append(
+                    {
+                        "marketId": str(cat.market_id),
+                        "mkt_marketName": getattr(cat, "market_name", None),
+                        "mkt_marketStartTime": getattr(cat, "market_start_time", None),
+                        "evt_eventId": str(cat.event.id)
+                        if getattr(cat, "event", None)
+                        else None,
+                        "evt_eventName": cat.event.name
+                        if getattr(cat, "event", None)
+                        else None,
+                        "evt_countryCode": cat.event.country_code
+                        if getattr(cat, "event", None)
+                        else None,
+                    }
+                )
+    except Exception as exc:
+        # Salvage what was fetched: cache it, merge it, and report the failure
+        # instead of losing the whole run to a transient catalogue error.
+        fetch_error = f"{type(exc).__name__}: {exc}"
+        say(
+            f"Enrichment fetch aborted after {len(fetched_rows):,} rows "
+            f"({returned_total:,} catalogues): {fetch_error}"
         )
-        returned_total += len(cats)
-
-        for cat in cats:
-            fetched_rows.append(
-                {
-                    "marketId": str(cat.market_id),
-                    "mkt_marketName": getattr(cat, "market_name", None),
-                    "mkt_marketStartTime": getattr(cat, "market_start_time", None),
-                    "evt_eventId": str(cat.event.id)
-                    if getattr(cat, "event", None)
-                    else None,
-                    "evt_eventName": cat.event.name
-                    if getattr(cat, "event", None)
-                    else None,
-                    "evt_countryCode": cat.event.country_code
-                    if getattr(cat, "event", None)
-                    else None,
-                }
-            )
 
     df_fetched = pd.DataFrame(fetched_rows)
 
@@ -594,6 +642,8 @@ def enrich_with_market_catalogue(
             msg = (
                 f"Enriched metadata using market catalogue. Cache rows={cache_rows:,}."
             )
+        if fetch_error:
+            msg += f" WARNING: catalogue fetch aborted early ({fetch_error})."
 
         return df_out, EnrichResult(
             attempted=True,
@@ -610,11 +660,14 @@ def enrich_with_market_catalogue(
             batch_size=batch_size,
         )
 
+    no_rows_msg = "No enrichment rows available (cache empty and fetch returned none)."
+    if fetch_error:
+        no_rows_msg += f" WARNING: catalogue fetch aborted early ({fetch_error})."
     return df_work, EnrichResult(
         attempted=True,
         markets_requested=len(missing_market_ids),
         markets_returned=returned_total,
-        message="No enrichment rows available (cache empty and fetch returned none).",
+        message=no_rows_msg,
         unique_market_ids=len(unique_market_ids),
         use_cache=use_cache,
         cache_path=str(cache_path),
@@ -639,7 +692,7 @@ _SNAPSHOT_NAME_RE = re.compile(
 def prune_snapshot_files(
     results_csv_dir: Path,
     keep: int = 14,
-    status_cb: Optional[callable] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
 ) -> list[Path]:
     """
     Delete dated snapshot files beyond the ``keep`` most recent.
@@ -681,7 +734,7 @@ def archive_old_canonical_rows(
     df_canonical: pd.DataFrame,
     results_csv_dir: Path,
     archive_months: int = 12,
-    status_cb: Optional[callable] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
 ) -> pd.DataFrame:
     """
     Move rows settled more than ``archive_months`` ago into yearly compressed
@@ -731,7 +784,7 @@ def write_csv_outputs(
     *,
     df_co: pd.DataFrame,
     results_csv_dir: Path,
-    status_cb: Optional[callable] = None,
+    status_cb: Optional[Callable[[str], None]] = None,
     snapshot_retention: int = 14,
     compress_snapshots: bool = True,
     archive_months: int = 12,
@@ -782,17 +835,26 @@ def _money2(x: Any) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+# Azure publishing is fixed to Horse Racing (7) and Greyhound Racing (4339).
+DEFAULT_AZURE_EVENT_TYPE_IDS: frozenset[int] = frozenset(
+    {EVENTTYPE_HORSES, EVENTTYPE_GREYHOUNDS}
+)
+
+
 def prepare_azure_dataset(
     *,
     df_co: pd.DataFrame,
-    allowed_event_type_ids: set[int] = {7, 4339},
+    allowed_event_type_ids: Optional[frozenset[int]] = None,
 ) -> AzurePrepResult:
     """
-    Notebook Cells 9–10, ported:
-    - filter df_co to allowed eventTypeIds (numeric coercion)
+    Prepare the Azure upload dataset:
+    - filter df_co to allowed eventTypeIds (numeric coercion); defaults to
+      :data:`DEFAULT_AZURE_EVENT_TYPE_IDS` (horses + greyhounds)
     - aggregate by marketId (sum profit, count betId, min/max placedDate)
     - build rows_to_write list: (MarketID decimal, Profit decimal(2), Notes)
     """
+    if allowed_event_type_ids is None:
+        allowed_event_type_ids = DEFAULT_AZURE_EVENT_TYPE_IDS
     required_cols = {"eventTypeId", "marketId", "profit", "betId", "placedDate"}
     missing = required_cols - set(df_co.columns)
     if missing:
