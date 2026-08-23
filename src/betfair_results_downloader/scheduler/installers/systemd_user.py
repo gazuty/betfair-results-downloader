@@ -10,6 +10,7 @@ writes them to ``~/.config/systemd/user/``, then enables+starts them via
 The timer uses ``OnCalendar`` entries (one per scheduled time) and
 ``Persistent=true`` so missed runs are caught on next boot/login.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -145,7 +146,8 @@ class SystemdUserInstaller:
 
         result = subprocess.run(
             ["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.timer"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return {
@@ -172,13 +174,16 @@ class SystemdUserInstaller:
         SERVICE_FILE.unlink(missing_ok=True)
         TIMER_FILE.unlink(missing_ok=True)
         if not dry_run:
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"], capture_output=True
+            )
         return {"ok": True, "message": f"Uninstalled {SERVICE_NAME} timer and service."}
 
     def status(self) -> dict[str, Any]:
         result = subprocess.run(
             ["systemctl", "--user", "is-active", f"{SERVICE_NAME}.timer"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         active = result.stdout.strip() == "active"
         return {
@@ -195,6 +200,7 @@ class SystemdUserInstaller:
 
     def logs(self, log_dir: Path, tail_n: int = 50) -> str:
         import json
+
         output_parts: list[str] = []
 
         # run_history.jsonl
@@ -214,5 +220,7 @@ class SystemdUserInstaller:
                     output_parts.append(f"  {line[:120]}")
 
         # Journald
-        output_parts.append(f"\n(Tip: journalctl --user -u {SERVICE_NAME} -n {tail_n} for full logs)")
+        output_parts.append(
+            f"\n(Tip: journalctl --user -u {SERVICE_NAME} -n {tail_n} for full logs)"
+        )
         return "\n".join(output_parts) if output_parts else "No logs found."

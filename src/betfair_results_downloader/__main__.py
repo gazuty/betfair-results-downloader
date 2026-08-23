@@ -9,6 +9,7 @@ Subcommands:
   schedule      — install/uninstall/status/logs for the platform scheduled job
   dm-report     — render the OpenClaw daily DM report from local CSV results
 """
+
 from __future__ import annotations
 
 import argparse
@@ -118,6 +119,7 @@ def _load_creds_and_schedule(validate: bool = False):
 
     if validate:
         from .secrets import validate_credentials
+
         v = validate_credentials(creds)
         for warning in v.warnings:
             print(f"WARN: {warning}")
@@ -142,6 +144,7 @@ def _cmd_run(_args: argparse.Namespace) -> int:
     Exit codes: 0=success, 1=failure, 2=bad configuration.
     """
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -151,6 +154,7 @@ def _cmd_run(_args: argparse.Namespace) -> int:
     creds, schedule_cfg = _load_creds_and_schedule(validate=True)
 
     from .scheduler.runner import run_scheduled
+
     result = run_scheduled(creds, schedule_cfg)
 
     if result.ok:
@@ -174,6 +178,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     """
     import logging
     from datetime import date
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -194,6 +199,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     creds, schedule_cfg = _load_creds_and_schedule(validate=True)
 
     from .scheduler.runner import run_backfill
+
     result = run_backfill(creds, schedule_cfg, from_date, to_date)
 
     if result.ok:
@@ -297,6 +303,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     Actions: install | uninstall | status | logs [--tail N]
     """
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -309,6 +316,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
     try:
         from .scheduler.installers import get_installer
+
         installer = get_installer()
     except RuntimeError as exc:
         print(f"FAIL: {exc}")
@@ -319,17 +327,22 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     if action == "install":
         repo_root = Path(__file__).resolve().parents[2]
         import sys
+
         venv_python = Path(getattr(args, "python", None) or sys.executable)
 
         # Apply CLI time overrides to schedule config if provided
         if getattr(args, "time", None) or getattr(args, "retries", None):
             from dataclasses import replace
 
-            retry_list = [r.strip() for r in (args.retries or "").split(",") if r.strip()]
+            retry_list = [
+                r.strip() for r in (args.retries or "").split(",") if r.strip()
+            ]
             schedule_cfg = replace(
                 schedule_cfg,
                 primary_time=args.time or schedule_cfg.primary_time,
-                retry_times=tuple(retry_list) if retry_list else schedule_cfg.retry_times,
+                retry_times=tuple(retry_list)
+                if retry_list
+                else schedule_cfg.retry_times,
             )
 
         log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
@@ -361,6 +374,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
     if action == "logs":
         from pathlib import Path
+
         repo_root = Path(__file__).resolve().parents[2]
         log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
         log_dir = Path(log_dir_raw).expanduser()
@@ -392,16 +406,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "backfill",
         help="Manual backfill for an explicit date range.",
     )
-    bf.add_argument("--from", dest="from_date", metavar="YYYY-MM-DD",
-                    help="Inclusive start date (required)")
-    bf.add_argument("--to", dest="to_date", metavar="YYYY-MM-DD",
-                    help="Inclusive end date (required)")
+    bf.add_argument(
+        "--from",
+        dest="from_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive start date (required)",
+    )
+    bf.add_argument(
+        "--to",
+        dest="to_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive end date (required)",
+    )
     au = sub.add_parser(
         "audit",
         help="Report missing settled-date gaps in the canonical CSV.",
     )
-    au.add_argument("--window", type=int, default=90, metavar="DAYS",
-                    help="Audit window in days back from today (default: 90)")
+    au.add_argument(
+        "--window",
+        type=int,
+        default=90,
+        metavar="DAYS",
+        help="Audit window in days back from today (default: 90)",
+    )
     dm = sub.add_parser(
         "dm-report",
         help="Render the OpenClaw daily DM report from local results CSV.",
@@ -426,12 +453,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Install, remove, or inspect the platform scheduled job.",
     )
     sch.add_argument("action", choices=["install", "uninstall", "status", "logs"])
-    sch.add_argument("--time", metavar="HH:MM",
-                     help="Override primary_time for this install (e.g. 07:00)")
-    sch.add_argument("--retries", metavar="HH:MM,...",
-                     help="Override retry_times (comma-separated, e.g. 10:00,20:00)")
-    sch.add_argument("--tail", type=int, default=50,
-                     help="Number of log lines to show for 'logs' action (default: 50)")
+    sch.add_argument(
+        "--time",
+        metavar="HH:MM",
+        help="Override primary_time for this install (e.g. 07:00)",
+    )
+    sch.add_argument(
+        "--retries",
+        metavar="HH:MM,...",
+        help="Override retry_times (comma-separated, e.g. 10:00,20:00)",
+    )
+    sch.add_argument(
+        "--tail",
+        type=int,
+        default=50,
+        help="Number of log lines to show for 'logs' action (default: 50)",
+    )
 
     return parser
 

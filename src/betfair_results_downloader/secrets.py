@@ -165,8 +165,10 @@ def _validate_schedule_section(
             )
         else:
             from .scheduler.auth import CERT_FILENAME, KEY_FILENAME
+
             missing = [
-                name for name, p in [
+                name
+                for name, p in [
                     (CERT_FILENAME, certs_path / CERT_FILENAME),
                     (KEY_FILENAME, certs_path / KEY_FILENAME),
                 ]
@@ -180,6 +182,7 @@ def _validate_schedule_section(
     # --- timezone ---
     try:
         from zoneinfo import ZoneInfo
+
         ZoneInfo(schedule_cfg.timezone)
     except Exception:
         errors.append(
@@ -193,9 +196,7 @@ def _validate_schedule_section(
         )
     for t in schedule_cfg.retry_times:
         if not _HH_MM_RE.match(str(t)):
-            errors.append(
-                f"schedule.retry_times entry must be HH:MM, got: {t!r}"
-            )
+            errors.append(f"schedule.retry_times entry must be HH:MM, got: {t!r}")
 
     # --- numeric bounds ---
     if schedule_cfg.max_backfill_days > 365:

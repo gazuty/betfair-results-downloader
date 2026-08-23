@@ -12,6 +12,7 @@ Resolution order for the incremental checkpoint:
 The checkpoint is always pulled back by ``min_overlap_hours`` for a safety
 re-download window, then capped by ``max_backfill_days``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -71,7 +72,9 @@ def compute_backfill_window(
         checkpoint_source: Optional[str] = None
 
         if azure_state.last_confirmed_settled_at_utc is not None:
-            checkpoint = azure_state.last_confirmed_settled_at_utc.astimezone(timezone.utc)
+            checkpoint = azure_state.last_confirmed_settled_at_utc.astimezone(
+                timezone.utc
+            )
             checkpoint_source = "LastConfirmedSettledAtUtc"
         elif azure_state.last_covered_date_utc is not None:
             checkpoint = datetime.combine(
@@ -93,7 +96,9 @@ def compute_backfill_window(
                 tzinfo=legacy_tz,
             ).astimezone(timezone.utc)
             checkpoint = min(checkpoint, now_utc)
-            checkpoint_source = f"LastCoveredDateLocal (legacy bootstrap, tz={tz_name}, capped)"
+            checkpoint_source = (
+                f"LastCoveredDateLocal (legacy bootstrap, tz={tz_name}, capped)"
+            )
 
         if checkpoint is not None and checkpoint_source is not None:
             base_from = checkpoint - timedelta(hours=schedule_cfg.min_overlap_hours)
@@ -104,7 +109,9 @@ def compute_backfill_window(
                 f"→ from={from_dt.isoformat()}"
             )
             if base_from < earliest_allowed:
-                reason += f" (capped at max_backfill_days={schedule_cfg.max_backfill_days})"
+                reason += (
+                    f" (capped at max_backfill_days={schedule_cfg.max_backfill_days})"
+                )
             logger.info("Gap detection via Azure checkpoint: %s", reason)
             return from_dt, now_utc, reason
 
@@ -152,6 +159,8 @@ def derive_coverage_dates(
 
 def cold_start_default_dates(schedule_cfg: ScheduleConfig) -> tuple[date, date]:
     scheduler_now = get_scheduler_now(schedule_cfg)
-    start = (scheduler_now.now_utc - timedelta(days=schedule_cfg.max_backfill_days)).date()
+    start = (
+        scheduler_now.now_utc - timedelta(days=schedule_cfg.max_backfill_days)
+    ).date()
     end = scheduler_now.now_utc.date()
     return start, end

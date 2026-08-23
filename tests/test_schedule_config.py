@@ -1,15 +1,20 @@
 """Tests for Phase 1.2: ScheduleConfig dataclass and schedule validation."""
+
 from __future__ import annotations
 
 import pytest
 
 from betfair_results_downloader.config import parse_schedule_config
-from betfair_results_downloader.secrets import validate_credentials, _validate_schedule_section
+from betfair_results_downloader.secrets import (
+    validate_credentials,
+    _validate_schedule_section,
+)
 
 
 # ---------------------------------------------------------------------------
 # parse_schedule_config
 # ---------------------------------------------------------------------------
+
 
 class TestParseScheduleConfig:
     def test_empty_creds_returns_disabled_defaults(self) -> None:
@@ -83,6 +88,7 @@ class TestParseScheduleConfig:
 # _validate_schedule_section (internal)
 # ---------------------------------------------------------------------------
 
+
 def _base_valid_creds(certs_dir: str) -> dict:
     """Minimal valid credentials with schedule enabled."""
     return {
@@ -106,9 +112,7 @@ def _base_valid_creds(certs_dir: str) -> dict:
 
 class TestValidateScheduleSection:
     def test_disabled_returns_no_errors(self) -> None:
-        errors, warnings = _validate_schedule_section(
-            {"schedule": {"enabled": False}}
-        )
+        errors, warnings = _validate_schedule_section({"schedule": {"enabled": False}})
         assert errors == []
         assert warnings == []
 
@@ -119,8 +123,12 @@ class TestValidateScheduleSection:
     def test_missing_certs_dir_is_an_error(self, tmp_path) -> None:
         creds = {
             "betfair": {"certs_dir": ""},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": []},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("certs_dir" in e for e in errors)
@@ -128,8 +136,12 @@ class TestValidateScheduleSection:
     def test_nonexistent_certs_dir_is_an_error(self) -> None:
         creds = {
             "betfair": {"certs_dir": "/nonexistent/path/does/not/exist"},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": []},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("certs_dir" in e for e in errors)
@@ -139,8 +151,12 @@ class TestValidateScheduleSection:
         (tmp_path / "client-2048.crt").write_text("fake cert")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": []},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("client-2048.key" in e for e in errors)
@@ -150,8 +166,12 @@ class TestValidateScheduleSection:
         (tmp_path / "client-2048.key").write_text("x")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
-            "schedule": {"enabled": True, "timezone": "NotATimezone/Fake",
-                         "primary_time": "06:00", "retry_times": []},
+            "schedule": {
+                "enabled": True,
+                "timezone": "NotATimezone/Fake",
+                "primary_time": "06:00",
+                "retry_times": [],
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("timezone" in e for e in errors)
@@ -161,9 +181,12 @@ class TestValidateScheduleSection:
         (tmp_path / "client-2048.key").write_text("x")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "6:00",  # missing leading zero
-                         "retry_times": []},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "6:00",  # missing leading zero
+                "retry_times": [],
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("primary_time" in e for e in errors)
@@ -173,9 +196,12 @@ class TestValidateScheduleSection:
         (tmp_path / "client-2048.key").write_text("x")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00",
-                         "retry_times": ["9:00", "19:00"]},  # bad first entry
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": ["9:00", "19:00"],
+            },  # bad first entry
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("retry_times" in e for e in errors)
@@ -185,25 +211,37 @@ class TestValidateScheduleSection:
         (tmp_path / "client-2048.key").write_text("x")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": [],
-                         "max_backfill_days": 366},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+                "max_backfill_days": 366,
+            },
         }
         errors, _ = _validate_schedule_section(creds)
         assert any("max_backfill_days" in e for e in errors)
 
-    def test_allow_azure_publish_without_enable_azure_sql_is_warning(self, tmp_path) -> None:
+    def test_allow_azure_publish_without_enable_azure_sql_is_warning(
+        self, tmp_path
+    ) -> None:
         (tmp_path / "client-2048.crt").write_text("x")
         (tmp_path / "client-2048.key").write_text("x")
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
             "user": {"enable_azure_sql": False, "dry_run": False},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": [],
-                         "allow_azure_publish": True},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+                "allow_azure_publish": True,
+            },
         }
         errors, warnings = _validate_schedule_section(creds)
-        assert not any("enable_azure_sql" in e for e in errors), "should be warning, not error"
+        assert not any("enable_azure_sql" in e for e in errors), (
+            "should be warning, not error"
+        )
         assert any("enable_azure_sql" in w for w in warnings)
 
     def test_allow_azure_publish_with_dry_run_is_warning(self, tmp_path) -> None:
@@ -212,9 +250,13 @@ class TestValidateScheduleSection:
         creds = {
             "betfair": {"certs_dir": str(tmp_path)},
             "user": {"enable_azure_sql": True, "dry_run": True},
-            "schedule": {"enabled": True, "timezone": "Australia/Sydney",
-                         "primary_time": "06:00", "retry_times": [],
-                         "allow_azure_publish": True},
+            "schedule": {
+                "enabled": True,
+                "timezone": "Australia/Sydney",
+                "primary_time": "06:00",
+                "retry_times": [],
+                "allow_azure_publish": True,
+            },
         }
         errors, warnings = _validate_schedule_section(creds)
         assert not any("dry_run" in e for e in errors), "should be warning, not error"
@@ -234,12 +276,15 @@ class TestValidateScheduleSection:
             },
         }
         errors, _ = _validate_schedule_section(creds)
-        assert len(errors) >= 5  # certs_dir, timezone, primary_time, retry, max_backfill, chunk
+        assert (
+            len(errors) >= 5
+        )  # certs_dir, timezone, primary_time, retry, max_backfill, chunk
 
 
 # ---------------------------------------------------------------------------
 # validate_credentials (public API) — schedule integration
 # ---------------------------------------------------------------------------
+
 
 class TestValidateCredentialsScheduleIntegration:
     def test_schedule_disabled_skips_schedule_validation(self) -> None:

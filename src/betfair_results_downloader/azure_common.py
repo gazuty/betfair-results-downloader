@@ -5,6 +5,7 @@ Single source of truth for the ODBC connection options (encryption, trust,
 timeout) used by ``azure_publish``, ``azure_remediation``, and
 ``scheduler/state``.
 """
+
 from __future__ import annotations
 
 from typing import Any

@@ -7,6 +7,7 @@ configured Azure SQL database.
 New tables include both day-level coverage fields and intraday incremental
 checkpoint fields.
 """
+
 from __future__ import annotations
 
 import sys

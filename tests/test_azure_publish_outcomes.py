@@ -1,4 +1,5 @@
 """Tests for publish_to_azure_sql outcome semantics (attempted vs ok)."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -35,7 +36,9 @@ class TestBlockedConfigurations:
         assert result.ok is False
         assert "db_user_id" in result.message
 
-    def test_missing_pyodbc_reports_actionable_message(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_pyodbc_reports_actionable_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(azure_publish, "pyodbc", None)
         result = publish_to_azure_sql(creds=CREDS, rows_to_write=ROWS, dry_run=False)
         assert result.attempted is False
@@ -44,7 +47,9 @@ class TestBlockedConfigurations:
 
 
 class TestFailureIsNotSuccess:
-    def test_connection_error_yields_attempted_but_not_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_connection_error_yields_attempted_but_not_ok(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         fake_pyodbc = MagicMock()
         fake_pyodbc.connect.side_effect = RuntimeError("login timeout")
         monkeypatch.setattr(azure_publish, "pyodbc", fake_pyodbc)
@@ -57,7 +62,9 @@ class TestFailureIsNotSuccess:
 
 
 class TestDryRun:
-    def test_dry_run_is_ok_but_not_attempted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_dry_run_is_ok_but_not_attempted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         fake_conn = MagicMock()
         fake_pyodbc = MagicMock()
         fake_pyodbc.connect.return_value = fake_conn
@@ -65,7 +72,9 @@ class TestDryRun:
         monkeypatch.setattr(
             azure_publish,
             "read_existing_marketresults",
-            lambda conn, user: pd.DataFrame(columns=["UserID", "MarketID", "Profit", "Notes"]),
+            lambda conn, user: pd.DataFrame(
+                columns=["UserID", "MarketID", "Profit", "Notes"]
+            ),
         )
 
         result = publish_to_azure_sql(creds=CREDS, rows_to_write=ROWS, dry_run=True)

@@ -34,11 +34,17 @@ def build_api_client(betfair_creds: dict[str, Any]) -> betfairlightweight.APICli
     certs_dir_raw = (betfair_creds.get("certs_dir") or "").strip()
 
     if not username:
-        raise RuntimeError("Betfair cert login requires betfair.username in credentials.")
+        raise RuntimeError(
+            "Betfair cert login requires betfair.username in credentials."
+        )
     if not password:
-        raise RuntimeError("Betfair cert login requires betfair.password in credentials.")
+        raise RuntimeError(
+            "Betfair cert login requires betfair.password in credentials."
+        )
     if not app_key:
-        raise RuntimeError("Betfair cert login requires betfair.app_key in credentials.")
+        raise RuntimeError(
+            "Betfair cert login requires betfair.app_key in credentials."
+        )
     if not certs_dir_raw:
         raise RuntimeError(
             "Betfair cert login requires betfair.certs_dir in credentials.json "

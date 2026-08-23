@@ -179,7 +179,9 @@ def _to_utc_datetime(value: DateLike, *, end_of_day: bool) -> datetime:
     # plain date
     if end_of_day:
         next_day = value + timedelta(days=1)
-        return datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc)
+        return datetime(
+            next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc
+        )
     return datetime(value.year, value.month, value.day, 0, 0, 0, tzinfo=timezone.utc)
 
 
@@ -199,22 +201,44 @@ def _build_datetime_chunks(
     result: list[tuple[datetime, datetime]] = []
     last = len(date_chunks) - 1
     for i, (cf, ct) in enumerate(date_chunks):
-        c_from = from_dt if i == 0 else datetime(cf.year, cf.month, cf.day, 0, 0, 0, tzinfo=timezone.utc)
+        c_from = (
+            from_dt
+            if i == 0
+            else datetime(cf.year, cf.month, cf.day, 0, 0, 0, tzinfo=timezone.utc)
+        )
         if i == last:
             c_to = to_dt
         else:
             next_day = ct + timedelta(days=1)
-            c_to = datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc)
+            c_to = datetime(
+                next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc
+            )
         result.append((c_from, c_to))
     return result
 
 
 _REQUIRED_CLEARED_ORDER_COLS: list[str] = [
-    "eventTypeId", "eventId", "marketId", "selectionId", "handicap", "betId",
-    "placedDate", "persistenceType", "orderType", "side", "betOutcome",
-    "priceRequested", "settledDate", "lastMatchedDate", "betCount",
-    "priceMatched", "priceReduced", "sizeSettled", "profit",
-    "customerOrderRef", "customerStrategyRef",
+    "eventTypeId",
+    "eventId",
+    "marketId",
+    "selectionId",
+    "handicap",
+    "betId",
+    "placedDate",
+    "persistenceType",
+    "orderType",
+    "side",
+    "betOutcome",
+    "priceRequested",
+    "settledDate",
+    "lastMatchedDate",
+    "betCount",
+    "priceMatched",
+    "priceReduced",
+    "sizeSettled",
+    "profit",
+    "customerOrderRef",
+    "customerStrategyRef",
 ]
 
 
@@ -228,7 +252,10 @@ def _normalize_cleared_orders_df(df_co: pd.DataFrame) -> pd.DataFrame:
     for c in _REQUIRED_CLEARED_ORDER_COLS:
         if c not in df_co.columns:
             df_co[c] = pd.NA
-    df_co = df_co[_REQUIRED_CLEARED_ORDER_COLS + [c for c in df_co.columns if c not in _REQUIRED_CLEARED_ORDER_COLS]]
+    df_co = df_co[
+        _REQUIRED_CLEARED_ORDER_COLS
+        + [c for c in df_co.columns if c not in _REQUIRED_CLEARED_ORDER_COLS]
+    ]
 
     def determine_win(row: pd.Series) -> int:
         if (row["side"] == "BACK" and row["betOutcome"] == "LOST") or (
@@ -621,8 +648,12 @@ def enrich_with_market_catalogue(
 
     if not df_new_cache.empty:
         # Columns that may already exist from itemDescription extraction
-        overlap_cols = [c for c in df_new_cache.columns if c != "marketId" and c in df_work.columns]
-        df_out = df_work.merge(df_new_cache, on="marketId", how="left", suffixes=("", "_cat"))
+        overlap_cols = [
+            c for c in df_new_cache.columns if c != "marketId" and c in df_work.columns
+        ]
+        df_out = df_work.merge(
+            df_new_cache, on="marketId", how="left", suffixes=("", "_cat")
+        )
 
         # Coalesce: prefer itemDescription values, fall back to catalogue
         for col in overlap_cols:
@@ -745,13 +776,19 @@ def archive_old_canonical_rows(
     Archives are deduplicated on append, so re-running after a partial failure
     is safe. ``archive_months <= 0`` disables archival.
     """
-    if archive_months <= 0 or df_canonical.empty or "settledDate" not in df_canonical.columns:
+    if (
+        archive_months <= 0
+        or df_canonical.empty
+        or "settledDate" not in df_canonical.columns
+    ):
         return df_canonical
 
     settled = pd.to_datetime(
         df_canonical["settledDate"], utc=True, errors="coerce", format="ISO8601"
     )
-    cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(months=archive_months)
+    cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(
+        months=archive_months
+    )
     old_mask = settled.notna() & (settled < cutoff)
     if not old_mask.any():
         return df_canonical
@@ -807,7 +844,10 @@ def write_csv_outputs(
 
     df_canonical = pd.read_csv(canonical_path)
     df_trimmed = archive_old_canonical_rows(
-        df_canonical, results_csv_dir, archive_months=archive_months, status_cb=status_cb
+        df_canonical,
+        results_csv_dir,
+        archive_months=archive_months,
+        status_cb=status_cb,
     )
     if len(df_trimmed) < len(df_canonical):
         tmp_path = canonical_path.with_suffix(canonical_path.suffix + ".tmp")

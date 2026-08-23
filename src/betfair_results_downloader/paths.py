@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 
-_ONEDRIVE_RELATIVE = Path("BF Documentation") / "BF Results and Analysis" / "Results Database"
+_ONEDRIVE_RELATIVE = (
+    Path("BF Documentation") / "BF Results and Analysis" / "Results Database"
+)
 
 
 def get_results_database_dir() -> Path:
@@ -19,7 +21,11 @@ def get_results_database_dir() -> Path:
 
     if system == "Darwin":
         candidates = [
-            Path.home() / "Library" / "CloudStorage" / "OneDrive-Personal" / _ONEDRIVE_RELATIVE,
+            Path.home()
+            / "Library"
+            / "CloudStorage"
+            / "OneDrive-Personal"
+            / _ONEDRIVE_RELATIVE,
             Path.home() / "OneDrive" / _ONEDRIVE_RELATIVE,
         ]
     elif system == "Windows":

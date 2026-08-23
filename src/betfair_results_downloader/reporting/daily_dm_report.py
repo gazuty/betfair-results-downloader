@@ -50,7 +50,9 @@ def _format_heading(dt: datetime) -> str:
     return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}, {hour12}:{dt.minute:02d} {meridiem}"
 
 
-def _format_report(report_dt: datetime, week_to_date: ProfitBreakdown, day_to_date: ProfitBreakdown) -> str:
+def _format_report(
+    report_dt: datetime, week_to_date: ProfitBreakdown, day_to_date: ProfitBreakdown
+) -> str:
     heading = _format_heading(report_dt)
     lines = [
         "Betfair results update",
@@ -86,7 +88,9 @@ def _most_recent_sunday_start(report_dt: datetime) -> datetime:
 
 def _profit_breakdown(df: pd.DataFrame) -> ProfitBreakdown:
     if df.empty:
-        return ProfitBreakdown(total_profit=0.0, horses_profit=0.0, greyhounds_profit=0.0)
+        return ProfitBreakdown(
+            total_profit=0.0, horses_profit=0.0, greyhounds_profit=0.0
+        )
 
     total_profit = float(df["profit"].sum())
     horses_profit = float(df.loc[df["sport"] == HORSES_LABEL, "profit"].sum())
@@ -154,7 +158,11 @@ def build_daily_dm_report_from_results_dir(
     report_dt: datetime | None = None,
     csv_path: str | None = None,
 ) -> DailyDmReport:
-    chosen = Path(csv_path).expanduser() if csv_path else resolve_default_results_csv(results_dir)
+    chosen = (
+        Path(csv_path).expanduser()
+        if csv_path
+        else resolve_default_results_csv(results_dir)
+    )
     df_raw = load_csv(str(chosen))
     return build_daily_dm_report_from_dataframe(
         df_raw,

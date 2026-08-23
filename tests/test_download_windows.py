@@ -1,4 +1,5 @@
 """Tests for half-open download windows and the paginated fetch loop."""
+
 from __future__ import annotations
 
 import json

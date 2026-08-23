@@ -17,6 +17,7 @@ Storage mechanisms:
 All public functions are designed to be called from ``runner.py`` and
 ``gap_detector.py``; they never crash the caller on transient failures.
 """
+
 from __future__ import annotations
 
 import json
@@ -87,7 +88,9 @@ def _coerce_optional_datetime(value: Any) -> Optional[datetime]:
 def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
     user_id = _get_db_user_id(creds)
     if not user_id:
-        logger.warning("Cannot read ScheduleState: db_user_id / user_id not set in credentials.")
+        logger.warning(
+            "Cannot read ScheduleState: db_user_id / user_id not set in credentials."
+        )
         return None
 
     conn = _open_azure_connection(creds)
@@ -109,8 +112,12 @@ def read_schedule_state(creds: dict[str, Any]) -> Optional[ScheduleStateRow]:
                 return None
             return ScheduleStateRow(
                 user_id=str(row[0]),
-                last_covered_date_utc=row[1].date() if isinstance(row[1], datetime) else row[1],
-                last_covered_date_local=row[2].date() if isinstance(row[2], datetime) else row[2],
+                last_covered_date_utc=row[1].date()
+                if isinstance(row[1], datetime)
+                else row[1],
+                last_covered_date_local=row[2].date()
+                if isinstance(row[2], datetime)
+                else row[2],
                 last_covered_timezone=str(row[3]) if row[3] is not None else None,
                 last_confirmed_settled_at_utc=_coerce_optional_datetime(row[4]),
                 last_successful_download_started_utc=_coerce_optional_datetime(row[5]),
@@ -149,19 +156,34 @@ def upsert_schedule_state(
         return False
 
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    started = run_started_utc.astimezone(timezone.utc).replace(tzinfo=None) if run_started_utc else now_utc
-    finished = run_finished_utc.astimezone(timezone.utc).replace(tzinfo=None) if run_finished_utc else now_utc
+    started = (
+        run_started_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        if run_started_utc
+        else now_utc
+    )
+    finished = (
+        run_finished_utc.astimezone(timezone.utc).replace(tzinfo=None)
+        if run_finished_utc
+        else now_utc
+    )
     confirmed = (
         last_confirmed_settled_at_utc.astimezone(timezone.utc).replace(tzinfo=None)
-        if last_confirmed_settled_at_utc else None
+        if last_confirmed_settled_at_utc
+        else None
     )
     download_started = (
-        last_successful_download_started_utc.astimezone(timezone.utc).replace(tzinfo=None)
-        if last_successful_download_started_utc else None
+        last_successful_download_started_utc.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+        if last_successful_download_started_utc
+        else None
     )
     download_finished = (
-        last_successful_download_finished_utc.astimezone(timezone.utc).replace(tzinfo=None)
-        if last_successful_download_finished_utc else None
+        last_successful_download_finished_utc.astimezone(timezone.utc).replace(
+            tzinfo=None
+        )
+        if last_successful_download_finished_utc
+        else None
     )
     truncated_message = (message or "")[:1000]
 
@@ -256,7 +278,9 @@ def _marker_filename(marker_date: date, marker_namespace: str = "local") -> str:
     return f"last_success_{marker_namespace}_{marker_date.isoformat()}.marker"
 
 
-def write_today_success_marker(log_dir: str | Path, today_date: date, marker_namespace: str = "local") -> None:
+def write_today_success_marker(
+    log_dir: str | Path, today_date: date, marker_namespace: str = "local"
+) -> None:
     if not log_dir:
         logger.debug("write_today_success_marker: log_dir empty, skipping.")
         return

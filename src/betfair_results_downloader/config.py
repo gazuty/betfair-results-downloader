@@ -27,7 +27,7 @@ class ScheduleConfig:
 
 
 def parse_schedule_config(creds: dict[str, Any]) -> ScheduleConfig:
-    s: dict[str, Any] = (creds.get("schedule") or {})
+    s: dict[str, Any] = creds.get("schedule") or {}
     raw_retry = s.get("retry_times", ["09:00", "19:00", "23:00"])
     return ScheduleConfig(
         enabled=bool(s.get("enabled", False)),

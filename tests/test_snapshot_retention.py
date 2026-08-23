@@ -78,9 +78,7 @@ def test_write_csv_outputs_writes_gz_snapshot_and_prunes(tmp_path: Path):
     assert snapshot_df["betId"].iloc[0] == 1
 
     snapshots = [
-        p
-        for p in tmp_path.iterdir()
-        if p.name.startswith("cleared_orders_cleaned_")
+        p for p in tmp_path.iterdir() if p.name.startswith("cleared_orders_cleaned_")
     ]
     assert len(snapshots) == 5
 

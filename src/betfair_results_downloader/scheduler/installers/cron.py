@@ -18,6 +18,7 @@ Example for primary=06:00, retries=09:00,19:00,23:00::
     # BETFAIR_RESULTS_SCHEDULER
     0 6,9,19,23 * * * cd /path/to/repo && /path/to/python -m betfair_results_downloader run >> /path/to/outputs/cron.log 2>&1 # BETFAIR_RESULTS_SCHEDULER
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -183,16 +184,19 @@ class CronInstaller:
         cleaned = _strip_managed_lines(existing_result.stdout.splitlines())
 
         new_crontab = "\n".join(cleaned).strip() + "\n"
-        subprocess.run(["crontab", "-"], input=new_crontab, capture_output=True, text=True)
+        subprocess.run(
+            ["crontab", "-"], input=new_crontab, capture_output=True, text=True
+        )
         return {"ok": True, "message": "Betfair Results crontab entry removed."}
 
     def status(self) -> dict[str, Any]:
-        result = subprocess.run(
-            ["crontab", "-l"], capture_output=True, text=True
-        )
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         if result.returncode != 0:
             return {
-                "installed": False, "loaded": False, "pid": None, "last_exit": None,
+                "installed": False,
+                "loaded": False,
+                "pid": None,
+                "last_exit": None,
                 "message": "No crontab found.",
             }
         installed = MARKER_COMMENT in result.stdout
@@ -208,6 +212,7 @@ class CronInstaller:
 
     def logs(self, log_dir: Path, tail_n: int = 50) -> str:
         import json
+
         output_parts: list[str] = []
 
         jsonl_path = log_dir / "run_history.jsonl"
