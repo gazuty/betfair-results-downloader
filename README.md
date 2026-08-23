@@ -6,7 +6,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 
 ## Features
 
-- **Headless CLI downloader** — `betfair-results run / backfill` with structured logs and idempotent re-runs
+- **Headless CLI downloader** — `betfair-results run / backfill / audit` with structured logs, idempotent re-runs, and settled-date gap auditing
 - **CSV outputs** — canonical file plus dated gzip snapshots, idempotent updates, safe to re-run
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
@@ -43,11 +43,12 @@ Scheduled runs compute their own incremental window via gap detection (see [Gap 
 
 ### Run logs
 
-Each run persists a full log transcript for debugging:
-
-`<results_csv_dir>/run_logs/run_YYYYMMDD_HHMMSS.txt`
-
-These logs are written in UTF-8 with ASCII-safe status lines.
+Every run (scheduled or backfill) appends a structured record to
+`outputs/run_history.jsonl` (or `schedule.log_dir` when set) — including
+failed runs, so the history is a complete operational record. Scheduled runs
+also emit human-readable log lines to stdout, captured by the platform
+scheduler (e.g. `outputs/launchd.out.log` / `launchd.err.log` on macOS).
+Inspect recent activity with `betfair-results schedule logs --tail 50`.
 
 ---
 
@@ -98,9 +99,6 @@ The resolver handles `~` expansion and relative paths. See [`secrets.py`](src/be
   },
   "user": {
     "user_id": "YourName",
-    "days": 7,
-    "include_horses": true,
-    "include_greyhounds": true,
     "enable_azure_sql": false,
     "dry_run": true
   },
@@ -254,10 +252,6 @@ All four gates must be open before any row is written to `dbo.MarketResults` (se
 
 If any gate is closed, the run completes as a dry run with no database writes.
 
-#### Publish-only flow
-
-`publish_to_azure_from_canonical_incremental()` in [`run.py`](src/betfair_results_downloader/run.py) reads the existing canonical CSV and syncs it incrementally to Azure without re-downloading from Betfair. Same safety gates apply.
-
 #### Scope restriction
 
 Azure publishing is restricted in code to:
@@ -328,15 +322,16 @@ python -m betfair_results_downloader run
 
 **What it does:**
 
-1. Computes the incremental download window via gap detection (see [Gap Detection](#gap-detection-logic)).
-2. Uses the latest confirmed settled timestamp as the primary checkpoint, with canonical CSV fallback and a configurable safety overlap.
-3. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`).
-4. Enriches with market catalogue (uses cache).
-5. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
-6. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)).
-7. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp, writes audit markers, appends to `run_history.jsonl`.
+1. Validates credentials up front (including the `schedule` section) and exits with the collected errors on bad configuration.
+2. Computes the incremental download window via gap detection (see [Gap Detection](#gap-detection-logic)).
+3. Uses the latest confirmed settled timestamp as the primary checkpoint, with canonical CSV fallback and a configurable safety overlap.
+4. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`; chunk windows are half-open and contiguous so no instant falls between chunks).
+5. Enriches with market catalogue (uses cache, timeout retry; enrichment failure is non-fatal — CSVs are still written).
+6. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
+7. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
+8. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
 
-Exit codes: `0` = success · `1` = failure.
+Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
 
 Output: structured log lines to stdout (human-readable, one-per-event format).
 
@@ -350,9 +345,25 @@ Downloads an explicit date range. No skip-marker check; does not advance schedul
 python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD
 ```
 
-Both `--from` and `--to` are required and inclusive. Azure publish gates apply.
+Both `--from` and `--to` are required and inclusive (the final day is covered
+through to midnight). Azure publish gates apply.
 
-Exit codes: `0` = success · `1` = failure · `2` = bad arguments.
+Exit codes: `0` = success · `1` = failure · `2` = bad arguments or configuration.
+
+### `audit`
+
+**Status:** ✅ Implemented
+
+Reports missing settled-date gaps in the canonical CSV so you know exactly
+what to backfill.
+
+```bash
+python -m betfair_results_downloader audit [--window DAYS]
+```
+
+Scans `cleared_orders_cleaned.csv` in the resolved results directory over the
+last `--window` days (default 90 — Betfair's maximum backfill) and prints any
+missing calendar-day ranges with ready-to-run backfill suggestions.
 
 ### `dm-report`
 
@@ -580,14 +591,18 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 |---|---|---|---|---|
 | `user_id` | string | `"YourUserName"` | ✅ | Display name used in logs |
 | `db_user_id` | string | *(falls back to `user_id`)* | Only if publishing to Azure | Explicit UserID key for the `MarketResults` table |
-| `days` | integer | `7` | ✅ | Default lookback window in days |
-| `include_horses` | bool | `true` | ✅ | Include `eventTypeId=7` in downloads |
-| `include_greyhounds` | bool | `true` | ✅ | Include `eventTypeId=4339` in downloads |
 | `enable_azure_sql` | bool | `false` | ✅ | Master toggle for Azure publishing |
 | `dry_run` | bool | `true` | ✅ | Second safety gate — must be `false` to actually write to DB |
 | `snapshot_retention_days` | integer | `14` | Optional | Number of dated snapshot files to keep; older snapshots are deleted after each run. Set to `0` to disable pruning |
 | `compress_snapshots` | bool | `true` | Optional | Write dated snapshots as gzip (`.csv.gz`, ~18× smaller). The canonical CSV is always uncompressed |
 | `canonical_archive_months` | integer | `12` | Optional | Rows settled longer ago than this move from the canonical CSV into yearly `cleared_orders_archive_YYYY.csv.gz` files after each run. Set to `0` to disable archival |
+
+> **Note:** downloads always fetch *all* settled orders on the account; sport
+> filtering happens only at Azure-publish time, which is fixed in code to
+> Horse Racing (7) and Greyhound Racing (4339). The former
+> `days` / `include_horses` / `include_greyhounds` fields were GUI-era
+> settings with no remaining effect and have been removed (they are ignored
+> if still present in an old credentials file).
 
 ### `paths` (required)
 
@@ -609,7 +624,6 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
 | `allow_azure_publish` | bool | `false` | Explicit second gate for scheduler Azure writes (see [Safety Gates](#azure-publish-safety-gates-scheduled-mode)) |
 | `max_backfill_days` | int | `90` | Maximum days to back-fill in a single run; must be ≤ 365 |
 | `chunk_days` | int | `30` | Betfair API window size in days; must be ≤ 90 |
-| `min_coverage_overlap_days` | int | `1` | Legacy day-based overlap setting retained for compatibility |
 | `min_overlap_hours` | int | `2` | Hours to rewind before the last confirmed settled timestamp for safety overlap |
 | `log_dir` | string | `""` | Directory for `run_history.jsonl`, `last_success_local_*.marker`, and `last_success_utc_*.marker` files (defaults to `outputs/` when empty) |
 | `history_file` | string | `""` | Override path for `run_history.jsonl` (derived from `log_dir` when empty) |
@@ -638,11 +652,11 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
   "user": {
     "user_id": "JoBloggs",
     "db_user_id": "JoBloggs",
-    "days": 7,
-    "include_horses": true,
-    "include_greyhounds": true,
     "enable_azure_sql": false,
-    "dry_run": true
+    "dry_run": true,
+    "snapshot_retention_days": 14,
+    "compress_snapshots": true,
+    "canonical_archive_months": 12
   },
   "paths": {
     "results_csv_dir": "/Users/me/OneDrive/BF/Results Database"
@@ -702,8 +716,8 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 
 Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:
 
-- **Source of truth for "last covered date":** new `dbo.ScheduleState` Azure table + canonical CSV fallback
-- **Retry pattern:** primary run at user-configured time (default `06:00`) with automatic retries at `09:00`, `19:00`, `23:00`; each window checks whether the day has already been covered and skips silently if so
+- **Source of truth for the incremental checkpoint:** `dbo.ScheduleState.LastConfirmedSettledAtUtc` + canonical CSV fallback
+- **Retry pattern:** primary run at user-configured time (default `06:00`) with additional windows at `09:00`, `19:00`, `23:00`; every window performs a real incremental download from the timestamp checkpoint (day-level skip suppression was retired with the intraday checkpoint redesign)
 - **Safety:** four-gate Azure publish model (`enable_azure_sql` + `dry_run=false` + `schedule.publish_to_azure` + `schedule.allow_azure_publish`)
 - **Auth:** cert-based only — shipped in Phase 1.1, verified via `auth-test`
 - **Concurrency:** two-machine concurrent runs are accepted as safe due to full idempotency (`betId` dedupe + `(UserID, MarketID)` incremental sync)
@@ -715,20 +729,16 @@ Full design document (architecture, config schema, safety gates, state model, er
 
 ```
 src/betfair_results_downloader/
-  run.py                  # Shared pipeline entry (run + publish-only)
-  pipeline.py             # 4-phase orchestration: download → enrich → CSV → Azure
   downloader_core.py      # Betfair API calls, enrichment, chunked range download
   azure_publish.py        # Azure SQL incremental sync plan + apply
   azure_remediation.py    # User-scoped Azure recovery tools
+  azure_common.py         # Shared Azure ODBC connection-string builder
   csv_utils.py            # Canonical CSV dedupe + atomic write
-  recommend.py            # Lookback recommendation from existing CSV
-  audit.py                # Settled-date gap analysis
-  state.py                # Run state persistence (run_state.json)
-  run_logging.py          # Per-run log transcript writer
+  audit.py                # Settled-date gap analysis (backs the `audit` command)
   secrets.py              # Credentials resolver + validator
-  config.py               # DownloaderConfig + ScheduleConfig dataclasses
+  config.py               # ScheduleConfig dataclass + event type constants
   paths.py                # Cross-platform OneDrive path resolver
-  __main__.py             # CLI entry point (auth-test, run, backfill, schedule)
+  __main__.py             # CLI entry point (auth-test, run, backfill, audit, schedule, dm-report)
   scheduler/              # Scheduled-downloads package
     auth.py               # build_api_client() — cert-based login
     date_windows.py       # chunk_date_range() — safe API windowing
