@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.7.0] - 2026-08-23
+
+Full-repository code review and remediation (PR #13). The review document
+with findings and rationale lives at `docs/reviews/2026-08-23-full-code-review.md`.
+
 ### Fixed
 
 - **Failed Azure publishes were recorded as published.** `publish_to_azure_sql` swallows its own exceptions into the result, and the scheduler read `attempted` as success — so a persistently failing publish still produced `azure=published` in `run_history.jsonl` and advanced `ScheduleState`. `AzurePublishResult` now carries `ok` (attempted = writes tried, ok = no error) and a failed publish records the run as `partial`.
@@ -46,7 +53,7 @@
 - **Completed one-off scripts** — the itemDescription backfill/enrichment set and the Azure remediation wrapper scripts (logic lives on in `azure_remediation.py` and git history). The tested `ScheduleState` DDL scripts and `render_dm_report.sh` remain.
 - **Per-version `RELEASE_NOTES_*.md` files** — release notes are now sections in this changelog.
 
-### Fixed
+### Fixed (pre-review cleanup)
 
 - **Unused imports in `scripts/backfill_item_descriptions.py`** that broke CI lint on `main` (ruff F401).
 - **Timestamp parsing warning** — the archival and dedupe sort-key paths now parse round-tripped CSV timestamps with `format="ISO8601"`, handling both historical renderings of the same instant (`2026-07-13 04:58:46+00:00` and `2026-07-13T04:58:46Z`) without the per-element dateutil fallback.
