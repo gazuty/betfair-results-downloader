@@ -10,6 +10,7 @@ time (primary + retries), then registers/removes the task via
 Uses ``pythonw.exe`` (not ``python.exe``) to avoid a console window flash
 when the scheduled task fires.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -118,6 +119,7 @@ def build_task_xml(
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
     from io import BytesIO
+
     buf = BytesIO()
     tree.write(buf, encoding="utf-16", xml_declaration=True)
     return buf.getvalue().decode("utf-16")
@@ -157,9 +159,9 @@ class TaskSchedulerInstaller:
             }
 
         result = subprocess.run(
-            ["schtasks", "/Create", "/XML", str(xml_path),
-             "/TN", TASK_NAME, "/F"],
-            capture_output=True, text=True,
+            ["schtasks", "/Create", "/XML", str(xml_path), "/TN", TASK_NAME, "/F"],
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return {
@@ -178,10 +180,14 @@ class TaskSchedulerInstaller:
 
     def uninstall(self, dry_run: bool = False) -> dict[str, Any]:
         if dry_run:
-            return {"ok": True, "message": f"Would delete task '{TASK_NAME}' (dry-run)."}
+            return {
+                "ok": True,
+                "message": f"Would delete task '{TASK_NAME}' (dry-run).",
+            }
         result = subprocess.run(
             ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return {
@@ -193,7 +199,8 @@ class TaskSchedulerInstaller:
     def status(self) -> dict[str, Any]:
         result = subprocess.run(
             ["schtasks", "/Query", "/TN", TASK_NAME, "/FO", "LIST"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return {
@@ -213,6 +220,7 @@ class TaskSchedulerInstaller:
 
     def logs(self, log_dir: Path, tail_n: int = 50) -> str:
         import json
+
         output_parts: list[str] = []
         jsonl_path = log_dir / "run_history.jsonl"
         if jsonl_path.exists():

@@ -1,4 +1,5 @@
 """Tests for Phase 3.1: macOS launchd installer."""
+
 from __future__ import annotations
 
 import plistlib
@@ -22,6 +23,7 @@ from betfair_results_downloader.scheduler.installers.launchd import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _cfg(**overrides) -> ScheduleConfig:
     defaults = dict(
         enabled=True,
@@ -32,7 +34,6 @@ def _cfg(**overrides) -> ScheduleConfig:
         allow_azure_publish=False,
         max_backfill_days=90,
         chunk_days=30,
-        min_coverage_overlap_days=1,
         log_dir="",
         history_file="",
     )
@@ -43,6 +44,7 @@ def _cfg(**overrides) -> ScheduleConfig:
 # ---------------------------------------------------------------------------
 # _parse_hh_mm
 # ---------------------------------------------------------------------------
+
 
 class TestParseHhMm:
     def test_valid_time(self) -> None:
@@ -61,6 +63,7 @@ class TestParseHhMm:
 # ---------------------------------------------------------------------------
 # _build_calendar_intervals
 # ---------------------------------------------------------------------------
+
 
 class TestBuildCalendarIntervals:
     def test_primary_plus_retries(self) -> None:
@@ -93,6 +96,7 @@ class TestBuildCalendarIntervals:
 # build_plist
 # ---------------------------------------------------------------------------
 
+
 class TestBuildPlist:
     def test_plist_keys_present(self, tmp_path: Path) -> None:
         cfg = _cfg()
@@ -103,7 +107,9 @@ class TestBuildPlist:
 
         assert plist["Label"] == LABEL
         assert "ProgramArguments" in plist
-        assert "betfair_results_downloader" in " ".join(str(a) for a in plist["ProgramArguments"])
+        assert "betfair_results_downloader" in " ".join(
+            str(a) for a in plist["ProgramArguments"]
+        )
         assert "run" in plist["ProgramArguments"]
         assert str(repo) == plist["WorkingDirectory"]
         assert "StartCalendarInterval" in plist
@@ -142,6 +148,7 @@ class TestBuildPlist:
 # LaunchdInstaller — install / uninstall (dry-run, no launchctl)
 # ---------------------------------------------------------------------------
 
+
 class TestLaunchdInstallerDryRun:
     def test_install_dry_run_writes_plist(self, tmp_path: Path) -> None:
         cfg = _cfg()
@@ -151,10 +158,16 @@ class TestLaunchdInstallerDryRun:
         plist_target = tmp_path / "com.betfair.results.scheduler.plist"
         agents_target = tmp_path
 
-        with patch("betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
-                   plist_target), \
-             patch("betfair_results_downloader.scheduler.installers.launchd.AGENTS_DIR",
-                   agents_target):
+        with (
+            patch(
+                "betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
+                plist_target,
+            ),
+            patch(
+                "betfair_results_downloader.scheduler.installers.launchd.AGENTS_DIR",
+                agents_target,
+            ),
+        ):
             result = installer.install(
                 schedule_cfg=cfg,
                 repo_root=tmp_path,
@@ -174,8 +187,10 @@ class TestLaunchdInstallerDryRun:
         plist_target.write_bytes(b"placeholder")
 
         installer = LaunchdInstaller()
-        with patch("betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
-                   plist_target):
+        with patch(
+            "betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
+            plist_target,
+        ):
             result = installer.uninstall(dry_run=True)
 
         assert result["ok"] is True
@@ -183,8 +198,10 @@ class TestLaunchdInstallerDryRun:
 
     def test_uninstall_when_not_installed(self) -> None:
         installer = LaunchdInstaller()
-        with patch("betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
-                   Path("/nonexistent/nowhere.plist")):
+        with patch(
+            "betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
+            Path("/nonexistent/nowhere.plist"),
+        ):
             result = installer.uninstall(dry_run=True)
         assert result["ok"] is True
         assert "nothing to uninstall" in result["message"].lower()
@@ -194,10 +211,16 @@ class TestLaunchdInstallerDryRun:
         plist_target = tmp_path / f"{LABEL}.plist"
 
         installer = LaunchdInstaller()
-        with patch("betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
-                   plist_target), \
-             patch("betfair_results_downloader.scheduler.installers.launchd.AGENTS_DIR",
-                   tmp_path):
+        with (
+            patch(
+                "betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
+                plist_target,
+            ),
+            patch(
+                "betfair_results_downloader.scheduler.installers.launchd.AGENTS_DIR",
+                tmp_path,
+            ),
+        ):
             installer.install(
                 schedule_cfg=cfg,
                 repo_root=tmp_path,

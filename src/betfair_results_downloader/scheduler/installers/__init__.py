@@ -9,6 +9,7 @@ Each backend implements ``install``, ``uninstall``, ``status``, and ``logs``
 with a consistent interface so ``__main__.py`` doesn't need to know which
 platform it's on.
 """
+
 from __future__ import annotations
 
 import platform
@@ -29,18 +30,22 @@ def get_installer():
 
     if system == "Darwin":
         from .launchd import LaunchdInstaller
+
         return LaunchdInstaller()
 
     if system == "Windows":
         from .taskscheduler import TaskSchedulerInstaller
+
         return TaskSchedulerInstaller()
 
     if system == "Linux":
         # Prefer systemd --user if available, fall back to cron
         if _systemd_available():
             from .systemd_user import SystemdUserInstaller
+
             return SystemdUserInstaller()
         from .cron import CronInstaller
+
         return CronInstaller()
 
     raise RuntimeError(
@@ -53,4 +58,5 @@ def get_installer():
 def _systemd_available() -> bool:
     """Return True if systemd --user appears to be available on this Linux system."""
     import shutil
+
     return shutil.which("systemctl") is not None

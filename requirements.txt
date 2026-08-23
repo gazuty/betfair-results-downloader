@@ -3,6 +3,5 @@
 betfairlightweight
 pandas>=2.0
 numpy
-SQLAlchemy
 pyodbc
 ipykernel

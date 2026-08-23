@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - environment-dependent native import
 if TYPE_CHECKING:
     import pyodbc as pyodbc_types
 
+from .azure_common import build_conn_str as _build_conn_str
 from .secrets import credentials_path, get_nested, load_credentials
 
 
@@ -26,20 +27,6 @@ class RowIdentifier:
 def _ensure_credentials_file(path: Path) -> None:
     if not path.exists():
         raise SystemExit(f"Credentials file not found: {path}")
-
-
-def _build_conn_str(azsql: dict[str, Any]) -> str:
-    port = azsql.get("port", 1433)
-    return (
-        f"DRIVER={{{azsql['driver']}}};"
-        f"SERVER={azsql['server']},{port};"
-        f"DATABASE={azsql['database']};"
-        f"UID={azsql['username']};"
-        f"PWD={azsql['password']};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
-    )
 
 
 def _require(value: str | None, *, field: str) -> str:

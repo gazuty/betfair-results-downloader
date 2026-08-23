@@ -10,6 +10,7 @@ it via ``launchctl bootstrap``/``bootout``.
 Plist label: ``com.betfair.results.scheduler``
 Plist path:  ``~/Library/LaunchAgents/com.betfair.results.scheduler.plist``
 """
+
 from __future__ import annotations
 
 import os
@@ -196,7 +197,10 @@ class LaunchdInstaller:
             ``{"ok": bool, "message": str}``
         """
         if not PLIST_PATH.exists():
-            return {"ok": True, "message": f"Plist not found at {PLIST_PATH} — nothing to uninstall."}
+            return {
+                "ok": True,
+                "message": f"Plist not found at {PLIST_PATH} — nothing to uninstall.",
+            }
 
         if not dry_run:
             uid = _get_gui_uid()
@@ -210,9 +214,15 @@ class LaunchdInstaller:
         PLIST_PATH.unlink(missing_ok=True)
 
         if dry_run:
-            return {"ok": True, "message": f"Plist removed (dry-run, launchctl not called): {PLIST_PATH}"}
+            return {
+                "ok": True,
+                "message": f"Plist removed (dry-run, launchctl not called): {PLIST_PATH}",
+            }
 
-        return {"ok": True, "message": f"Uninstalled {LABEL}. Plist removed from {PLIST_PATH}."}
+        return {
+            "ok": True,
+            "message": f"Uninstalled {LABEL}. Plist removed from {PLIST_PATH}.",
+        }
 
     def status(self) -> dict[str, Any]:
         """
@@ -278,6 +288,7 @@ class LaunchdInstaller:
             Formatted log output.
         """
         import json
+
         output_parts: list[str] = []
 
         # run_history.jsonl
@@ -286,7 +297,9 @@ class LaunchdInstaller:
             try:
                 lines = jsonl_path.read_text(encoding="utf-8").splitlines()
                 recent = lines[-tail_n:]
-                output_parts.append(f"=== run_history.jsonl (last {len(recent)} entries) ===")
+                output_parts.append(
+                    f"=== run_history.jsonl (last {len(recent)} entries) ==="
+                )
                 for line in recent:
                     try:
                         data = json.loads(line)
@@ -306,9 +319,13 @@ class LaunchdInstaller:
         err_log = log_dir / "launchd.err.log"
         if err_log.exists():
             try:
-                lines = err_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                lines = err_log.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
                 recent = lines[-tail_n:]
-                output_parts.append(f"\n=== launchd.err.log (last {len(recent)} lines) ===")
+                output_parts.append(
+                    f"\n=== launchd.err.log (last {len(recent)} lines) ==="
+                )
                 output_parts.extend(f"  {ln}" for ln in recent)
             except Exception as exc:
                 output_parts.append(f"launchd.err.log: could not read ({exc})")

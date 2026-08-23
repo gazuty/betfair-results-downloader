@@ -5,9 +5,11 @@ Subcommands:
   auth-test     — cert-based non-interactive login test
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
   backfill      — explicit date-range download
+  audit         — report missing settled-date gaps in the canonical CSV
   schedule      — install/uninstall/status/logs for the platform scheduled job
   dm-report     — render the OpenClaw daily DM report from local CSV results
 """
+
 from __future__ import annotations
 
 import argparse
@@ -92,8 +94,15 @@ def _cmd_auth_test(_args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_creds_and_schedule():
-    """Load credentials and parse schedule config; shared by run/backfill."""
+def _load_creds_and_schedule(validate: bool = False):
+    """
+    Load credentials and parse schedule config; shared by the subcommands.
+
+    With ``validate=True``, run the full credential validation (including the
+    schedule section when ``schedule.enabled``) and exit 2 with the collected
+    errors — download commands should fail fast on bad configuration rather
+    than mid-run with a rawer error. Warnings are printed but not fatal.
+    """
     from .secrets import credentials_path, load_credentials
     from .config import parse_schedule_config
 
@@ -108,6 +117,18 @@ def _load_creds_and_schedule():
         print(f"FAIL: could not parse credentials.json: {type(e).__name__}: {e}")
         sys.exit(2)
 
+    if validate:
+        from .secrets import validate_credentials
+
+        v = validate_credentials(creds)
+        for warning in v.warnings:
+            print(f"WARN: {warning}")
+        if not v.ok:
+            print("FAIL: invalid credentials/configuration:")
+            for err in v.errors:
+                print(f"  - {err}")
+            sys.exit(2)
+
     schedule_cfg = parse_schedule_config(creds)
     return creds, schedule_cfg
 
@@ -116,27 +137,25 @@ def _cmd_run(_args: argparse.Namespace) -> int:
     """
     Run one scheduled download.
 
-    Checks today's success marker, computes the backfill window via gap
-    detection, downloads/enriches/writes CSV, and optionally publishes to
-    Azure SQL (four-gate model).
+    Validates credentials, computes the backfill window via gap detection
+    (Azure checkpoint → CSV fallback → cold start), downloads/enriches/
+    writes CSV, and optionally publishes to Azure SQL (four-gate model).
 
-    Exit codes: 0=success or skipped, 1=failure.
+    Exit codes: 0=success, 1=failure, 2=bad configuration.
     """
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    creds, schedule_cfg = _load_creds_and_schedule()
+    creds, schedule_cfg = _load_creds_and_schedule(validate=True)
 
     from .scheduler.runner import run_scheduled
-    result = run_scheduled(creds, schedule_cfg)
 
-    if result.skipped:
-        print(f"Skipped: {result.skip_reason}")
-        return 0
+    result = run_scheduled(creds, schedule_cfg)
 
     if result.ok:
         print(f"OK ({result.status}): {result.message}")
@@ -155,10 +174,11 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     Downloads/enriches/writes CSV for [--from, --to]. Does not update
     scheduler coverage dates (UTC or local) or write a success marker.
 
-    Exit codes: 0=success, 1=failure, 2=bad arguments.
+    Exit codes: 0=success, 1=failure, 2=bad arguments or configuration.
     """
     import logging
     from datetime import date
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -176,9 +196,10 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
         print(f"FAIL: invalid date format (expected YYYY-MM-DD): {e}")
         return 2
 
-    creds, schedule_cfg = _load_creds_and_schedule()
+    creds, schedule_cfg = _load_creds_and_schedule(validate=True)
 
     from .scheduler.runner import run_backfill
+
     result = run_backfill(creds, schedule_cfg, from_date, to_date)
 
     if result.ok:
@@ -189,6 +210,44 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     for err in result.errors:
         print(f"  - {err}")
     return 1
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """
+    Report missing settled-date gaps in the canonical CSV.
+
+    Scans ``cleared_orders_cleaned.csv`` in the resolved results directory
+    and prints any missing calendar days inside the audit window (bounded by
+    ``--window`` days back from today, default 90).
+
+    Exit codes: 0=report produced (gaps or not), 2=bad configuration.
+    """
+    from .audit import compute_missing_settled_dates
+    from .paths import resolve_results_dir
+
+    creds, _schedule_cfg = _load_creds_and_schedule()
+    results_dir = resolve_results_dir(creds)
+    canonical = results_dir / "cleared_orders_cleaned.csv"
+
+    result = compute_missing_settled_dates(canonical, window_days=args.window)
+
+    print(f"Canonical CSV : {canonical}")
+    if result.get("message"):
+        print(result["message"])
+        return 0
+
+    print(f"Audit window  : {result['window_start']} .. {result['window_end']}")
+    print(f"Data range    : {result['earliest']} .. {result['latest']}")
+    missing = result.get("missing_ranges") or []
+    if not missing:
+        print("No missing settled-date gaps found in the audit window.")
+        return 0
+
+    print(f"Missing days  : {result['num_missing']}")
+    for r in missing:
+        print(f"  - {r['start']} .. {r['end']} ({r['days']} day(s))")
+    print("Use 'betfair-results backfill --from ... --to ...' to fill a gap.")
+    return 0
 
 
 def _cmd_dm_report(args: argparse.Namespace) -> int:
@@ -244,6 +303,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     Actions: install | uninstall | status | logs [--tail N]
     """
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s — %(message)s",
@@ -256,6 +316,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
     try:
         from .scheduler.installers import get_installer
+
         installer = get_installer()
     except RuntimeError as exc:
         print(f"FAIL: {exc}")
@@ -266,17 +327,22 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     if action == "install":
         repo_root = Path(__file__).resolve().parents[2]
         import sys
+
         venv_python = Path(getattr(args, "python", None) or sys.executable)
 
         # Apply CLI time overrides to schedule config if provided
         if getattr(args, "time", None) or getattr(args, "retries", None):
             from dataclasses import replace
 
-            retry_list = [r.strip() for r in (args.retries or "").split(",") if r.strip()]
+            retry_list = [
+                r.strip() for r in (args.retries or "").split(",") if r.strip()
+            ]
             schedule_cfg = replace(
                 schedule_cfg,
                 primary_time=args.time or schedule_cfg.primary_time,
-                retry_times=tuple(retry_list) if retry_list else schedule_cfg.retry_times,
+                retry_times=tuple(retry_list)
+                if retry_list
+                else schedule_cfg.retry_times,
             )
 
         log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
@@ -308,6 +374,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
 
     if action == "logs":
         from pathlib import Path
+
         repo_root = Path(__file__).resolve().parents[2]
         log_dir_raw = schedule_cfg.log_dir or str(repo_root / "outputs")
         log_dir = Path(log_dir_raw).expanduser()
@@ -339,10 +406,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "backfill",
         help="Manual backfill for an explicit date range.",
     )
-    bf.add_argument("--from", dest="from_date", metavar="YYYY-MM-DD",
-                    help="Inclusive start date (required)")
-    bf.add_argument("--to", dest="to_date", metavar="YYYY-MM-DD",
-                    help="Inclusive end date (required)")
+    bf.add_argument(
+        "--from",
+        dest="from_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive start date (required)",
+    )
+    bf.add_argument(
+        "--to",
+        dest="to_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive end date (required)",
+    )
+    au = sub.add_parser(
+        "audit",
+        help="Report missing settled-date gaps in the canonical CSV.",
+    )
+    au.add_argument(
+        "--window",
+        type=int,
+        default=90,
+        metavar="DAYS",
+        help="Audit window in days back from today (default: 90)",
+    )
     dm = sub.add_parser(
         "dm-report",
         help="Render the OpenClaw daily DM report from local results CSV.",
@@ -367,12 +453,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Install, remove, or inspect the platform scheduled job.",
     )
     sch.add_argument("action", choices=["install", "uninstall", "status", "logs"])
-    sch.add_argument("--time", metavar="HH:MM",
-                     help="Override primary_time for this install (e.g. 07:00)")
-    sch.add_argument("--retries", metavar="HH:MM,...",
-                     help="Override retry_times (comma-separated, e.g. 10:00,20:00)")
-    sch.add_argument("--tail", type=int, default=50,
-                     help="Number of log lines to show for 'logs' action (default: 50)")
+    sch.add_argument(
+        "--time",
+        metavar="HH:MM",
+        help="Override primary_time for this install (e.g. 07:00)",
+    )
+    sch.add_argument(
+        "--retries",
+        metavar="HH:MM,...",
+        help="Override retry_times (comma-separated, e.g. 10:00,20:00)",
+    )
+    sch.add_argument(
+        "--tail",
+        type=int,
+        default=50,
+        help="Number of log lines to show for 'logs' action (default: 50)",
+    )
 
     return parser
 
@@ -387,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "backfill":
         return _cmd_backfill(args)
+    if args.command == "audit":
+        return _cmd_audit(args)
     if args.command == "dm-report":
         return _cmd_dm_report(args)
     if args.command == "schedule":

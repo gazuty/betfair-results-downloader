@@ -2,7 +2,44 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Failed Azure publishes were recorded as published.** `publish_to_azure_sql` swallows its own exceptions into the result, and the scheduler read `attempted` as success — so a persistently failing publish still produced `azure=published` in `run_history.jsonl` and advanced `ScheduleState`. `AzurePublishResult` now carries `ok` (attempted = writes tried, ok = no error) and a failed publish records the run as `partial`.
+- **Failed scheduled runs never reached `run_history.jsonl`.** Only the auth step was guarded; a download/enrich/CSV exception crashed the process before history was appended. `_run_pipeline` now converts any unhandled error into a failed `RunResult`, so every attempt — success or failure — is recorded.
+- **Sub-second blind spot at download-chunk boundaries.** Chunks ended at `23:59:59` and the next began at `00:00:00`; orders settled inside that final second could be skipped. Windows are now half-open and contiguous (each chunk's exclusive end is the next chunk's start), and date ranges cover the final day through to midnight. Scheduled runs were protected by the 2-hour overlap; `backfill` was not.
+- **Empty downloads advanced the settled-timestamp checkpoint to "now".** An empty run confirmed nothing but still asserted coverage. The runner now passes no checkpoint, and the `ScheduleState` MERGE keeps the stored value (`LastConfirmedSettledAtUtc` is now monotonic non-decreasing; the MERGE also runs `WITH (HOLDLOCK)` to close the classic two-machine upsert race).
+- **`dm-report` headings broke on Windows** — `%-d`/`%-I` are glibc-only strftime codes; the heading is now formatted portably with identical output.
+- **`run`/`backfill` never validated credentials.** The schedule-section validation (cert files present, timezone, HH:MM formats, bounds) only ran from GUI-era dead code. Both commands now validate up front and exit 2 with the collected errors.
+- **Missing `pyodbc` produced a cryptic publish error** (`'NoneType' object has no attribute 'connect'`); the publisher now reports an actionable install message.
+- **cron installer ignored retry-time minutes** — all retries were forced onto the primary time's minute. Times are now grouped by minute (one cron line per distinct minute), with backward-compatible replacement of old-format crontab entries.
+
+### Added
+
+- **`audit` CLI subcommand** — `betfair-results audit [--window DAYS]` reports missing settled-date gaps in the canonical CSV with ready-to-run backfill suggestions (exposes the existing `audit.py` analysis).
+- **Enrichment retry + salvage** — `listMarketCatalogue` calls get the same TIMEOUT_ERROR retry/backoff as cleared orders; a mid-fetch failure caches and merges the rows fetched so far and is reported in the result instead of aborting the run. Enrichment failure is non-fatal to scheduled runs (CSVs are still written).
+- **`LICENSE` (MIT)** and project metadata (license, authors, classifiers) in `pyproject.toml`.
+- **Pinned ruff lint rule selection** in `pyproject.toml` so CI lint results no longer change when a newer ruff ships different defaults (ruff 0.16 broke previously-green runs with 216 new-rule findings).
+- **CI hardening** — `ruff format --check`, Python 3.13 in the test matrix.
+
 ### Removed
+
+- **The caller-less GUI-era layer**: `run.py`, `pipeline.py`, `recommend.py`, `state.py` (run_state.json persistence), `run_logging.py`, and the unused `reporting/io.py` helpers, plus their tests. The headless scheduler path (`__main__` → `scheduler/runner`) is the single pipeline. This also removes a latent bug: `run_state.json` persistence had silently failed on every run since 0.5.0 (datetimes handed to `json.dumps`).
+- **`DownloaderConfig` and the inert `user.days` / `include_horses` / `include_greyhounds` settings.** Downloads always fetch all settled orders; Azure publishing is fixed in code to horses + greyhounds (`DEFAULT_AZURE_EVENT_TYPE_IDS`). Old credentials files with these keys remain valid — the keys are ignored.
+- **`schedule.min_coverage_overlap_days`** — parsed but never used since the timestamp-checkpoint redesign; `min_overlap_hours` is the real overlap control.
+- **Marker-era remnants** — `RunResult.skipped` / `skip_reason` and `check_today_success_marker` (markers are write-only audit artifacts; they stopped gating runs in 0.5.x).
+- **Hardcoded personal paths** — the `C:/Users/Mark/OneDrive` Windows candidate in `paths.py` and the absolute developer paths in `scripts/render_dm_report.sh` (now repo-relative with env overrides).
+- **`SQLAlchemy` from `requirements.txt`** — nothing imports it.
+
+### Changed
+
+- The three duplicated Azure ODBC connection-string builders are consolidated into `azure_common.build_conn_str`.
+- `DownloadResult.from_utc`/`to_utc` are typed (and populated) as `datetime`, matching reality.
+
+### Clarified
+
+- The 0.6.0 note "`itemDescription` is no longer downloaded" was superseded shortly after by PR #10, which re-enabled `include_item_description=True` and flattens the blob into `evt_*`/`mkt_*`/`runner_name`/`market_type` columns instead of storing raw JSON. Current behaviour: itemDescription **is** downloaded and flattened; catalogue enrichment coalesces in as a fallback.
+
+### Removed (pre-review cleanup)
 
 - **Tkinter GUI** (`gui_app.py`) and **Streamlit reporting dashboard** (`reporting_app.py`, `reporting/ui.py`, `reporting/filters.py`, `reporting/exports.py`, `reporting/transforms.py`, `reporting/pages/`, plus the never-imported `reporting/derive.py` and `reporting/metrics.py`). The project is headless-only: CLI subcommands plus scheduled jobs. The `dm-report` path (`reporting/daily_dm_report.py`, `io.py`, `schema.py`) is unchanged.
 - **`streamlit`, `plotly`, and `pytz` dependencies** — the GUI/dashboard consumers are gone and the single `pytz` use is replaced with stdlib `zoneinfo`.

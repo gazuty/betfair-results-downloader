@@ -20,7 +20,9 @@ def get_scheduler_zoneinfo(schedule_cfg: ScheduleConfig) -> ZoneInfo:
     return ZoneInfo(schedule_cfg.timezone)
 
 
-def get_scheduler_now(schedule_cfg: ScheduleConfig, now_utc: datetime | None = None) -> SchedulerNow:
+def get_scheduler_now(
+    schedule_cfg: ScheduleConfig, now_utc: datetime | None = None
+) -> SchedulerNow:
     current_utc = now_utc or datetime.now(timezone.utc)
     if current_utc.tzinfo is None:
         current_utc = current_utc.replace(tzinfo=timezone.utc)

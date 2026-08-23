@@ -6,11 +6,12 @@ Headless scheduled download runner.
 Scheduled runs now use timestamp-based incremental checkpoints so all four
 configured daily run times can perform real download attempts.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,8 +30,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RunResult:
     ok: bool
-    skipped: bool = False
-    skip_reason: str = ""
     status: str = ""
     from_date: Optional[date] = None
     to_date: Optional[date] = None
@@ -91,6 +90,32 @@ def _run_pipeline(
     from_dt_utc: datetime,
     to_dt_utc: datetime,
 ) -> RunResult:
+    """
+    Run the download → enrich → CSV → Azure pipeline for one window.
+
+    Never raises: any unhandled exception is converted into a failed
+    :class:`RunResult` so the caller always records the attempt in
+    ``run_history.jsonl``.
+    """
+    try:
+        return _run_pipeline_inner(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    except Exception as exc:
+        logger.exception("Scheduled pipeline failed with an unhandled error.")
+        return RunResult(
+            ok=False,
+            status="failed",
+            from_dt_utc=from_dt_utc,
+            to_dt_utc=to_dt_utc,
+            message=f"Scheduled pipeline failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def _run_pipeline_inner(
+    creds: dict[str, Any],
+    schedule_cfg: ScheduleConfig,
+    from_dt_utc: datetime,
+    to_dt_utc: datetime,
+) -> RunResult:
     results_dir = _resolve_results_dir(creds)
     betfair_creds = creds.get("betfair") or {}
     run_started = datetime.now(timezone.utc)
@@ -112,6 +137,7 @@ def _run_pipeline(
             )
 
         from ..downloader_core import fetch_cleared_orders_df_range  # noqa: PLC0415
+
         logger.info(
             "Downloading cleared orders %s → %s (chunk_days=%d)...",
             from_dt_utc,
@@ -133,13 +159,16 @@ def _run_pipeline(
         logger.info("Download result: %s", dl.message)
 
         if not dl.attempted or dl.df_co is None or dl.df_co.empty:
+            # Nothing was observed, so nothing new is confirmed: leave the
+            # checkpoint alone (None means "keep the previous value" in
+            # upsert_schedule_state) instead of asserting coverage to now.
             return RunResult(
                 ok=True,
                 status="success",
                 rows_downloaded=0,
                 from_dt_utc=from_dt_utc,
                 to_dt_utc=to_dt_utc,
-                last_confirmed_settled_at_utc=to_dt_utc,
+                last_confirmed_settled_at_utc=None,
                 download_started_utc=run_started,
                 download_finished_utc=datetime.now(timezone.utc),
                 message=f"Download returned no rows. {dl.message}",
@@ -147,20 +176,34 @@ def _run_pipeline(
 
         df_co = dl.df_co
 
-        from ..downloader_core import enrich_with_market_catalogue, resolve_enrichment_cache_dir  # noqa: PLC0415
+        from ..downloader_core import (
+            enrich_with_market_catalogue,
+            resolve_enrichment_cache_dir,
+        )  # noqa: PLC0415
+
         logger.info("Enriching with market catalogue...")
-        df_co, enr = enrich_with_market_catalogue(
-            df_co=df_co,
-            betfair=betfair_creds,
-            cache_dir=resolve_enrichment_cache_dir(results_dir),
-            enable=True,
-            use_cache=True,
-            api_client=client,
-            status_cb=_say,
-        )
-        logger.info("Enrich result: %s", enr.message)
+        try:
+            df_co, enr = enrich_with_market_catalogue(
+                df_co=df_co,
+                betfair=betfair_creds,
+                cache_dir=resolve_enrichment_cache_dir(results_dir),
+                enable=True,
+                use_cache=True,
+                api_client=client,
+                status_cb=_say,
+            )
+            logger.info("Enrich result: %s", enr.message)
+        except Exception as exc:
+            # Enrichment is supplementary: keep the downloaded rows and let
+            # a future run backfill names from the cache.
+            logger.warning(
+                "Enrichment failed (%s: %s); continuing with unenriched rows.",
+                type(exc).__name__,
+                exc,
+            )
 
         from ..downloader_core import write_csv_outputs  # noqa: PLC0415
+
         logger.info("Writing CSV outputs to %s...", results_dir)
         user = creds.get("user", {}) or {}
         csvr = write_csv_outputs(
@@ -181,17 +224,24 @@ def _run_pipeline(
             try:
                 from ..downloader_core import prepare_azure_dataset  # noqa: PLC0415
                 from ..azure_publish import publish_to_azure_sql  # noqa: PLC0415
-                prep = prepare_azure_dataset(df_co=df_co, allowed_event_type_ids={7, 4339})
+
+                prep = prepare_azure_dataset(df_co=df_co)
                 if prep.attempted and prep.rows_to_write:
                     az = publish_to_azure_sql(
                         creds=creds,
                         rows_to_write=prep.rows_to_write,
                         dry_run=False,
                     )
-                    azure_published = az.attempted
                     logger.info("Azure publish result: %s", az.message)
+                    if not az.ok:
+                        # publish_to_azure_sql reports its own failures in the
+                        # result rather than raising — treat them as partial.
+                        raise RuntimeError(az.message or "Azure publish failed.")
+                    azure_published = az.attempted
                 else:
-                    logger.info("Azure prep result: %s (nothing to write)", prep.message)
+                    logger.info(
+                        "Azure prep result: %s (nothing to write)", prep.message
+                    )
             except Exception as exc:
                 logger.warning("Azure publish failed: %s", exc)
                 return RunResult(
@@ -221,7 +271,9 @@ def _run_pipeline(
                 gates.append("schedule.publish_to_azure=false")
             if not schedule_cfg.allow_azure_publish:
                 gates.append("schedule.allow_azure_publish=false")
-            logger.info("Azure publish skipped (%s).", ", ".join(gates) or "gates closed")
+            logger.info(
+                "Azure publish skipped (%s).", ", ".join(gates) or "gates closed"
+            )
 
         run_finished = datetime.now(timezone.utc)
         elapsed = (run_finished - run_started).total_seconds()
@@ -279,7 +331,9 @@ def run_scheduled(
     run_finished = datetime.now(timezone.utc)
 
     if result.ok and result.status == "success":
-        covered_utc, covered_local = derive_coverage_dates(from_dt_utc, to_dt_utc, schedule_cfg.timezone)
+        covered_utc, covered_local = derive_coverage_dates(
+            from_dt_utc, to_dt_utc, schedule_cfg.timezone
+        )
         upsert_schedule_state(
             creds,
             last_covered_date_utc=covered_utc,
@@ -316,7 +370,8 @@ def run_scheduled(
             "today_utc": today_utc.isoformat(),
             "last_confirmed_settled_at_utc": (
                 result.last_confirmed_settled_at_utc.isoformat()
-                if result.last_confirmed_settled_at_utc is not None else None
+                if result.last_confirmed_settled_at_utc is not None
+                else None
             ),
         },
     )
@@ -333,13 +388,20 @@ def run_backfill(
     if from_date > to_date:
         msg = f"Invalid backfill range: from_date ({from_date}) > to_date ({to_date})."
         logger.error(msg)
-        return RunResult(ok=False, status="failed", from_date=from_date, to_date=to_date, message=msg)
+        return RunResult(
+            ok=False, status="failed", from_date=from_date, to_date=to_date, message=msg
+        )
 
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = datetime.now(timezone.utc)
 
-    from_dt_utc = datetime(from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc)
-    to_dt_utc = datetime(to_date.year, to_date.month, to_date.day, 23, 59, 59, tzinfo=timezone.utc)
+    from_dt_utc = datetime(
+        from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc
+    )
+    # Exclusive upper bound at midnight after to_date, so the final day is
+    # fully covered with no sub-second blind spot before midnight.
+    end_day = to_date + timedelta(days=1)
+    to_dt_utc = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
 
     logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
@@ -368,7 +430,8 @@ def run_backfill(
             "schedule_timezone": schedule_cfg.timezone,
             "last_confirmed_settled_at_utc": (
                 result.last_confirmed_settled_at_utc.isoformat()
-                if result.last_confirmed_settled_at_utc is not None else None
+                if result.last_confirmed_settled_at_utc is not None
+                else None
             ),
         },
     )

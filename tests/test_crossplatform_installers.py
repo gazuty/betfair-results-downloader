@@ -1,4 +1,5 @@
 """Tests for Phase 3.2: Windows Task Scheduler, Linux systemd, and cron installers."""
+
 from __future__ import annotations
 
 import sys
@@ -29,6 +30,7 @@ from betfair_results_downloader.scheduler.installers.cron import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _cfg(**overrides) -> ScheduleConfig:
     defaults = dict(
         enabled=True,
@@ -39,7 +41,6 @@ def _cfg(**overrides) -> ScheduleConfig:
         allow_azure_publish=False,
         max_backfill_days=90,
         chunk_days=30,
-        min_coverage_overlap_days=1,
         log_dir="",
         history_file="",
     )
@@ -53,6 +54,7 @@ PY = Path(sys.executable)
 # ===========================================================================
 # Windows Task Scheduler
 # ===========================================================================
+
 
 class TestBuildTaskXml:
     def test_produces_valid_xml(self, tmp_path: Path) -> None:
@@ -132,6 +134,7 @@ class TestTaskSchedulerInstallerDryRun:
 # Linux systemd --user
 # ===========================================================================
 
+
 class TestBuildServiceUnit:
     def test_contains_exec_start(self, tmp_path: Path) -> None:
         content = build_service_unit(tmp_path, PY)
@@ -174,16 +177,25 @@ class TestBuildTimerUnit:
 class TestSystemdInstallerDryRun:
     def test_install_dry_run_writes_files(self, tmp_path: Path) -> None:
         from unittest.mock import patch
+
         svc = tmp_path / f"{SERVICE_NAME}.service"
         tmr = tmp_path / f"{SERVICE_NAME}.timer"
 
         installer = SystemdUserInstaller()
-        with patch("betfair_results_downloader.scheduler.installers.systemd_user.SYSTEMD_USER_DIR",
-                   tmp_path), \
-             patch("betfair_results_downloader.scheduler.installers.systemd_user.SERVICE_FILE",
-                   svc), \
-             patch("betfair_results_downloader.scheduler.installers.systemd_user.TIMER_FILE",
-                   tmr):
+        with (
+            patch(
+                "betfair_results_downloader.scheduler.installers.systemd_user.SYSTEMD_USER_DIR",
+                tmp_path,
+            ),
+            patch(
+                "betfair_results_downloader.scheduler.installers.systemd_user.SERVICE_FILE",
+                svc,
+            ),
+            patch(
+                "betfair_results_downloader.scheduler.installers.systemd_user.TIMER_FILE",
+                tmr,
+            ),
+        ):
             result = installer.install(
                 schedule_cfg=_cfg(),
                 repo_root=tmp_path,
@@ -198,14 +210,23 @@ class TestSystemdInstallerDryRun:
 
     def test_uninstall_dry_run_removes_files(self, tmp_path: Path) -> None:
         from unittest.mock import patch
+
         svc = tmp_path / f"{SERVICE_NAME}.service"
         tmr = tmp_path / f"{SERVICE_NAME}.timer"
         svc.write_text("placeholder")
         tmr.write_text("placeholder")
 
         installer = SystemdUserInstaller()
-        with patch("betfair_results_downloader.scheduler.installers.systemd_user.SERVICE_FILE", svc), \
-             patch("betfair_results_downloader.scheduler.installers.systemd_user.TIMER_FILE", tmr):
+        with (
+            patch(
+                "betfair_results_downloader.scheduler.installers.systemd_user.SERVICE_FILE",
+                svc,
+            ),
+            patch(
+                "betfair_results_downloader.scheduler.installers.systemd_user.TIMER_FILE",
+                tmr,
+            ),
+        ):
             result = installer.uninstall(dry_run=True)
 
         assert result["ok"] is True
@@ -216,6 +237,7 @@ class TestSystemdInstallerDryRun:
 # ===========================================================================
 # Cron
 # ===========================================================================
+
 
 class TestBuildCronLine:
     def test_contains_marker_comment(self, tmp_path: Path) -> None:
@@ -240,6 +262,33 @@ class TestBuildCronLine:
         log_dir = tmp_path / "logs"
         line = build_cron_line(_cfg(), tmp_path, PY, log_dir)
         assert "cron.log" in line
+
+
+class TestBuildCronLineMinutes:
+    def test_distinct_minutes_get_their_own_lines(self, tmp_path: Path) -> None:
+        cfg = _cfg(primary_time="06:30", retry_times=("09:00", "23:00"))
+        block = build_cron_line(cfg, tmp_path, PY, tmp_path / "logs")
+        lines = block.splitlines()
+        assert any(ln.startswith("30 6 ") for ln in lines)
+        assert any(ln.startswith("0 9,23 ") for ln in lines)
+
+    def test_every_managed_line_carries_the_marker(self, tmp_path: Path) -> None:
+        cfg = _cfg(primary_time="06:30", retry_times=("09:00",))
+        block = build_cron_line(cfg, tmp_path, PY, tmp_path / "logs")
+        for ln in block.splitlines():
+            assert MARKER_COMMENT in ln
+
+    def test_strip_removes_current_and_legacy_formats(self, tmp_path: Path) -> None:
+        from betfair_results_downloader.scheduler.installers.cron import (
+            _strip_managed_lines,
+        )
+
+        cfg = _cfg(primary_time="06:30", retry_times=("09:00",))
+        block = build_cron_line(cfg, tmp_path, PY, tmp_path / "logs")
+        legacy = [MARKER_COMMENT, "0 6 * * * old-command"]
+        user_line = "15 4 * * * some-user-job"
+        crontab = [user_line, *legacy, *block.splitlines()]
+        assert _strip_managed_lines(crontab) == [user_line]
 
 
 class TestCronInstallerDryRun:

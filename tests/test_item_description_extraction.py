@@ -13,6 +13,7 @@ from betfair_results_downloader.downloader_core import _extract_item_description
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_order(*, with_desc: bool = True, partial: bool = False) -> dict:
     """Return a sample cleared-order dict with or without itemDescription."""
     order: dict = {
@@ -38,6 +39,7 @@ def _make_order(*, with_desc: bool = True, partial: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 # _extract_item_description_fields
 # ---------------------------------------------------------------------------
+
 
 class TestExtractItemDescriptionFields:
     """Unit tests for the extraction helper."""
@@ -102,6 +104,7 @@ class TestExtractItemDescriptionFields:
 # Enrichment coalescing
 # ---------------------------------------------------------------------------
 
+
 class TestEnrichmentCoalescing:
     """Verify that itemDescription values take precedence over catalogue."""
 
@@ -134,8 +137,14 @@ class TestEnrichmentCoalescing:
                 df_out.drop(columns=[cat_col], inplace=True)
 
         # itemDescription value kept for market 1.111
-        assert df_out.loc[df_out["marketId"] == "1.111", "evt_eventName"].iloc[0] == "From ItemDesc"
+        assert (
+            df_out.loc[df_out["marketId"] == "1.111", "evt_eventName"].iloc[0]
+            == "From ItemDesc"
+        )
         # catalogue value used as fallback for market 1.222
-        assert df_out.loc[df_out["marketId"] == "1.222", "evt_eventName"].iloc[0] == "From Catalogue Only"
+        assert (
+            df_out.loc[df_out["marketId"] == "1.222", "evt_eventName"].iloc[0]
+            == "From Catalogue Only"
+        )
         # No leftover _cat column
         assert "evt_eventName_cat" not in df_out.columns

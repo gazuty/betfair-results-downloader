@@ -14,10 +14,22 @@ except Exception:  # pragma: no cover - environment-dependent native import
 if TYPE_CHECKING:
     import pyodbc as pyodbc_types
 
+from .azure_common import build_conn_str as _build_conn_str
+
 
 @dataclass
 class AzurePublishResult:
+    """
+    Outcome of one publish call.
+
+    ``attempted`` means DB writes were attempted (False for dry runs and
+    blocked configurations); ``ok`` means the call completed without error.
+    A failed publish is ``attempted=True, ok=False`` — callers must check
+    ``ok``, not just ``attempted``, before reporting success.
+    """
+
     attempted: bool
+    ok: bool = True
     inserted_rows: int = 0
     updated_rows: int = 0
     deleted_rows: int = 0
@@ -39,20 +51,6 @@ class AzureSyncPlan:
     rows_to_insert: list[tuple[Any, Any, Any, Any]]
     rows_to_update: list[tuple[Any, Any, Any, Any]]
     db_only_keys: list[str]
-
-
-def _build_conn_str(azsql: dict[str, Any]) -> str:
-    port = azsql.get("port", 1433)
-    return (
-        f"DRIVER={{{azsql['driver']}}};"
-        f"SERVER={azsql['server']},{port};"
-        f"DATABASE={azsql['database']};"
-        f"UID={azsql['username']};"
-        f"PWD={azsql['password']};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
-    )
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -256,18 +254,32 @@ def publish_to_azure_sql(
     if db_user_id is None:
         return AzurePublishResult(
             attempted=False,
+            ok=False,
             message="Azure publish blocked: user.db_user_id missing in secrets.",
         )
 
     if not azsql:
         return AzurePublishResult(
             attempted=False,
+            ok=False,
             message="Azure publish blocked: azure_sql block missing in secrets.",
         )
 
     if not rows_to_write:
         return AzurePublishResult(
-            attempted=False, message="Azure publish blocked: rows_to_write is empty."
+            attempted=False,
+            ok=False,
+            message="Azure publish blocked: rows_to_write is empty.",
+        )
+
+    if pyodbc is None:
+        return AzurePublishResult(
+            attempted=False,
+            ok=False,
+            message=(
+                "Azure publish blocked: pyodbc is unavailable. Install pyodbc "
+                "and the unixODBC / ODBC Driver 18 dependencies to publish."
+            ),
         )
 
     conn = None
@@ -288,6 +300,7 @@ def publish_to_azure_sql(
         if dry_run:
             return AzurePublishResult(
                 attempted=False,
+                ok=True,
                 inserted_rows=0,
                 updated_rows=0,
                 deleted_rows=0,
@@ -304,6 +317,7 @@ def publish_to_azure_sql(
 
         return AzurePublishResult(
             attempted=True,
+            ok=True,
             inserted_rows=inserted,
             updated_rows=updated,
             deleted_rows=0,
@@ -324,6 +338,7 @@ def publish_to_azure_sql(
             conn.rollback()
         return AzurePublishResult(
             attempted=True,
+            ok=False,
             inserted_rows=0,
             updated_rows=0,
             deleted_rows=0,

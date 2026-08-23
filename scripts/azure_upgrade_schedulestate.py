@@ -6,6 +6,7 @@ Idempotent schema upgrade for ``dbo.ScheduleState``.
 Adds intraday incremental checkpoint columns required by the timestamp-based
 scheduler.
 """
+
 from __future__ import annotations
 
 import sys

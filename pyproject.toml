@@ -7,6 +7,14 @@ name = "betfair-results-downloader"
 version = "0.6.0"
 description = "Download Betfair cleared orders, write canonical + snapshots, and optionally publish market-level results to Azure SQL."
 readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "gazuty" }]
+classifiers = [
+    "Private :: Do Not Upload",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
 requires-python = ">=3.10"
 dependencies = [
     "betfairlightweight",
@@ -28,6 +36,13 @@ where = ["src"]
 
 [tool.ruff]
 exclude = ["notebooks/**"]
+
+[tool.ruff.lint]
+# Pin the rule set explicitly so lint results don't change when CI picks up
+# a newer ruff (0.16 expanded the defaults and broke previously-green runs).
+# These are the pre-0.16 defaults; broadening the set is tracked in the
+# 2026-08-23 review (Phase 5).
+select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/*.py" = ["E402"]
