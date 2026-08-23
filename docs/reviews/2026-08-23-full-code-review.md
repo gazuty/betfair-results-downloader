@@ -4,6 +4,15 @@
 **Scope:** Entire repository at `883edb1` — all source modules, scheduler package, installers, reporting, tests, CI, scripts, notebook, and documentation.
 **Baseline:** `ruff check .` clean · `pytest -q` 160/160 passing.
 
+> **Implementation status (2026-08-23):** all five phases of the remediation
+> plan below were implemented on this branch in the same PR. The two flagged
+> decisions were resolved as recommended: the inert
+> `include_horses`/`include_greyhounds` flags were removed (Azure scope is
+> the explicit `DEFAULT_AZURE_EVENT_TYPE_IDS` constant), and `audit.py` was
+> kept and exposed as the `betfair-results audit` subcommand. The suite grew
+> from 160 to 168 tests; `CHANGELOG.md` carries the user-facing summary.
+> The MIT license choice in D3 is a default — swap it if you prefer another.
+
 ---
 
 ## Overall assessment
