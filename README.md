@@ -12,7 +12,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
 - **Azure recovery library** — read-only health checks, scoped backups, dedupe/normalization tools (`azure_remediation.py`)
-- **OpenClaw DM reporting** — repo-native week-to-date and day-to-date summary generation for agent-delivered chat updates
+- **DM reporting** — repo-native week-to-date and day-to-date summary generation, printed for an external messenger or posted straight to Slack with `--post-slack`
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
@@ -369,7 +369,7 @@ missing calendar-day ranges with ready-to-run backfill suggestions.
 
 **Status:** ✅ Implemented
 
-Renders the OpenClaw-oriented daily DM report from the local results CSV. This command does not send a message itself, it generates the final message body for an external messenger such as OpenClaw.
+Renders the daily DM report from the local results CSV. By default it only prints the final message body to stdout, for an external messenger to deliver. Pass `--post-slack` to have it post the report to Slack itself, so a plain launchd job can deliver it with no agent involved.
 
 ```bash
 python -m betfair_results_downloader dm-report
@@ -384,6 +384,18 @@ python -m betfair_results_downloader dm-report --at 2026-06-06T21:00:00+10:00
 # Render from a specific CSV and print the source path
 python -m betfair_results_downloader dm-report --csv /path/to/cleared_orders_cleaned.csv --show-source
 ```
+
+Render and post the report to Slack (used by the `com.betfair.results.dmreport`
+LaunchAgent):
+
+```bash
+python -m betfair_results_downloader dm-report --post-slack
+```
+
+`--post-slack` reads `~/.betfair/slack.json` (falling back to a `slack` section
+in credentials.json) and posts failures as well as successes, so a broken
+scheduled run is announced rather than failing silently. See
+`docs/openclaw-dm-reporting.md` for configuration.
 
 Behavior:
 
@@ -404,7 +416,7 @@ Manages the platform scheduled job that runs `betfair-results run` automatically
 For this deployment, the recommended production model is:
 
 - use the OS scheduler (for example macOS launchd) for downloader cadence
-- use OpenClaw for user-facing DM report cadence
+- use a launchd agent running `dm-report --post-slack` for user-facing DM report cadence (OpenClaw remains supported for agent-delivered reports)
 
 The built-in `schedule` command remains available, but it is not the preferred production control plane for the current OpenClaw reporting setup.
 

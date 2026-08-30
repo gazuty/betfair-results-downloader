@@ -1,6 +1,10 @@
 # OpenClaw DM Reporting
 
-This feature adds a repo-native reporting path for OpenClaw to message the user directly, without embedding a separate Slack bot workflow inside the downloader pipeline.
+This feature adds a repo-native reporting path for rendering the daily DM
+report. It was originally built for OpenClaw to deliver; `dm-report
+--post-slack` now offers direct delivery as well. See
+[Direct Slack delivery](#direct-slack-delivery) for why, and for the trade-off
+that change makes against the design intent below.
 
 ## Design intent
 
@@ -16,7 +20,13 @@ OpenClaw remains responsible for:
 - deciding when to run the report
 - delivering the message to the user in the active chat channel
 
-This keeps messaging transport outside the downloader runtime and avoids storing chat-delivery logic in the core pipeline.
+This keeps messaging transport outside the downloader runtime and avoids
+storing chat-delivery logic in the core pipeline.
+
+That separation still holds for the pipeline itself: `downloader_core` and
+`scheduler/runner` contain no delivery logic, and plain `dm-report` still
+only prints to stdout. Delivery is opt-in, confined to `slack_notify.py`,
+and reached only via the `--post-slack` flag described below.
 
 ## Reporting windows
 
@@ -137,3 +147,65 @@ Those tests verify:
 - exclusion of non-horse/greyhound rows
 - CLI rendering behavior
 - exact canonical CSV preference when present
+
+## Direct Slack delivery
+
+`dm-report --post-slack` posts the rendered report to Slack directly, so a
+plain launchd job can deliver it with no agent involved.
+
+### Why this exists
+
+Delivering via an agent turn cost roughly 43k tokens per run to execute one
+fixed command and forward its stdout verbatim -- the cron payload itself said
+"Do not add commentary -- just deliver the report text". No judgment was
+required anywhere in it, and the agent added a failure mode of its own: on
+2026-08-29 a run failed at Slack delivery rather than at the data.
+
+This is a deliberate trade against the separation described above. The
+judgment is that for a fixed command with no decisions in it, an LLM in the
+delivery path costs more reliability than it buys.
+
+### Configuration
+
+Credentials are read from `~/.betfair/slack.json`, falling back to a `slack`
+section in credentials.json:
+
+```json
+{
+  "bot_token": "xoxb-...",
+  "channel": "U0000000000",
+  "enabled": true
+}
+```
+
+`channel` may be a channel ID or a user ID; a user ID opens a DM. Create the
+file with mode `600`.
+
+The local file takes precedence deliberately. It lives on local disk rather
+than in OneDrive, so failures are still announced when credentials.json is
+itself the unreadable file -- the failure seen on 2026-08-30, when OneDrive
+evicted it and the run died with
+`OSError: [Errno 11] Resource deadlock avoided`.
+
+### Failure reporting
+
+With `--post-slack`, failures are posted as well as printed, so a broken run
+is announced rather than failing silently into a log. This covers unreadable
+or missing credentials, a missing `paths.results_csv_dir`, a malformed
+`--at` value, and any error while building the report.
+
+### Scheduling
+
+```xml
+<key>ProgramArguments</key>
+<array>
+  <string>/path/to/repo/.venv/bin/python</string>
+  <string>-m</string>
+  <string>betfair_results_downloader</string>
+  <string>dm-report</string>
+  <string>--post-slack</string>
+</array>
+```
+
+Install as a LaunchAgent with the report times in `StartCalendarInterval`.
+Run it after the downloader cadence so the report reflects a completed run.
