@@ -160,7 +160,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     from .scheduler.runner import run_scheduled
 
-    result = run_scheduled(creds, schedule_cfg)
+    try:
+        result = run_scheduled(creds, schedule_cfg)
+    except Exception as exc:
+        # Not everything reaches _run_pipeline's RunResult conversion: a
+        # malformed optional section (a `paths` that is a string, say) passes
+        # validation and then raises during gap detection. Announcing by
+        # default means nothing may exit on a traceback.
+        msg = f"FAIL: scheduled run raised {type(exc).__name__}: {exc}"
+        print(msg)
+        if getattr(args, "post_slack", True):
+            _post_to_slack(f":warning: Betfair scheduled run failed\n{msg}", creds)
+        return 1
 
     if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")

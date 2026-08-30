@@ -57,7 +57,18 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
         embedded = {}
     local = _read_local_config() or {}
     cfg = {**embedded, **{k: v for k, v in local.items() if v not in (None, "")}}
-    if not cfg.get("enabled", True):
+
+    # `enabled` follows whichever source actually supplies the credentials.
+    # Merging it like any other field would let a stale `enabled: false` in
+    # credentials.json silence a complete local config that never mentions the
+    # flag -- which, before the merge, was selected wholesale and worked.
+    if "enabled" in local:
+        enabled = bool(local["enabled"])
+    elif str(local.get("bot_token", "")).strip():
+        enabled = True
+    else:
+        enabled = bool(embedded.get("enabled", True))
+    if not enabled:
         raise SlackNotConfigured("slack config is disabled (enabled=false)")
     token = str(cfg.get("bot_token", "")).strip()
     channel = str(cfg.get("channel", "")).strip()

@@ -146,3 +146,25 @@ def test_run_failure_alert_names_the_run_not_the_report(posted, monkeypatch) -> 
 
     assert "scheduled run failed" in posted[0]
     assert "DM report" not in posted[0]
+
+
+def test_runner_exception_is_announced(posted, creds_ok, monkeypatch) -> None:
+    """
+    Not every failure becomes a RunResult. A malformed optional section passes
+    validation and then raises during gap detection; announcing by default
+    means nothing if that exits on a traceback.
+    """
+
+    def explode(*_args, **_kwargs):
+        raise TypeError("string indices must be integers")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.runner.run_scheduled", explode
+    )
+
+    exit_code = main(["run"])
+
+    assert exit_code == 1
+    assert len(posted) == 1
+    assert "scheduled run failed" in posted[0]
+    assert "TypeError" in posted[0]
