@@ -23,6 +23,12 @@ def clean_and_remove_duplicates(
     Args:
         df: DataFrame to deduplicate
         status_cb: Optional callback for status messages (warnings visible in GUI)
+
+    Returns:
+        (path, combined) -- the frame is returned so callers do not have to
+        read back the file that was just written. On the live canonical that
+        reload costs ~3s per run and re-triggers dtype inference over ~1M
+        rows for no benefit.
     """
 
     def warn(msg: str) -> None:
@@ -107,7 +113,7 @@ def update_csv_with_new_data(
     new_data_df: pd.DataFrame,
     *,
     status_cb: Optional[Callable[[str], None]] = None,
-) -> Path:
+) -> tuple[Path, pd.DataFrame]:
     """
     Idempotently update a canonical CSV with new data:
     - create parent directory if missing
@@ -144,4 +150,4 @@ def update_csv_with_new_data(
     combined.to_csv(tmp_path, index=False)
     tmp_path.replace(path)
 
-    return path
+    return path, combined

@@ -6,8 +6,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
+import gzip
 import json
 import re
+import shutil
 import time
 from zoneinfo import ZoneInfo
 
@@ -720,6 +722,29 @@ _SNAPSHOT_NAME_RE = re.compile(
 )
 
 
+def _write_snapshot_from_canonical(canonical_path: Path, snapshot_path: Path) -> None:
+    """
+    Copy the canonical to the dated snapshot, gzipping when the name asks for
+    it. Written to a temp file and renamed, so an interrupted run cannot leave
+    a truncated snapshot that still matches the retention pattern and displaces
+    a good one.
+    """
+    tmp_path = snapshot_path.with_name(snapshot_path.name + ".tmp")
+    try:
+        if snapshot_path.suffix == ".gz":
+            with (
+                open(canonical_path, "rb") as src,
+                gzip.open(tmp_path, "wb") as dst,
+            ):
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+        else:
+            shutil.copyfile(canonical_path, tmp_path)
+        tmp_path.replace(snapshot_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def prune_snapshot_files(
     results_csv_dir: Path,
     keep: int = 14,
@@ -840,9 +865,9 @@ def write_csv_outputs(
     suffix = ".csv.gz" if compress_snapshots else ".csv"
     snapshot_path = results_csv_dir / f"cleared_orders_cleaned_{today_str}{suffix}"
 
-    update_csv_with_new_data(canonical_path, df_co, status_cb=status_cb)
-
-    df_canonical = pd.read_csv(canonical_path)
+    canonical_path, df_canonical = update_csv_with_new_data(
+        canonical_path, df_co, status_cb=status_cb
+    )
     df_trimmed = archive_old_canonical_rows(
         df_canonical,
         results_csv_dir,
@@ -854,7 +879,17 @@ def write_csv_outputs(
         df_trimmed.to_csv(tmp_path, index=False)
         tmp_path.replace(canonical_path)
 
-    df_trimmed.to_csv(snapshot_path, index=False)
+    # The snapshot is a copy of the canonical, so copy it rather than
+    # re-serialising the frame a second time. Two things follow.
+    #
+    # It is much cheaper: re-serialising ~1M rows and gzipping costs ~9s on
+    # the live file, against ~2s to stream the bytes that were just written.
+    #
+    # And it is exact. Serialising a second time round-tripped the frame
+    # through pandas dtype inference, so numeric-looking string columns
+    # diverged between the canonical and its own backup -- 12345678 in one,
+    # 12345678.0 in the other, on the very first write.
+    _write_snapshot_from_canonical(canonical_path, snapshot_path)
 
     prune_snapshot_files(results_csv_dir, keep=snapshot_retention, status_cb=status_cb)
 
