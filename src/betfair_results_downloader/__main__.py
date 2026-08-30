@@ -333,7 +333,10 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
         try:
             report_dt = datetime.fromisoformat(args.at)
         except ValueError as exc:
-            print(f"FAIL: invalid --at datetime, expected ISO-8601: {exc}")
+            msg = f"FAIL: invalid --at datetime, expected ISO-8601: {exc}"
+            print(msg)
+            if getattr(args, "post_slack", False):
+                _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
             return 2
 
     from .reporting.daily_dm_report import build_daily_dm_report_from_results_dir

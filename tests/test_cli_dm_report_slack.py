@@ -74,3 +74,17 @@ def test_setup_failure_stays_silent_without_the_flag(posted, monkeypatch) -> Non
         main(["dm-report"])
 
     assert posted == []
+
+
+def test_invalid_at_timestamp_is_announced_to_slack(posted, monkeypatch) -> None:
+    """A malformed --at is a config typo in a scheduled job; announce it."""
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {"results_csv_dir": "/tmp"}}, None),
+    )
+
+    exit_code = main(["dm-report", "--post-slack", "--at", "not-a-timestamp"])
+
+    assert exit_code == 2
+    assert len(posted) == 1
+    assert "invalid --at datetime" in posted[0]
