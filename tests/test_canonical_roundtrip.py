@@ -123,10 +123,7 @@ def test_numeric_columns_survive_the_round_trip(results_dir) -> None:
     expected = df.set_index("betId")["profit"].round(2).to_dict()
 
     _write(df, results_dir)
-    write_csv_outputs(
-        df_co=make_cleared_orders(50, first_bet_id=500, seed=7),
-        results_csv_dir=results_dir,
-    )
+    _write(make_cleared_orders(50, first_bet_id=500, seed=7), results_dir)
 
     written = pd.read_csv(_canonical(results_dir))
     got = written.set_index("betId")["profit"].round(2).to_dict()
@@ -154,13 +151,16 @@ def test_market_ids_are_not_truncated_by_the_round_trip(results_dir) -> None:
 
     _write(df, results_dir)
     # A second run re-reads and rewrites every existing row.
-    write_csv_outputs(
-        df_co=make_cleared_orders(50, first_bet_id=900, seed=3),
-        results_csv_dir=results_dir,
-    )
+    _write(make_cleared_orders(50, first_bet_id=900, seed=3), results_dir)
 
     written = pd.read_csv(_canonical(results_dir), dtype=str, keep_default_na=False)
     got = dict(zip(written["betId"].astype(str), written["marketId"].astype(str)))
+
+    # Guard the xfail: a row missing for any other reason (archival, a merge
+    # bug) would also make the check below fail, and strict=True would then
+    # keep passing after the actual defect is fixed.
+    missing = set(expected) - set(got)
+    assert not missing, f"{len(missing)} rows absent for reasons unrelated to dtype"
 
     damaged = {k: (v, got[k]) for k, v in expected.items() if got.get(k) != v}
     assert not damaged, (
