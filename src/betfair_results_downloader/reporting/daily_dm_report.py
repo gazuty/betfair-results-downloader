@@ -75,7 +75,15 @@ def _format_report(
         "",
         heading,
     ]
-    if hours_stale is not None and hours_stale >= STALE_AFTER_HOURS:
+    if hours_stale is None:
+        # No usable settlement timestamp at all: a header-only or unreadable
+        # canonical. Treating an unknown age as fresh would deliver a
+        # confident $0.00 for a stopped or corrupt pipeline.
+        lines.append("")
+        lines.append(
+            "⚠️ No settled results found — the data may be missing or unreadable"
+        )
+    elif hours_stale >= STALE_AFTER_HOURS:
         lines.append("")
         lines.append(
             f"⚠️ Data may be stale — newest result is {_format_age(hours_stale)} old"
@@ -142,9 +150,14 @@ def build_daily_dm_report_from_dataframe(
     # "is the pipeline still delivering", not "have my sports run lately" --
     # a quiet day for horses and greyhounds while other event types settle
     # normally is not a stalled pipeline.
+    # Rows settled after the report timestamp are excluded here for the same
+    # reason the profit totals exclude them: with --at on a historical
+    # timestamp, a later settlement would otherwise make the report look fresh
+    # while the numbers it shows are hours old.
+    in_scope = settled.loc[settled["settled_dt_local"] <= report_dt_local]
     hours_stale: float | None = None
-    if not settled.empty:
-        newest_any_sport = settled["settled_dt_local"].max()
+    if not in_scope.empty:
+        newest_any_sport = in_scope["settled_dt_local"].max()
         hours_stale = max(
             (report_dt_local - newest_any_sport).total_seconds() / 3600.0, 0.0
         )

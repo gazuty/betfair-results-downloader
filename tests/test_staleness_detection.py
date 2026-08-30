@@ -190,3 +190,43 @@ def test_report_freshness_ignores_the_sport_filter() -> None:
 
     assert report.hours_stale == pytest.approx(1, abs=0.5)
     assert "stale" not in report.text.lower()
+
+
+def test_future_settlements_do_not_mask_staleness() -> None:
+    """
+    With --at on a historical timestamp, a later settlement must not make the
+    report look fresh while the numbers it shows are hours old.
+    """
+    report_dt = datetime(2026, 6, 10, 19, 35, tzinfo=SYDNEY)
+    utc = report_dt.astimezone(timezone.utc)
+    df = pd.DataFrame(
+        {
+            "betId": [1, 2],
+            "eventTypeId": [7, 7],
+            "profit": [10.0, 5.0],
+            "settledDate": [
+                (utc - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                (utc + timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            ],
+        }
+    )
+
+    report = build_daily_dm_report_from_dataframe(df, report_dt=report_dt)
+
+    assert report.hours_stale == pytest.approx(30, abs=0.5)
+    assert "Data may be stale" in report.text
+
+
+def test_no_valid_settlements_is_warned_not_reported_as_zero() -> None:
+    """
+    A header-only or unreadable canonical must not produce a confident $0.00.
+    An unknown age is not a fresh one.
+    """
+    df = pd.DataFrame({"betId": [], "eventTypeId": [], "profit": [], "settledDate": []})
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=datetime(2026, 6, 10, 19, 35, tzinfo=SYDNEY)
+    )
+
+    assert report.hours_stale is None
+    assert "No settled results found" in report.text
