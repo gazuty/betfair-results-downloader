@@ -286,3 +286,52 @@ def test_explicit_csv_leaves_creds_unresolved_for_the_notifier(
 
     assert exit_code == 0
     assert seen["creds"] is None, "must stay None so the notifier resolves creds"
+
+
+def test_partial_local_slack_config_does_not_shadow_credentials(monkeypatch) -> None:
+    """
+    A half-written ~/.betfair/slack.json must not silence alerting by
+    shadowing a working credentials.json slack section.
+    """
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify, "_read_local_config", lambda: {"channel": "U-local"}
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert token == "xoxb-embedded", "embedded token must survive a partial local file"
+    assert channel == "U-local", "local values still win where present"
+
+
+def test_local_slack_config_overrides_credentials(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert (token, channel) == ("xoxb-local", "U-local")
+
+
+def test_empty_local_values_do_not_blank_out_credentials(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify, "_read_local_config", lambda: {"bot_token": "", "channel": None}
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert (token, channel) == ("xoxb-embedded", "U-embedded")

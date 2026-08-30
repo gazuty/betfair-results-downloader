@@ -334,7 +334,7 @@ def run_scheduled(
         covered_utc, covered_local = derive_coverage_dates(
             from_dt_utc, to_dt_utc, schedule_cfg.timezone
         )
-        upsert_schedule_state(
+        state_written = upsert_schedule_state(
             creds,
             last_covered_date_utc=covered_utc,
             last_covered_date_local=covered_local,
@@ -347,6 +347,14 @@ def run_scheduled(
             last_successful_download_started_utc=result.download_started_utc,
             last_successful_download_finished_utc=result.download_finished_utc,
         )
+        if not state_written:
+            # The checkpoint is what stops the next run re-downloading the same
+            # window. Silently continuing here means every future run repeats
+            # this one while still reporting success.
+            result.status = "partial"
+            reason = "Azure ScheduleState checkpoint was not written; the next run will repeat this window."
+            result.errors.append(reason)
+            result.message = f"{result.message} {reason}".strip()
         write_today_success_marker(log_dir, today_local, marker_namespace="local")
         write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 

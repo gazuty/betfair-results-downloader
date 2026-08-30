@@ -46,10 +46,17 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
     """
     Return (bot_token, channel), preferring ~/.betfair/slack.json over the
     ``slack`` section of credentials.json. Raises SlackNotConfigured.
+
+    The two sources are merged per field rather than chosen wholesale: a local
+    file that exists but is incomplete (half-written, or holding only a
+    channel) must not shadow a working embedded config and silence alerting
+    altogether.
     """
-    cfg = _read_local_config()
-    if cfg is None:
-        cfg = (creds or {}).get("slack") or {}
+    embedded = (creds or {}).get("slack") or {}
+    if not isinstance(embedded, dict):
+        embedded = {}
+    local = _read_local_config() or {}
+    cfg = {**embedded, **{k: v for k, v in local.items() if v not in (None, "")}}
     if not cfg.get("enabled", True):
         raise SlackNotConfigured("slack config is disabled (enabled=false)")
     token = str(cfg.get("bot_token", "")).strip()
