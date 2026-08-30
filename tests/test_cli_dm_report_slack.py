@@ -9,9 +9,15 @@ SystemExit, which would otherwise bypass the notifier entirely.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from betfair_results_downloader.__main__ import main
+
+
+def _raises_value_error(*_args, **_kwargs):
+    raise ValueError("bad schedule value")
 
 
 @pytest.fixture
@@ -108,22 +114,74 @@ def test_malformed_schedule_config_is_announced_to_slack(posted, monkeypatch) ->
     assert "could not load configuration" in posted[0]
 
 
-def test_notifier_survives_the_broken_config_it_reports(monkeypatch) -> None:
-    """_post_to_slack reloads config; a ValueError there must not crash it."""
-    sent: list[str] = []
-
-    def bad_config(*_args, **_kwargs):
-        raise ValueError("bad schedule value")
+def test_notifier_keeps_embedded_slack_creds_when_schedule_is_malformed(
+    monkeypatch, tmp_path
+) -> None:
+    """
+    Slack configured only via the credentials.json fallback must survive an
+    unrelated malformed schedule value. Loading creds via the schedule-parsing
+    path would discard the slack section and silence the notification.
+    """
+    captured: dict = {}
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text(
+        json.dumps({"slack": {"bot_token": "xoxb-test", "channel": "U1"}}),
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(
-        "betfair_results_downloader.__main__._load_creds_and_schedule", bad_config
+        "betfair_results_downloader.secrets.credentials_path", lambda: creds_file
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.secrets.load_credentials",
+        lambda path: json.loads(creds_file.read_text(encoding="utf-8")),
+    )
+    # Would raise if the notifier still went through schedule parsing.
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        _raises_value_error,
     )
     monkeypatch.setattr(
         "betfair_results_downloader.slack_notify.post_message",
-        lambda text, creds=None, channel_override=None: sent.append(text) or "1.0",
+        lambda text, creds=None, channel_override=None: (
+            captured.update(text=text, creds=creds) or "1.0"
+        ),
     )
 
     from betfair_results_downloader.__main__ import _post_to_slack
 
     assert _post_to_slack("boom") == 0
-    assert sent == ["boom"]
+    assert captured["text"] == "boom"
+    assert captured["creds"]["slack"]["bot_token"] == "xoxb-test", (
+        "the embedded slack section must reach post_message"
+    )
+
+
+def test_notifier_falls_back_to_empty_creds_when_credentials_unreadable(
+    monkeypatch, tmp_path
+) -> None:
+    """An unreadable credentials.json leaves ~/.betfair/slack.json to carry it."""
+    captured: dict = {}
+    creds_file = tmp_path / "credentials.json"
+    creds_file.write_text("{}", encoding="utf-8")
+
+    def unreadable(_path):
+        raise OSError(11, "Resource deadlock avoided")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.secrets.credentials_path", lambda: creds_file
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.secrets.load_credentials", unreadable
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.slack_notify.post_message",
+        lambda text, creds=None, channel_override=None: (
+            captured.update(creds=creds) or "1.0"
+        ),
+    )
+
+    from betfair_results_downloader.__main__ import _post_to_slack
+
+    assert _post_to_slack("boom") == 0
+    assert captured["creds"] == {}

@@ -262,12 +262,20 @@ def _post_to_slack(text: str) -> int:
     import contextlib
     import io
 
+    from .secrets import credentials_path, load_credentials
+
+    # Deliberately not _load_creds_and_schedule: that also parses the schedule
+    # section, so one malformed schedule value would discard a perfectly good
+    # embedded slack section and leave the failure unreportable.
+    creds: dict = {}
     try:
         # Silenced: the reason has already been reported by the caller.
         with contextlib.redirect_stdout(io.StringIO()):
-            creds, _schedule_cfg = _load_creds_and_schedule()
+            creds_file = credentials_path()
+            if creds_file.exists():
+                creds = load_credentials(creds_file) or {}
     except (SystemExit, Exception):
-        # The config may be the very thing that is broken; the local
+        # credentials.json may be the very thing that is broken; the local
         # ~/.betfair/slack.json still lets us report it.
         creds = {}
     try:
