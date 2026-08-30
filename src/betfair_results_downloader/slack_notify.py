@@ -52,7 +52,13 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
     channel) must not shadow a working embedded config and silence alerting
     altogether.
     """
-    embedded = (creds or {}).get("slack") or {}
+    # creds may be any JSON shape: a syntactically valid credentials.json with
+    # an array at the top level makes validation raise, and the failure path
+    # then hands that value straight back here. Anything but a mapping is no
+    # config at all -- and must not stop the local file announcing the problem.
+    if not isinstance(creds, dict):
+        creds = {}
+    embedded = creds.get("slack") or {}
     if not isinstance(embedded, dict):
         embedded = {}
     local = _read_local_config() or {}

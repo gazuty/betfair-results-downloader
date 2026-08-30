@@ -380,3 +380,21 @@ def test_embedded_disable_still_applies_without_a_local_file(monkeypatch) -> Non
         slack_notify.load_slack_config(
             {"slack": {"enabled": False, "bot_token": "x", "channel": "y"}}
         )
+
+
+@pytest.mark.parametrize("bad", [["a", "list"], "a string", 42, None])
+def test_non_object_credentials_do_not_break_the_notifier(monkeypatch, bad) -> None:
+    """
+    A credentials.json with a non-object top level makes validation raise, and
+    the failure path hands that value back to the notifier. It must still be
+    able to announce the problem from the local file.
+    """
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    assert slack_notify.load_slack_config(bad) == ("xoxb-local", "U-local")
