@@ -88,17 +88,6 @@ def test_snapshot_matches_the_canonical(results_dir) -> None:
     assert set(snapshot.columns) == set(canonical.columns)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect, same root cause as the marketId truncation: "
-        "write_csv_outputs re-reads the canonical with inferred dtypes before "
-        "writing the snapshot, so numeric-looking string columns diverge "
-        "(12345678 in the canonical, 12345678.0 in the snapshot) on the very "
-        "first write. The snapshot is the only backup of the canonical, so "
-        "they should be identical. Fixed by the dtype PR."
-    ),
-)
 def test_snapshot_values_match_the_canonical(results_dir) -> None:
     """
     Shape alone would pass even if every value differed -- so compare
@@ -166,3 +155,38 @@ def test_market_ids_are_not_truncated_by_the_round_trip(results_dir) -> None:
     assert not damaged, (
         f"{len(damaged)} market IDs changed, e.g. {list(damaged.items())[:3]}"
     )
+
+
+def test_snapshot_is_byte_identical_to_the_canonical(results_dir) -> None:
+    """
+    The snapshot is a copy, so it should be the canonical's bytes -- not a
+    second serialisation of the frame, which round-trips through dtype
+    inference and quietly changes values.
+    """
+    import gzip
+
+    result = _write(make_cleared_orders(200), results_dir)
+
+    canonical_bytes = _canonical(results_dir).read_bytes()
+    with gzip.open(result.snapshot_path, "rb") as fh:
+        snapshot_bytes = fh.read()
+
+    assert snapshot_bytes == canonical_bytes
+
+
+def test_update_csv_returns_the_frame_it_wrote(tmp_path) -> None:
+    """
+    The frame is returned so callers need not read back the file just
+    written; that reload costs ~3s per run on the live canonical.
+    """
+    from betfair_results_downloader.csv_utils import update_csv_with_new_data
+
+    path = tmp_path / "cleared_orders_cleaned.csv"
+    df = make_cleared_orders(50)
+
+    returned_path, returned_frame = update_csv_with_new_data(path, df)
+
+    assert returned_path == path
+    on_disk = pd.read_csv(path)
+    assert len(returned_frame) == len(on_disk) == 50
+    assert set(returned_frame.columns) == set(on_disk.columns)
