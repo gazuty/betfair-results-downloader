@@ -15,7 +15,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
-- **Scheduled automatic daily downloads** — gap detection, multi-window retry, cross-platform installers (macOS launchd, Windows Task Scheduler, Linux systemd/cron)
+- **Scheduled automatic daily downloads** — gap detection, multi-window retry, macOS launchd installer
 
 ---
 
@@ -505,28 +505,21 @@ python scripts/azure_upgrade_schedulestate.py
 
 ## Platform Notes
 
-### Windows (Task Scheduler)
+### Windows and Linux
 
-- **Task name:** `BetfairResultsScheduler`
-- **Installed via:** `schtasks /Create /XML` — requires no admin rights for current-user tasks
-- **Uses `pythonw.exe`** (not `python.exe`) to suppress the console window flash on each run
-- **View/manage:** Task Scheduler GUI (`taskschd.msc`) or `schtasks /Query /TN BetfairResultsScheduler`
-- **Logs:** `outputs/run_history.jsonl` relative to repo root
+Not supported. The `schedule` command works on macOS only.
 
-### Linux (systemd --user)
+Task Scheduler, systemd `--user` and cron backends existed but were never
+run: this is a single-user macOS tool, and ~1,000 lines of untested
+cross-platform code cost more than they bought. `schedule install` and its
+siblings now raise a clear error on other platforms.
 
-- **Unit files:** `~/.config/systemd/user/betfair-results.service` and `.timer`
-- **Advantage over cron:** `Persistent=true` in the timer ensures missed runs (machine off) are retried on next login
-- **View status:** `systemctl --user status betfair-results.timer`
-- **View logs:** `journalctl --user -u betfair-results -n 50`
-
-### Linux (cron fallback)
-
-Used when systemd is not available (e.g. older distros, containers).
-
-- **Identified by marker comment:** `# BETFAIR_RESULTS_SCHEDULER` in crontab
-- **Idempotent install:** re-running `schedule install` replaces the existing entry
-- **View crontab:** `crontab -l`
+If you had installed a scheduled job on Windows or Linux with an earlier
+version, remove it with the platform's own tooling — `schtasks /Delete /TN
+BetfairResultsScheduler`, `systemctl --user disable --now
+betfair-results.timer`, or by deleting the `# BETFAIR_RESULTS_SCHEDULER`
+line from your crontab. The backends are recoverable from git history if
+another platform is ever needed.
 
 ### macOS (launchd)
 
@@ -728,7 +721,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ✅ shipped | `7e1d368` | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands, platform dispatch in `installers/__init__.py` |
-| 3.2 | ✅ shipped | `41afba9` | Windows Task Scheduler (`schtasks`), Linux systemd --user, cron fallback |
+| 3.2 | ⛔ removed | `41afba9` | Windows Task Scheduler, Linux systemd --user and cron backends — never run, removed as dead code |
 
 Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:
 
@@ -762,9 +755,6 @@ src/betfair_results_downloader/
     state.py              # ScheduleState read/upsert, JSONL history, markers
     installers/           # Platform-specific scheduler installers
       launchd.py          # macOS LaunchAgent plist
-      taskscheduler.py    # Windows Task Scheduler XML
-      systemd_user.py     # Linux systemd --user units
-      cron.py             # Linux cron fallback
   reporting/              # DM report generation (IO, schema, daily report)
 
 secrets/
