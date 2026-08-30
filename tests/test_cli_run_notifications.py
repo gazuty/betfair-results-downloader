@@ -106,3 +106,43 @@ def test_no_post_slack_suppresses_the_announcement(
 
     assert main(["run", "--no-post-slack"]) == 1
     assert posted == []
+
+
+def test_run_validates_credentials(monkeypatch, creds_ok) -> None:
+    """
+    run must keep validate=True: a bad timezone or oversized chunk setting has
+    to exit 2 with collected errors, not raise from inside the pipeline where
+    no notification handler can see it.
+    """
+    seen: dict = {}
+
+    def loader(validate: bool = False):
+        seen["validate"] = validate
+        return ({"paths": {"results_csv_dir": "/tmp"}}, object())
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule", loader
+    )
+    _run_result(monkeypatch, RunResult(ok=True, status="success", message="fine"))
+
+    main(["run"])
+
+    assert seen["validate"] is True
+
+
+def test_run_failure_alert_names_the_run_not_the_report(posted, monkeypatch) -> None:
+    """An alert for a run that never started must not blame the report."""
+
+    def boom(validate: bool = False):
+        print("FAIL: credentials file not found")
+        raise SystemExit(2)
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule", boom
+    )
+
+    with pytest.raises(SystemExit):
+        main(["run"])
+
+    assert "scheduled run failed" in posted[0]
+    assert "DM report" not in posted[0]

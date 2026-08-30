@@ -154,7 +154,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # The scheduled job is unattended: a failure that only reaches
     # launchd.err.log is a failure nobody sees. Announce every non-success
     # outcome, including a credentials load that exits before the run starts.
-    creds, schedule_cfg = _load_creds_for_report(args)
+    creds, schedule_cfg = _load_creds_for_report(
+        args, validate=True, context="scheduled run"
+    )
 
     from .scheduler.runner import run_scheduled
 
@@ -320,9 +322,22 @@ def _send_slack(text: str, creds: dict) -> int:
     return 0
 
 
-def _load_creds_for_report(args: argparse.Namespace):
+def _load_creds_for_report(
+    args: argparse.Namespace,
+    *,
+    validate: bool = False,
+    context: str = "DM report",
+):
     """
     Load credentials, announcing setup failures to Slack before they exit.
+
+    ``validate`` is passed through to _load_creds_and_schedule: the scheduled
+    run needs the full fail-fast validation, so that a bad timezone or an
+    oversized chunk setting exits 2 with collected errors rather than raising
+    from deep inside the pipeline, outside every notification handler.
+
+    ``context`` names the failing command in the alert. A run that never
+    started must not report itself as a broken report.
 
     ``_load_creds_and_schedule`` prints the reason and raises SystemExit, so
     without this wrapper the very failure the local Slack config exists to
@@ -336,12 +351,12 @@ def _load_creds_for_report(args: argparse.Namespace):
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            creds, schedule_cfg = _load_creds_and_schedule()
+            creds, schedule_cfg = _load_creds_and_schedule(validate=validate)
     except SystemExit:
         detail = buf.getvalue().strip() or "FAIL: could not load credentials.json"
         print(detail)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+            _post_to_slack(f":warning: Betfair {context} failed\n{detail}")
         raise
     except Exception as exc:
         # parse_schedule_config raises ValueError rather than exiting, e.g. on
@@ -353,7 +368,7 @@ def _load_creds_for_report(args: argparse.Namespace):
         detail = f"FAIL: could not load configuration: {type(exc).__name__}: {exc}"
         print(detail)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+            _post_to_slack(f":warning: Betfair {context} failed\n{detail}")
         raise SystemExit(2) from exc
     captured = buf.getvalue()
     if captured:
