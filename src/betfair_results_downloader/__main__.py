@@ -259,8 +259,13 @@ def _post_to_slack(text: str) -> int:
     """
     from .slack_notify import SlackNotConfigured, post_message
 
+    import contextlib
+    import io
+
     try:
-        creds, _schedule_cfg = _load_creds_and_schedule()
+        # Silenced: the reason has already been reported by the caller.
+        with contextlib.redirect_stdout(io.StringIO()):
+            creds, _schedule_cfg = _load_creds_and_schedule()
     except SystemExit:
         creds = {}
     try:
@@ -275,6 +280,35 @@ def _post_to_slack(text: str) -> int:
     return 0
 
 
+def _load_creds_for_report(args: argparse.Namespace):
+    """
+    Load credentials, announcing setup failures to Slack before they exit.
+
+    ``_load_creds_and_schedule`` prints the reason and raises SystemExit, so
+    without this wrapper the very failure the local Slack config exists to
+    report -- an unreadable credentials.json -- would exit before any post is
+    attempted. stdout is captured so the reason can be forwarded to Slack as
+    well as printed for the launchd log.
+    """
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            creds, schedule_cfg = _load_creds_and_schedule()
+    except SystemExit:
+        detail = buf.getvalue().strip() or "FAIL: could not load credentials.json"
+        print(detail)
+        if getattr(args, "post_slack", False):
+            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+        raise
+    captured = buf.getvalue()
+    if captured:
+        print(captured, end="")
+    return creds, schedule_cfg
+
+
 def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
     Render the OpenClaw-oriented daily DM report from the local results CSV.
@@ -285,10 +319,13 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
     from datetime import datetime
 
-    creds, _schedule_cfg = _load_creds_and_schedule()
+    creds, _schedule_cfg = _load_creds_for_report(args)
     results_dir = ((creds.get("paths") or {}).get("results_csv_dir") or "").strip()
     if not results_dir:
-        print("FAIL: paths.results_csv_dir is not configured in credentials.json")
+        msg = "FAIL: paths.results_csv_dir is not configured in credentials.json"
+        print(msg)
+        if getattr(args, "post_slack", False):
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
         return 2
 
     report_dt = None
