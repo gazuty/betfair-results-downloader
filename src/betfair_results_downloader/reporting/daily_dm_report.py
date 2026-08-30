@@ -30,6 +30,13 @@ class DailyDmReport:
     day_to_date: ProfitBreakdown
     source_csv: str
     text: str
+    hours_stale: float | None = None
+
+
+# The pipeline runs four times a day, so anything older than half a day means
+# it has stopped. Without this the report renders a confident $0.00 from a
+# stale file and reads exactly like a quiet day.
+STALE_AFTER_HOURS = 12.0
 
 
 def _money(value: float) -> str:
@@ -50,14 +57,30 @@ def _format_heading(dt: datetime) -> str:
     return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}, {hour12}:{dt.minute:02d} {meridiem}"
 
 
+def _format_age(hours: float) -> str:
+    if hours < 48:
+        return f"{int(round(hours))}h"
+    return f"{int(hours // 24)} days"
+
+
 def _format_report(
-    report_dt: datetime, week_to_date: ProfitBreakdown, day_to_date: ProfitBreakdown
+    report_dt: datetime,
+    week_to_date: ProfitBreakdown,
+    day_to_date: ProfitBreakdown,
+    hours_stale: float | None = None,
 ) -> str:
     heading = _format_heading(report_dt)
     lines = [
         "Betfair results update",
         "",
         heading,
+    ]
+    if hours_stale is not None and hours_stale >= STALE_AFTER_HOURS:
+        lines.append("")
+        lines.append(
+            f"⚠️ Data may be stale — newest result is {_format_age(hours_stale)} old"
+        )
+    lines += [
         "",
         "Week to date (since Sunday 12:00 AM)",
         f"• Total profit: {_money(week_to_date.total_profit)}",
@@ -125,7 +148,13 @@ def build_daily_dm_report_from_dataframe(
 
     week_to_date = _profit_breakdown(week_df)
     day_to_date = _profit_breakdown(day_df)
-    text = _format_report(report_dt_local, week_to_date, day_to_date)
+
+    hours_stale: float | None = None
+    if not settled.empty:
+        newest = settled["settled_dt_local"].max()
+        hours_stale = max((report_dt_local - newest).total_seconds() / 3600.0, 0.0)
+
+    text = _format_report(report_dt_local, week_to_date, day_to_date, hours_stale)
 
     return DailyDmReport(
         report_dt=report_dt_local,
@@ -135,6 +164,7 @@ def build_daily_dm_report_from_dataframe(
         day_to_date=day_to_date,
         source_csv=source_csv,
         text=text,
+        hours_stale=hours_stale,
     )
 
 

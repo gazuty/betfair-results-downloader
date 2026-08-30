@@ -66,6 +66,7 @@ def compute_missing_settled_dates(
             "earliest": None,
             "latest": None,
             "today": today_utc.isoformat(),
+            "days_stale": None,
             "num_missing": 0,
             "missing_ranges": [],
             "message": "No settledDate values found.",
@@ -88,12 +89,17 @@ def compute_missing_settled_dates(
             "earliest": earliest.isoformat(),
             "latest": latest.isoformat(),
             "today": today_utc.isoformat(),
+            "days_stale": (today_utc - latest).days,
             "num_missing": 0,
             "missing_ranges": [],
         }
 
     audit_start = present_in_window[0]
-    audit_end = present_in_window[-1]
+    # Deliberately today, not present_in_window[-1]. Clamping to the last day
+    # that HAS data makes a stopped pipeline structurally invisible: the days
+    # between the final row and today are never examined, so a dead job
+    # reports "no gaps found".
+    audit_end = today_utc
 
     present_set = set(present_in_window)
     missing_ranges: list[dict[str, Any]] = []
@@ -138,6 +144,7 @@ def compute_missing_settled_dates(
         "earliest": earliest.isoformat(),
         "latest": latest.isoformat(),
         "today": today_utc.isoformat(),
+        "days_stale": (today_utc - latest).days,
         "num_missing": num_missing,
         "missing_ranges": missing_ranges,
     }
