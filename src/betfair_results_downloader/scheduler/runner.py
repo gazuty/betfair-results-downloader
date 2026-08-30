@@ -382,8 +382,12 @@ def run_scheduled(
             last_successful_download_finished_utc=result.download_finished_utc,
         )
         apply_azure_state_outcome(result, creds, state_written)
-        write_today_success_marker(log_dir, today_local, marker_namespace="local")
-        write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
+        if result.status == "success":
+            # Only mark the day successful if it still is: a downgraded run
+            # exits 1, alerts, and is recorded as partial, so leaving a success
+            # marker behind would contradict every other signal.
+            write_today_success_marker(log_dir, today_local, marker_namespace="local")
+            write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 
     append_run_history(
         str(log_dir),

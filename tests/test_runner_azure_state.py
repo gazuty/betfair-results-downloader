@@ -48,3 +48,16 @@ def test_configured_azure_that_succeeds_is_untouched() -> None:
 def test_missing_azure_section_entirely() -> None:
     assert azure_state_configured({}) is False
     assert apply_azure_state_outcome(_success(), {}, False).status == "success"
+
+
+def test_downgraded_run_is_no_longer_success_for_marker_purposes() -> None:
+    """
+    The success markers are written only while status == "success". A
+    downgraded run exits 1, alerts, and is recorded as partial, so a success
+    marker for the same day would contradict every other signal.
+    """
+    result = apply_azure_state_outcome(_success(), CONFIGURED, state_written=False)
+    assert result.status != "success"
+
+    still_ok = apply_azure_state_outcome(_success(), CONFIGURED, state_written=True)
+    assert still_ok.status == "success"
