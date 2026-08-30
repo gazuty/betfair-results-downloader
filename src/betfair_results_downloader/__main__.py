@@ -266,7 +266,9 @@ def _post_to_slack(text: str) -> int:
         # Silenced: the reason has already been reported by the caller.
         with contextlib.redirect_stdout(io.StringIO()):
             creds, _schedule_cfg = _load_creds_and_schedule()
-    except SystemExit:
+    except (SystemExit, Exception):
+        # The config may be the very thing that is broken; the local
+        # ~/.betfair/slack.json still lets us report it.
         creds = {}
     try:
         post_message(text, creds)
@@ -303,6 +305,18 @@ def _load_creds_for_report(args: argparse.Namespace):
         if getattr(args, "post_slack", False):
             _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
         raise
+    except Exception as exc:
+        # parse_schedule_config raises ValueError rather than exiting, e.g. on
+        # a non-numeric schedule.max_backfill_days. Report it the same way and
+        # exit cleanly instead of surfacing a traceback from a scheduled job.
+        printed = buf.getvalue().strip()
+        if printed:
+            print(printed)
+        detail = f"FAIL: could not load configuration: {type(exc).__name__}: {exc}"
+        print(detail)
+        if getattr(args, "post_slack", False):
+            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+        raise SystemExit(2) from exc
     captured = buf.getvalue()
     if captured:
         print(captured, end="")

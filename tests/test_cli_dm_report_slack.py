@@ -88,3 +88,42 @@ def test_invalid_at_timestamp_is_announced_to_slack(posted, monkeypatch) -> None
     assert exit_code == 2
     assert len(posted) == 1
     assert "invalid --at datetime" in posted[0]
+
+
+def test_malformed_schedule_config_is_announced_to_slack(posted, monkeypatch) -> None:
+    """parse_schedule_config raises ValueError, not SystemExit; still announce."""
+
+    def bad_config(*_args, **_kwargs):
+        raise ValueError("invalid literal for int() with base 10: 'not-a-number'")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule", bad_config
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["dm-report", "--post-slack"])
+
+    assert excinfo.value.code == 2
+    assert len(posted) == 1
+    assert "could not load configuration" in posted[0]
+
+
+def test_notifier_survives_the_broken_config_it_reports(monkeypatch) -> None:
+    """_post_to_slack reloads config; a ValueError there must not crash it."""
+    sent: list[str] = []
+
+    def bad_config(*_args, **_kwargs):
+        raise ValueError("bad schedule value")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule", bad_config
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.slack_notify.post_message",
+        lambda text, creds=None, channel_override=None: sent.append(text) or "1.0",
+    )
+
+    from betfair_results_downloader.__main__ import _post_to_slack
+
+    assert _post_to_slack("boom") == 0
+    assert sent == ["boom"]
