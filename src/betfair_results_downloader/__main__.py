@@ -250,6 +250,31 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _post_to_slack(text: str) -> int:
+    """
+    Post ``text`` to Slack. Returns 0 on success, 1 on failure (reason printed).
+
+    Credentials come from ~/.betfair/slack.json when present, so this still
+    works when credentials.json itself is what could not be read.
+    """
+    from .slack_notify import SlackNotConfigured, post_message
+
+    try:
+        creds, _schedule_cfg = _load_creds_and_schedule()
+    except SystemExit:
+        creds = {}
+    try:
+        post_message(text, creds)
+    except SlackNotConfigured as exc:
+        print(f"FAIL: Slack not configured: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"FAIL: Slack post failed: {type(exc).__name__}: {exc}")
+        return 1
+    print("Posted to Slack.")
+    return 0
+
+
 def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
     Render the OpenClaw-oriented daily DM report from the local results CSV.
@@ -283,16 +308,24 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
             csv_path=getattr(args, "csv", None),
         )
     except FileNotFoundError as exc:
-        print(f"FAIL: {exc}")
+        msg = f"FAIL: {exc}"
+        print(msg)
+        if getattr(args, "post_slack", False):
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
         return 1
     except Exception as exc:
-        print(f"FAIL: could not build DM report: {type(exc).__name__}: {exc}")
+        msg = f"FAIL: could not build DM report: {type(exc).__name__}: {exc}"
+        print(msg)
+        if getattr(args, "post_slack", False):
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
         return 1
 
     if getattr(args, "show_source", False):
         print(f"Source CSV: {report.source_csv}")
         print()
     print(report.text)
+    if getattr(args, "post_slack", False):
+        return _post_to_slack(report.text)
     return 0
 
 
@@ -447,6 +480,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--show-source",
         action="store_true",
         help="Print the source CSV path before the report body.",
+    )
+    dm.add_argument(
+        "--post-slack",
+        action="store_true",
+        help="Also post the report (or the failure reason) to Slack.",
     )
     sch = sub.add_parser(
         "schedule",
