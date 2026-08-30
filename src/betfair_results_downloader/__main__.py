@@ -250,15 +250,18 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _post_to_slack(text: str) -> int:
+def _post_to_slack(text: str, creds: dict | None = None) -> int:
     """
     Post ``text`` to Slack. Returns 0 on success, 1 on failure (reason printed).
 
     Credentials come from ~/.betfair/slack.json when present, so this still
     works when credentials.json itself is what could not be read.
-    """
-    from .slack_notify import SlackNotConfigured, post_message
 
+    Callers that already hold parsed credentials should pass them: re-reading
+    a cloud-backed credentials.json can fail after a long run (OneDrive may
+    evict it mid-report), which would otherwise lose an embedded slack
+    section and silence a report that had actually succeeded.
+    """
     import contextlib
     import io
 
@@ -267,7 +270,10 @@ def _post_to_slack(text: str) -> int:
     # Deliberately not _load_creds_and_schedule: that also parses the schedule
     # section, so one malformed schedule value would discard a perfectly good
     # embedded slack section and leave the failure unreportable.
-    creds: dict = {}
+    if creds is not None:
+        return _send_slack(text, creds)
+
+    creds = {}
     try:
         # Silenced: the reason has already been reported by the caller.
         with contextlib.redirect_stdout(io.StringIO()):
@@ -278,6 +284,13 @@ def _post_to_slack(text: str) -> int:
         # credentials.json may be the very thing that is broken; the local
         # ~/.betfair/slack.json still lets us report it.
         creds = {}
+    return _send_slack(text, creds)
+
+
+def _send_slack(text: str, creds: dict) -> int:
+    """Post ``text`` with ``creds``, reporting any failure on stdout."""
+    from .slack_notify import SlackNotConfigured, post_message
+
     try:
         post_message(text, creds)
     except SlackNotConfigured as exc:
@@ -342,12 +355,17 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
     from datetime import datetime
 
     creds, _schedule_cfg = _load_creds_for_report(args)
-    results_dir = ((creds.get("paths") or {}).get("results_csv_dir") or "").strip()
+    # paths may be any JSON shape; a bare string would raise AttributeError
+    # here, outside every notification handler.
+    paths_cfg = creds.get("paths")
+    if not isinstance(paths_cfg, dict):
+        paths_cfg = {}
+    results_dir = str(paths_cfg.get("results_csv_dir") or "").strip()
     if not results_dir:
         msg = "FAIL: paths.results_csv_dir is not configured in credentials.json"
         print(msg)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
         return 2
 
     report_dt = None
@@ -358,7 +376,7 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
             msg = f"FAIL: invalid --at datetime, expected ISO-8601: {exc}"
             print(msg)
             if getattr(args, "post_slack", False):
-                _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
+                _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
             return 2
 
     from .reporting.daily_dm_report import build_daily_dm_report_from_results_dir
@@ -373,13 +391,13 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
         msg = f"FAIL: {exc}"
         print(msg)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
         return 1
     except Exception as exc:
         msg = f"FAIL: could not build DM report: {type(exc).__name__}: {exc}"
         print(msg)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{msg}")
+            _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
         return 1
 
     if getattr(args, "show_source", False):
@@ -387,7 +405,7 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
         print()
     print(report.text)
     if getattr(args, "post_slack", False):
-        return _post_to_slack(report.text)
+        return _post_to_slack(report.text, creds)
     return 0
 
 

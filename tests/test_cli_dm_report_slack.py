@@ -24,7 +24,7 @@ def _raises_value_error(*_args, **_kwargs):
 def posted(monkeypatch) -> list[str]:
     sent: list[str] = []
 
-    def fake_post(text: str) -> int:
+    def fake_post(text: str, creds: dict | None = None) -> int:
         sent.append(text)
         return 0
 
@@ -185,3 +185,48 @@ def test_notifier_falls_back_to_empty_creds_when_credentials_unreadable(
 
     assert _post_to_slack("boom") == 0
     assert captured["creds"] == {}
+
+
+def test_malformed_paths_section_is_announced_to_slack(posted, monkeypatch) -> None:
+    """A non-object `paths` must not raise AttributeError outside the handlers."""
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": "not-an-object"}, None),
+    )
+
+    exit_code = main(["dm-report", "--post-slack"])
+
+    assert exit_code == 2
+    assert len(posted) == 1
+    assert "results_csv_dir" in posted[0]
+
+
+def test_successful_report_posts_with_already_loaded_creds(monkeypatch) -> None:
+    """
+    Post-load paths must reuse the loaded credentials rather than re-reading
+    a cloud-backed credentials.json that may have been evicted mid-run.
+    """
+    captured: dict = {}
+    loaded = {"paths": {"results_csv_dir": "/tmp"}, "slack": {"bot_token": "xoxb-y"}}
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: (loaded, None),
+    )
+
+    def explode(_path):
+        raise OSError(11, "Resource deadlock avoided")
+
+    # Any re-read from disk would hit this and lose the slack section.
+    monkeypatch.setattr("betfair_results_downloader.secrets.load_credentials", explode)
+    monkeypatch.setattr(
+        "betfair_results_downloader.slack_notify.post_message",
+        lambda text, creds=None, channel_override=None: (
+            captured.update(creds=creds) or "1.0"
+        ),
+    )
+
+    from betfair_results_downloader.__main__ import _post_to_slack
+
+    assert _post_to_slack("report body", loaded) == 0
+    assert captured["creds"]["slack"]["bot_token"] == "xoxb-y"
