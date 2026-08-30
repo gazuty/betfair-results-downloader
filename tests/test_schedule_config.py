@@ -29,7 +29,6 @@ class TestParseScheduleConfig:
         assert cfg.chunk_days == 30
         assert cfg.min_overlap_hours == 2
         assert cfg.log_dir == ""
-        assert cfg.history_file == ""
 
     def test_absent_schedule_key_returns_defaults(self) -> None:
         cfg = parse_schedule_config({"betfair": {"username": "x"}})
@@ -52,7 +51,6 @@ class TestParseScheduleConfig:
                 "chunk_days": 14,
                 "min_overlap_hours": 4,
                 "log_dir": "/tmp/logs",
-                "history_file": "/tmp/history.jsonl",
             }
         }
         cfg = parse_schedule_config(creds)
@@ -66,7 +64,6 @@ class TestParseScheduleConfig:
         assert cfg.chunk_days == 14
         assert cfg.min_overlap_hours == 4
         assert cfg.log_dir == "/tmp/logs"
-        assert cfg.history_file == "/tmp/history.jsonl"
 
     def test_partial_schedule_block_fills_defaults(self) -> None:
         cfg = parse_schedule_config({"schedule": {"enabled": True}})

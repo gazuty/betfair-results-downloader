@@ -11,12 +11,11 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **Azure recovery library** — read-only health checks, scoped backups, dedupe/normalization tools (`azure_remediation.py`)
 - **DM reporting** — repo-native week-to-date and day-to-date summary generation, printed for an external messenger or posted straight to Slack with `--post-slack`
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
-- **Scheduled automatic daily downloads** — gap detection, multi-window retry, cross-platform installers (macOS launchd, Windows Task Scheduler, Linux systemd/cron)
+- **Scheduled automatic daily downloads** — gap detection, multi-window retry, macOS launchd installer
 
 ---
 
@@ -270,15 +269,20 @@ Other sports are downloaded and written to CSV but excluded from Azure uploads.
 
 #### Azure recovery tools
 
-[`azure_remediation.py`](src/betfair_results_downloader/azure_remediation.py) provides user-scoped recovery functions (fully covered by tests):
+Removed. `azure_remediation.py` held user-scoped recovery helpers — duplicate
+audit, scoped backup, UserID normalisation, dedupe and row deletion — but
+nothing imported it, there was no CLI surface, and the wrapper scripts that
+once called it had already been deleted.
 
-- Duplicate audit (read-only)
-- Scoped backup export
-- UserID normalization (padding fix)
-- Scoped unique index creation/verification
-- Scoped dedupe and row deletion (backup first)
+This README previously described it as "fully covered by tests". It was
+covered at roughly 3%: two tests, both on `get_scoped_user_id`, against a
+module containing uncommitted `DELETE` statements aimed at production. That
+sentence was exactly what you would have relied on before running one of
+them.
 
-These exist for recovery, not routine use. Invoke them from a Python session or a short ad-hoc script; completed one-off wrapper scripts are preserved in git history.
+The module is recoverable from git history if the tooling is ever wanted
+again — preferably behind a CLI subcommand, and sharing `azure_publish`'s
+UserID predicate rather than its own.
 
 ---
 
@@ -501,28 +505,21 @@ python scripts/azure_upgrade_schedulestate.py
 
 ## Platform Notes
 
-### Windows (Task Scheduler)
+### Windows and Linux
 
-- **Task name:** `BetfairResultsScheduler`
-- **Installed via:** `schtasks /Create /XML` — requires no admin rights for current-user tasks
-- **Uses `pythonw.exe`** (not `python.exe`) to suppress the console window flash on each run
-- **View/manage:** Task Scheduler GUI (`taskschd.msc`) or `schtasks /Query /TN BetfairResultsScheduler`
-- **Logs:** `outputs/run_history.jsonl` relative to repo root
+Not supported. The `schedule` command works on macOS only.
 
-### Linux (systemd --user)
+Task Scheduler, systemd `--user` and cron backends existed but were never
+run: this is a single-user macOS tool, and ~1,000 lines of untested
+cross-platform code cost more than they bought. `schedule install` and its
+siblings now raise a clear error on other platforms.
 
-- **Unit files:** `~/.config/systemd/user/betfair-results.service` and `.timer`
-- **Advantage over cron:** `Persistent=true` in the timer ensures missed runs (machine off) are retried on next login
-- **View status:** `systemctl --user status betfair-results.timer`
-- **View logs:** `journalctl --user -u betfair-results -n 50`
-
-### Linux (cron fallback)
-
-Used when systemd is not available (e.g. older distros, containers).
-
-- **Identified by marker comment:** `# BETFAIR_RESULTS_SCHEDULER` in crontab
-- **Idempotent install:** re-running `schedule install` replaces the existing entry
-- **View crontab:** `crontab -l`
+If you had installed a scheduled job on Windows or Linux with an earlier
+version, remove it with the platform's own tooling — `schtasks /Delete /TN
+BetfairResultsScheduler`, `systemctl --user disable --now
+betfair-results.timer`, or by deleting the `# BETFAIR_RESULTS_SCHEDULER`
+line from your crontab. The backends are recoverable from git history if
+another platform is ever needed.
 
 ### macOS (launchd)
 
@@ -724,7 +721,7 @@ Automated daily downloads with gap detection, multi-window retry, and cross-plat
 | 2.1 | ✅ shipped | `e744cb5` | `dbo.ScheduleState` DDL script, `scheduler/state.py` (read, upsert, JSONL history, marker files) |
 | 2.2 | ✅ shipped | `7741d3a` | Gap detection (`scheduler/gap_detector.py`), headless `runner.py`, `run` and `backfill` CLI subcommands |
 | 3.1 | ✅ shipped | `7e1d368` | macOS launchd installer, `schedule install/uninstall/status/logs` subcommands, platform dispatch in `installers/__init__.py` |
-| 3.2 | ✅ shipped | `41afba9` | Windows Task Scheduler (`schtasks`), Linux systemd --user, cron fallback |
+| 3.2 | ⛔ removed | `41afba9` | Windows Task Scheduler, Linux systemd --user and cron backends — never run, removed as dead code |
 
 Full design document (architecture, config schema, safety gates, state model, error handling, open questions) is captured in the project's planning conversation. Summary:
 
@@ -743,7 +740,6 @@ Full design document (architecture, config schema, safety gates, state model, er
 src/betfair_results_downloader/
   downloader_core.py      # Betfair API calls, enrichment, chunked range download
   azure_publish.py        # Azure SQL incremental sync plan + apply
-  azure_remediation.py    # User-scoped Azure recovery tools
   azure_common.py         # Shared Azure ODBC connection-string builder
   csv_utils.py            # Canonical CSV dedupe + atomic write
   audit.py                # Settled-date gap analysis (backs the `audit` command)
@@ -759,9 +755,6 @@ src/betfair_results_downloader/
     state.py              # ScheduleState read/upsert, JSONL history, markers
     installers/           # Platform-specific scheduler installers
       launchd.py          # macOS LaunchAgent plist
-      taskscheduler.py    # Windows Task Scheduler XML
-      systemd_user.py     # Linux systemd --user units
-      cron.py             # Linux cron fallback
   reporting/              # DM report generation (IO, schema, daily report)
 
 secrets/
