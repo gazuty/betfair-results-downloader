@@ -230,3 +230,59 @@ def test_successful_report_posts_with_already_loaded_creds(monkeypatch) -> None:
 
     assert _post_to_slack("report body", loaded) == 0
     assert captured["creds"]["slack"]["bot_token"] == "xoxb-y"
+
+
+def test_explicit_csv_does_not_require_credentials(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    """
+    --csv is self-sufficient: results_dir is ignored downstream, so demanding
+    credentials.json would require configuration the run never reads.
+
+    (Carried over from work in progress on this command; the accompanying
+    silent fallback to a hardcoded OneDrive path was deliberately dropped.)
+    """
+    csv_path = tmp_path / "cleared_orders_cleaned.csv"
+    csv_path.write_text(
+        "betId,eventTypeId,profit,settledDate\n1,7,5.0,2026-06-05T19:30:00Z\n",
+        encoding="utf-8",
+    )
+
+    def fail_loader(*_args, **_kwargs):
+        raise AssertionError("credentials must not be loaded when --csv is given")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule", fail_loader
+    )
+
+    exit_code = main(["dm-report", "--csv", str(csv_path)])
+
+    assert exit_code == 0
+    assert "Total profit" in capsys.readouterr().out
+
+
+def test_explicit_csv_leaves_creds_unresolved_for_the_notifier(
+    tmp_path, monkeypatch
+) -> None:
+    """
+    With --csv no credentials are loaded, so the notifier must resolve them
+    itself. Passing {} instead of None would suppress that lookup and break
+    --csv --post-slack for anyone configuring Slack via credentials.json.
+    """
+    seen: dict = {}
+    csv_path = tmp_path / "cleared_orders_cleaned.csv"
+    csv_path.write_text(
+        "betId,eventTypeId,profit,settledDate\n1,7,5.0,2026-06-05T19:30:00Z\n",
+        encoding="utf-8",
+    )
+
+    def capture(text: str, creds: dict | None = None) -> int:
+        seen["creds"] = creds
+        return 0
+
+    monkeypatch.setattr("betfair_results_downloader.__main__._post_to_slack", capture)
+
+    exit_code = main(["dm-report", "--csv", str(csv_path), "--post-slack"])
+
+    assert exit_code == 0
+    assert seen["creds"] is None, "must stay None so the notifier resolves creds"

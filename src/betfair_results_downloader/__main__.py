@@ -354,19 +354,26 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
     from datetime import datetime
 
-    creds, _schedule_cfg = _load_creds_for_report(args)
-    # paths may be any JSON shape; a bare string would raise AttributeError
-    # here, outside every notification handler.
-    paths_cfg = creds.get("paths")
-    if not isinstance(paths_cfg, dict):
-        paths_cfg = {}
-    results_dir = str(paths_cfg.get("results_csv_dir") or "").strip()
-    if not results_dir:
-        msg = "FAIL: paths.results_csv_dir is not configured in credentials.json"
-        print(msg)
-        if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
-        return 2
+    # An explicit --csv is self-sufficient: results_dir is ignored downstream
+    # when csv_path is set, so requiring credentials.json here would demand
+    # configuration this run never reads. Leave creds as None in that case so
+    # the notifier still resolves them itself if a post is needed.
+    creds: dict | None = None
+    results_dir = ""
+    if not getattr(args, "csv", None):
+        creds, _schedule_cfg = _load_creds_for_report(args)
+        # paths may be any JSON shape; a bare string would raise AttributeError
+        # here, outside every notification handler.
+        paths_cfg = creds.get("paths")
+        if not isinstance(paths_cfg, dict):
+            paths_cfg = {}
+        results_dir = str(paths_cfg.get("results_csv_dir") or "").strip()
+        if not results_dir:
+            msg = "FAIL: paths.results_csv_dir is not configured in credentials.json"
+            print(msg)
+            if getattr(args, "post_slack", False):
+                _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
+            return 2
 
     report_dt = None
     if getattr(args, "at", None):
