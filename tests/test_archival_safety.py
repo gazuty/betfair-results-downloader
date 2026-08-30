@@ -164,3 +164,31 @@ def test_existing_duplicates_can_still_be_cleaned_up(tmp_path) -> None:
     assert len(combined) == 60, "50 deduped + 10 new"
     on_disk = pd.read_csv(path)
     assert len(on_disk) == 60
+
+
+def test_legacy_float_betids_are_not_reported_as_lost(tmp_path) -> None:
+    """
+    Dedupe compares betIds numerically, so a legacy "123.0" in the file and a
+    fresh 123 from the API are one record. A guard comparing raw strings would
+    call the first lost and abort every run that overlapped it.
+    """
+    path = tmp_path / "cleared_orders_cleaned.csv"
+    existing = make_cleared_orders(20)
+    existing["betId"] = existing["betId"].astype(float)  # writes as "1.0", "2.0", ...
+    existing.to_csv(path, index=False)
+
+    incoming = make_cleared_orders(20)  # same ids, integer form
+
+    _, combined = update_csv_with_new_data(path, incoming)
+
+    assert len(combined) == 20, "the same records, not 40"
+
+
+def test_betid_keys_normalises_like_the_dedupe_key() -> None:
+    from betfair_results_downloader.csv_utils import betid_keys
+
+    assert betid_keys(pd.DataFrame({"betId": ["123.0"]})) == betid_keys(
+        pd.DataFrame({"betId": [123]})
+    )
+    assert betid_keys(pd.DataFrame({"betId": ["", "nope", None]})) == set()
+    assert betid_keys(pd.DataFrame({"profit": [1.0]})) == set()

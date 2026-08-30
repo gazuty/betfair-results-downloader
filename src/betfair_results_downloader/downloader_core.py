@@ -20,7 +20,11 @@ from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError
 
 from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
-from .csv_utils import clean_and_remove_duplicates, update_csv_with_new_data
+from .csv_utils import (
+    betid_keys,
+    clean_and_remove_duplicates,
+    update_csv_with_new_data,
+)
 from .scheduler.date_windows import chunk_date_range
 
 
@@ -846,12 +850,9 @@ def archive_old_canonical_rows(
         # leaving the canonical without arriving here.
         leaving = df_canonical.loc[year_mask]
         if "betId" in leaving.columns and "betId" in chunk.columns:
-
-            def _keys(frame):
-                col = frame["betId"].astype(str).str.strip()
-                return set(col[col.ne("") & col.ne("nan")])
-
-            missing = _keys(leaving) - _keys(chunk)
+            # Same normalisation as the dedupe key, so a legacy "123.0" and a
+            # fresh 123 are recognised as one record rather than a loss.
+            missing = betid_keys(leaving) - betid_keys(chunk)
             if missing:
                 raise ValueError(
                     f"Refusing to archive into {archive_path.name}: "
@@ -864,10 +865,10 @@ def archive_old_canonical_rows(
 
         # Rows with no usable betId cannot be checked by key, so count them.
         def _keyless(frame):
+            """Rows the dedupe key cannot identify, so they cannot be checked by key."""
             if "betId" not in frame.columns:
                 return len(frame)
-            col = frame["betId"].astype(str).str.strip()
-            return int((col.eq("") | col.eq("nan")).sum())
+            return int(pd.to_numeric(frame["betId"], errors="coerce").isna().sum())
 
         if _keyless(chunk) < _keyless(leaving):
             raise ValueError(
