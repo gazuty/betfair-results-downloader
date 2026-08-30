@@ -41,7 +41,9 @@ def _max_settled_datetime_from_csv(results_dir: Path) -> Optional[datetime]:
         df = pd.read_csv(csv_path, usecols=["settledDate"], low_memory=False)
         if df.empty:
             return None
-        ts = pd.to_datetime(df["settledDate"], utc=True, errors="coerce").dropna()
+        ts = pd.to_datetime(
+            df["settledDate"], utc=True, errors="coerce", format="ISO8601"
+        ).dropna()
         if ts.empty:
             return None
         latest = ts.max().to_pydatetime()

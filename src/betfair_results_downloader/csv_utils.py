@@ -25,10 +25,7 @@ def clean_and_remove_duplicates(
         status_cb: Optional callback for status messages (warnings visible in GUI)
 
     Returns:
-        (path, combined) -- the frame is returned so callers do not have to
-        read back the file that was just written. On the live canonical that
-        reload costs ~3s per run and re-triggers dtype inference over ~1M
-        rows for no benefit.
+        The deduplicated frame.
     """
 
     def warn(msg: str) -> None:
@@ -47,10 +44,14 @@ def clean_and_remove_duplicates(
     total_rows = len(out)
 
     if "betId" in out.columns:
-        # coerce to numeric when possible (handles string/float-like)
-        out["betId"] = pd.to_numeric(out["betId"], errors="coerce")
+        # Coerce into a temporary column rather than over the real one.
+        # Overwriting betId made the numeric form the value that got written
+        # back to disk, which is how a text column becomes a float column and
+        # loses its trailing digits.
+        bet_key = "_betid_numeric"
+        out[bet_key] = pd.to_numeric(out["betId"], errors="coerce")
 
-        nan_count = int(out["betId"].isna().sum())
+        nan_count = int(out[bet_key].isna().sum())
         valid_count = total_rows - nan_count
 
         if nan_count > 0 and valid_count > 0:
@@ -59,7 +60,7 @@ def clean_and_remove_duplicates(
                 f"DEDUPE WARNING: {nan_count:,} of {total_rows:,} rows have invalid betId values"
             )
 
-        if out["betId"].notna().any():
+        if out[bet_key].notna().any():
             # Stable ordering improves reproducibility. Sort on typed
             # temporary keys rather than the raw columns: date columns
             # round-trip through CSV as strings whose rendering can differ
@@ -77,7 +78,7 @@ def clean_and_remove_duplicates(
                     s, utc=True, errors="coerce", format="ISO8601"
                 ),
                 "marketId": lambda s: pd.to_numeric(s, errors="coerce"),
-                "betId": lambda s: s,  # already numeric (coerced above)
+                bet_key: lambda s: s,  # numeric copy built above
             }
             sort_keys = []
             for col, parse in sort_key_parsers.items():
@@ -90,10 +91,10 @@ def clean_and_remove_duplicates(
                     columns=sort_keys
                 )
 
-            out = out.drop_duplicates(subset=["betId"], keep="last").reset_index(
+            out = out.drop_duplicates(subset=[bet_key], keep="last").reset_index(
                 drop=True
             )
-            return out
+            return out.drop(columns=[bet_key])
         else:
             # All betIds are NaN - must fall back
             warn(
@@ -104,7 +105,10 @@ def clean_and_remove_duplicates(
         # betId column missing entirely
         warn("DEDUPE WARNING: betId column missing — using full-row dedupe")
 
-    # fallback: full-row dedupe
+    # fallback: full-row dedupe. Drop the temporary numeric key first -- it
+    # must never reach the written file, and leaving it in would also make
+    # every row unique-looking to a full-row dedupe.
+    out = out.drop(columns=["_betid_numeric"], errors="ignore")
     return out.drop_duplicates(keep="last").reset_index(drop=True)
 
 
@@ -126,6 +130,12 @@ def update_csv_with_new_data(
         existing_csv_path: Path to canonical CSV
         new_data_df: New data to add
         status_cb: Optional callback for status messages (warnings visible in GUI)
+
+    Returns:
+        (path, combined) -- the frame is returned so callers do not have to
+        read back the file that was just written. On the live canonical that
+        reload costs ~3s per run and re-triggers dtype inference over ~1M
+        rows for no benefit.
     """
     path = Path(existing_csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -133,7 +143,12 @@ def update_csv_with_new_data(
     incoming = clean_and_remove_duplicates(new_data_df, status_cb=status_cb)
 
     if path.exists():
-        existing = pd.read_csv(path)
+        # dtype=str is load-bearing, not a style choice. With inferred types
+        # pandas reads marketId ("1.251500100") as float64 and writes it back
+        # as "1.2515001", permanently destroying trailing digits -- measured
+        # at 8.6% of rows on the live canonical. keep_default_na=False stops
+        # empty strings becoming NaN and then the literal "nan" on write.
+        existing = pd.read_csv(path, dtype=str, keep_default_na=False)
 
         # union schema and align
         cols = sorted(set(existing.columns).union(set(incoming.columns)))

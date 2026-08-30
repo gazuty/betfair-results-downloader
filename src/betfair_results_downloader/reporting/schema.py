@@ -20,7 +20,7 @@ def _to_utc_datetime(series: pd.Series) -> pd.Series:
     Parse timestamps that are expected to be UTC.
     Returns tz-aware UTC datetimes (or NaT).
     """
-    return pd.to_datetime(series, errors="coerce", utc=True)
+    return pd.to_datetime(series, errors="coerce", utc=True, format="ISO8601")
 
 
 def normalize_cleared_orders_schema(df: pd.DataFrame) -> pd.DataFrame:

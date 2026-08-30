@@ -133,7 +133,9 @@ def test_dedupe_behavior_unchanged_with_duplicates():
 
     # Behavior unchanged: dedupes to 2 rows (keeps last for betId 123)
     assert len(result) == 2
-    # Verify we kept the last occurrence of betId 123 (profit=30.0)
-    bet_123 = result[result["betId"] == 123]
+    # betId keeps the form it arrived in -- dedupe now works from a temporary
+    # numeric key rather than overwriting the column, so a text betId stays
+    # text. Compare as text rather than assuming the coercion happened.
+    bet_123 = result[result["betId"].astype(str) == "123"]
     assert len(bet_123) == 1
     assert float(bet_123["profit"].iloc[0]) == 30.0
