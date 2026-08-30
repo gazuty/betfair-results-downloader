@@ -137,6 +137,18 @@ def build_daily_dm_report_from_dataframe(
         raise ValueError("Input data could not be normalized with settled_dt_local")
 
     settled = normalized.dropna(subset=["settled_dt_local"]).copy()
+
+    # Freshness is measured here, before the sport filter below. It answers
+    # "is the pipeline still delivering", not "have my sports run lately" --
+    # a quiet day for horses and greyhounds while other event types settle
+    # normally is not a stalled pipeline.
+    hours_stale: float | None = None
+    if not settled.empty:
+        newest_any_sport = settled["settled_dt_local"].max()
+        hours_stale = max(
+            (report_dt_local - newest_any_sport).total_seconds() / 3600.0, 0.0
+        )
+
     week_start = _most_recent_sunday_start(report_dt_local)
     day_start = report_dt_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -148,11 +160,6 @@ def build_daily_dm_report_from_dataframe(
 
     week_to_date = _profit_breakdown(week_df)
     day_to_date = _profit_breakdown(day_df)
-
-    hours_stale: float | None = None
-    if not settled.empty:
-        newest = settled["settled_dt_local"].max()
-        hours_stale = max((report_dt_local - newest).total_seconds() / 3600.0, 0.0)
 
     text = _format_report(report_dt_local, week_to_date, day_to_date, hours_stale)
 
