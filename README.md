@@ -11,7 +11,6 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **Azure recovery library** — read-only health checks, scoped backups, dedupe/normalization tools (`azure_remediation.py`)
 - **DM reporting** — repo-native week-to-date and day-to-date summary generation, printed for an external messenger or posted straight to Slack with `--post-slack`
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
@@ -270,15 +269,20 @@ Other sports are downloaded and written to CSV but excluded from Azure uploads.
 
 #### Azure recovery tools
 
-[`azure_remediation.py`](src/betfair_results_downloader/azure_remediation.py) provides user-scoped recovery functions (fully covered by tests):
+Removed. `azure_remediation.py` held user-scoped recovery helpers — duplicate
+audit, scoped backup, UserID normalisation, dedupe and row deletion — but
+nothing imported it, there was no CLI surface, and the wrapper scripts that
+once called it had already been deleted.
 
-- Duplicate audit (read-only)
-- Scoped backup export
-- UserID normalization (padding fix)
-- Scoped unique index creation/verification
-- Scoped dedupe and row deletion (backup first)
+This README previously described it as "fully covered by tests". It was
+covered at roughly 3%: two tests, both on `get_scoped_user_id`, against a
+module containing uncommitted `DELETE` statements aimed at production. That
+sentence was exactly what you would have relied on before running one of
+them.
 
-These exist for recovery, not routine use. Invoke them from a Python session or a short ad-hoc script; completed one-off wrapper scripts are preserved in git history.
+The module is recoverable from git history if the tooling is ever wanted
+again — preferably behind a CLI subcommand, and sharing `azure_publish`'s
+UserID predicate rather than its own.
 
 ---
 
@@ -743,7 +747,6 @@ Full design document (architecture, config schema, safety gates, state model, er
 src/betfair_results_downloader/
   downloader_core.py      # Betfair API calls, enrichment, chunked range download
   azure_publish.py        # Azure SQL incremental sync plan + apply
-  azure_remediation.py    # User-scoped Azure recovery tools
   azure_common.py         # Shared Azure ODBC connection-string builder
   csv_utils.py            # Canonical CSV dedupe + atomic write
   audit.py                # Settled-date gap analysis (backs the `audit` command)

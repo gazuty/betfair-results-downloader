@@ -536,6 +536,19 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             print(f"  loaded        : {info['loaded']}")
             print(f"  pid           : {info.get('pid', 'N/A')}")
             print(f"  last_exit     : {info.get('last_exit', 'N/A')}")
+
+            # Show both: `schedule install --time` overrides the plist for
+            # that install only and writes nothing back, so the configured
+            # and installed schedules can diverge with nothing to reveal it.
+            configured = sorted({schedule_cfg.primary_time, *schedule_cfg.retry_times})
+            installed_times = info.get("installed_times") or []
+            print(f"  configured    : {', '.join(configured) or 'none'}")
+            print(f"  installed at  : {', '.join(installed_times) or 'unknown'}")
+            if installed_times and installed_times != configured:
+                print(
+                    "  WARNING       : the installed schedule does not match "
+                    "credentials.json; re-run 'schedule install' to reconcile."
+                )
         return 0
 
     if action == "logs":

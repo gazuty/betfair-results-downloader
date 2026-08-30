@@ -74,7 +74,6 @@ def _default_schedule_cfg(**overrides):
         "chunk_days": cfg.chunk_days,
         "min_overlap_hours": cfg.min_overlap_hours,
         "log_dir": cfg.log_dir,
-        "history_file": cfg.history_file,
     }
     data.update(overrides)
     return ScheduleConfig(**data)

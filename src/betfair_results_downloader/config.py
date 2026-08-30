@@ -23,7 +23,6 @@ class ScheduleConfig:
     chunk_days: int = 30
     min_overlap_hours: int = 2
     log_dir: str = ""
-    history_file: str = ""
 
 
 def parse_schedule_config(creds: dict[str, Any]) -> ScheduleConfig:
@@ -40,5 +39,4 @@ def parse_schedule_config(creds: dict[str, Any]) -> ScheduleConfig:
         chunk_days=int(s.get("chunk_days", 30)),
         min_overlap_hours=int(s.get("min_overlap_hours", 2)),
         log_dir=str(s.get("log_dir", "")),
-        history_file=str(s.get("history_file", "")),
     )

@@ -35,7 +35,6 @@ def _cfg(**overrides) -> ScheduleConfig:
         max_backfill_days=90,
         chunk_days=30,
         log_dir="",
-        history_file="",
     )
     defaults.update(overrides)
     return ScheduleConfig(**defaults)
@@ -150,7 +149,8 @@ class TestBuildPlist:
 
 
 class TestLaunchdInstallerDryRun:
-    def test_install_dry_run_writes_plist(self, tmp_path: Path) -> None:
+    def test_install_dry_run_writes_nothing(self, tmp_path: Path) -> None:
+        """A dry run must not change the installed schedule."""
         cfg = _cfg()
         installer = LaunchdInstaller()
 
@@ -177,12 +177,13 @@ class TestLaunchdInstallerDryRun:
             )
 
         assert result["ok"] is True
-        assert plist_target.exists()
-        # Verify it's valid plist XML
-        data = plistlib.loads(plist_target.read_bytes())
-        assert data["Label"] == LABEL
+        assert not plist_target.exists(), (
+            "dry run must not write the plist -- it previously wrote it before "
+            "checking the flag, so the one run meant to change nothing did"
+        )
+        assert "Dry run" in result["message"]
 
-    def test_uninstall_dry_run_removes_plist(self, tmp_path: Path) -> None:
+    def test_uninstall_dry_run_removes_nothing(self, tmp_path: Path) -> None:
         plist_target = tmp_path / "com.betfair.results.scheduler.plist"
         plist_target.write_bytes(b"placeholder")
 
@@ -194,7 +195,8 @@ class TestLaunchdInstallerDryRun:
             result = installer.uninstall(dry_run=True)
 
         assert result["ok"] is True
-        assert not plist_target.exists()
+        assert plist_target.exists(), "dry run must not remove the plist"
+        assert "Dry run" in result["message"]
 
     def test_uninstall_when_not_installed(self) -> None:
         installer = LaunchdInstaller()
@@ -207,30 +209,77 @@ class TestLaunchdInstallerDryRun:
         assert "nothing to uninstall" in result["message"].lower()
 
     def test_plist_content_has_correct_times(self, tmp_path: Path) -> None:
+        """
+        Build the plist directly rather than through install(dry_run=True):
+        a dry run no longer writes anything, and using it as a way to produce
+        a file to inspect was relying on the bug it is named after.
+        """
         cfg = _cfg(primary_time="07:30", retry_times=("11:00",))
-        plist_target = tmp_path / f"{LABEL}.plist"
 
-        installer = LaunchdInstaller()
-        with (
-            patch(
-                "betfair_results_downloader.scheduler.installers.launchd.PLIST_PATH",
-                plist_target,
-            ),
-            patch(
-                "betfair_results_downloader.scheduler.installers.launchd.AGENTS_DIR",
-                tmp_path,
-            ),
-        ):
-            installer.install(
-                schedule_cfg=cfg,
-                repo_root=tmp_path,
-                venv_python_path=Path(sys.executable),
-                log_dir=tmp_path / "logs",
-                dry_run=True,
-            )
+        data = build_plist(cfg, tmp_path, Path(sys.executable), tmp_path / "logs")
 
-        data = plistlib.loads(plist_target.read_bytes())
         intervals = data["StartCalendarInterval"]
         assert {"Hour": 7, "Minute": 30} in intervals
         assert {"Hour": 11, "Minute": 0} in intervals
-        assert len(intervals) == 2
+        assert len(intervals) == 2, "exactly the configured times, no more"
+        assert data["Label"] == LABEL
+
+
+class TestInstalledTimesReporting:
+    def test_installed_times_read_from_the_plist(self, tmp_path: Path) -> None:
+        """
+        `schedule install --time` overrides the plist for that install only
+        and writes nothing back to credentials.json, so the configured and
+        installed schedules can diverge with nothing to reveal it. status()
+        now reports what is actually installed.
+        """
+        from betfair_results_downloader.scheduler.installers import launchd
+
+        plist_target = tmp_path / f"{LABEL}.plist"
+        data = build_plist(
+            _cfg(primary_time="07:30", retry_times=("11:00", "23:15")),
+            tmp_path,
+            Path(sys.executable),
+            tmp_path / "logs",
+        )
+        plist_target.write_bytes(plistlib.dumps(data))
+
+        with patch.object(launchd, "PLIST_PATH", plist_target):
+            assert launchd._installed_times() == ["07:30", "11:00", "23:15"]
+
+    def test_installed_times_empty_when_absent(self, tmp_path: Path) -> None:
+        from betfair_results_downloader.scheduler.installers import launchd
+
+        with patch.object(launchd, "PLIST_PATH", tmp_path / "nope.plist"):
+            assert launchd._installed_times() == []
+
+    def test_installed_times_survives_a_corrupt_plist(self, tmp_path: Path) -> None:
+        from betfair_results_downloader.scheduler.installers import launchd
+
+        bad = tmp_path / f"{LABEL}.plist"
+        bad.write_bytes(b"not a plist")
+        with patch.object(launchd, "PLIST_PATH", bad):
+            assert launchd._installed_times() == []
+
+
+def test_status_does_not_crash_on_a_dash_pid(monkeypatch, tmp_path: Path) -> None:
+    """
+    launchctl prints "-" for a job that has not run yet -- the state an
+    unloaded-then-reloaded agent is in. int("-") took `schedule status` down.
+    """
+    from betfair_results_downloader.scheduler.installers import launchd
+
+    plist_target = tmp_path / f"{LABEL}.plist"
+    plist_target.write_bytes(plistlib.dumps({"Label": LABEL}))
+
+    class _Result:
+        stdout = f"-\t-\t{LABEL}\n"
+
+    monkeypatch.setattr(launchd.subprocess, "run", lambda *a, **k: _Result())
+
+    with patch.object(launchd, "PLIST_PATH", plist_target):
+        info = launchd.LaunchdInstaller().status()
+
+    assert info["loaded"] is True
+    assert info["pid"] is None
+    assert info["last_exit"] is None

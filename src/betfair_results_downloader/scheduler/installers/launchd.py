@@ -107,6 +107,31 @@ def _get_gui_uid() -> str:
     return str(os.getuid())
 
 
+def _installed_times() -> list[str]:
+    """
+    The times actually baked into the installed plist.
+
+    `schedule install --time` applies an override for that install only and
+    writes nothing back to credentials.json, so the configured and installed
+    schedules can diverge silently. Reporting both is what makes that
+    visible.
+    """
+    if not PLIST_PATH.exists():
+        return []
+    try:
+        data = plistlib.loads(PLIST_PATH.read_bytes())
+    except Exception:
+        return []
+    intervals = data.get("StartCalendarInterval") or []
+    if isinstance(intervals, dict):
+        intervals = [intervals]
+    return sorted(
+        f"{int(i.get('Hour', 0)):02d}:{int(i.get('Minute', 0)):02d}"
+        for i in intervals
+        if isinstance(i, dict)
+    )
+
+
 class LaunchdInstaller:
     """
     macOS launchd scheduler installer.
@@ -149,17 +174,20 @@ class LaunchdInstaller:
         log = log_dir or (repo_root / "outputs")
         plist_dict = build_plist(schedule_cfg, repo_root, py_path, log)
 
-        # Write plist
-        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
         plist_bytes = plistlib.dumps(plist_dict, fmt=plistlib.FMT_XML)
-        PLIST_PATH.write_bytes(plist_bytes)
 
         if dry_run:
+            # Report without touching anything. Previously the plist was
+            # written before this check, so the one run that was supposed to
+            # change nothing changed the installed schedule.
             return {
                 "ok": True,
                 "plist_path": str(PLIST_PATH),
-                "message": f"Plist written (dry-run, launchctl not called): {PLIST_PATH}",
+                "message": f"Dry run: would write {PLIST_PATH} and load it via launchctl.",
             }
+
+        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        PLIST_PATH.write_bytes(plist_bytes)
 
         uid = _get_gui_uid()
         result = subprocess.run(
@@ -202,22 +230,24 @@ class LaunchdInstaller:
                 "message": f"Plist not found at {PLIST_PATH} — nothing to uninstall.",
             }
 
-        if not dry_run:
-            uid = _get_gui_uid()
-            # bootout may fail if not currently loaded — that's fine
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
-                capture_output=True,
-                text=True,
-            )
-
-        PLIST_PATH.unlink(missing_ok=True)
-
         if dry_run:
+            # Report without touching anything. This previously deleted the
+            # plist and only skipped the launchctl call, so a dry run
+            # uninstalled the schedule.
             return {
                 "ok": True,
-                "message": f"Plist removed (dry-run, launchctl not called): {PLIST_PATH}",
+                "message": f"Dry run: would unload {LABEL} and remove {PLIST_PATH}.",
             }
+
+        uid = _get_gui_uid()
+        # bootout may fail if not currently loaded — that's fine
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
+            capture_output=True,
+            text=True,
+        )
+
+        PLIST_PATH.unlink(missing_ok=True)
 
         return {
             "ok": True,
@@ -234,12 +264,14 @@ class LaunchdInstaller:
             Keys: ``installed``, ``loaded``, ``pid``, ``last_exit``, ``message``.
         """
         installed = PLIST_PATH.exists()
+        installed_times = _installed_times()
         if not installed:
             return {
                 "installed": False,
                 "loaded": False,
                 "pid": None,
                 "last_exit": None,
+                "installed_times": [],
                 "message": f"Not installed (plist not found at {PLIST_PATH}).",
             }
 
@@ -254,12 +286,21 @@ class LaunchdInstaller:
                 # Format: PID   LastExit   Label
                 parts = line.split()
                 pid = parts[0] if parts[0] != "-" else None
-                last_exit = int(parts[1]) if len(parts) > 1 else None
+                # launchctl prints "-" for a job that has not run yet, which
+                # is exactly the state an unloaded-then-reloaded agent is in.
+                # int("-") raised and took `schedule status` down with it.
+                last_exit = None
+                if len(parts) > 1:
+                    try:
+                        last_exit = int(parts[1])
+                    except ValueError:
+                        last_exit = None
                 return {
                     "installed": True,
                     "loaded": True,
                     "pid": pid,
                     "last_exit": last_exit,
+                    "installed_times": installed_times,
                     "message": f"{LABEL} is loaded (PID={pid}, last_exit={last_exit}).",
                 }
 
@@ -268,6 +309,7 @@ class LaunchdInstaller:
             "loaded": False,
             "pid": None,
             "last_exit": None,
+            "installed_times": installed_times,
             "message": f"Plist installed at {PLIST_PATH} but not currently loaded by launchd.",
         }
 

@@ -54,30 +54,11 @@ def get_credentials_path() -> Path:
         return default
 
 
-def set_credentials_path(path: Path) -> None:
-    """
-    Persist a user-selected credentials path to the pointer file.
-    """
-    resolved = path.expanduser()
-    if not resolved.is_absolute():
-        resolved = (repo_root() / resolved).resolve()
-
-    credentials_pointer_path().parent.mkdir(parents=True, exist_ok=True)
-    credentials_pointer_path().write_text(
-        json.dumps({"path": str(resolved)}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
 def credentials_path() -> Path:
     """
     Backwards-compatible accessor used throughout the codebase.
     """
     return get_credentials_path()
-
-
-def credentials_template_path() -> Path:
-    return secrets_dir() / "credentials.template.json"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -93,11 +74,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
 def get_nested(dct: dict[str, Any], dotted_key: str, default: Any = None) -> Any:
     cur: Any = dct
     for part in dotted_key.split("."):
@@ -105,24 +81,6 @@ def get_nested(dct: dict[str, Any], dotted_key: str, default: Any = None) -> Any
             return default
         cur = cur[part]
     return cur
-
-
-def set_nested(dct: dict[str, Any], dotted_key: str, value: Any) -> None:
-    cur: dict[str, Any] = dct
-    parts = dotted_key.split(".")
-    for p in parts[:-1]:
-        if p not in cur or not isinstance(cur[p], dict):
-            cur[p] = {}
-        cur = cur[p]
-    cur[parts[-1]] = value
-
-
-def mask_value(value: str | None) -> str:
-    if not value:
-        return ""
-    if len(value) <= 4:
-        return "*" * len(value)
-    return value[:2] + "*" * (len(value) - 4) + value[-2:]
 
 
 @dataclass
@@ -269,67 +227,6 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
     return CredentialValidation(ok=(len(errors) == 0), errors=errors, warnings=warnings)
 
 
-def default_credentials_structure() -> dict[str, Any]:
-    """
-    Canonical fallback structure used when no template exists.
-    """
-    return {
-        "betfair": {"username": "", "password": "", "app_key": "", "certs_dir": ""},
-        "user": {
-            "user_id": "YourUserName",
-            "db_user_id": "",
-            "enable_azure_sql": False,
-            "dry_run": True,
-            "snapshot_retention_days": 14,
-            "compress_snapshots": True,
-            "canonical_archive_months": 12,
-        },
-        "paths": {
-            "results_csv_dir": "",
-        },
-        "azure_sql": {
-            "server": "",
-            "database": "",
-            "username": "",
-            "password": "",
-            "driver": "ODBC Driver 18 for SQL Server",
-        },
-    }
-
-
-def load_credentials_template() -> dict[str, Any]:
-    """
-    Load credentials template if present; otherwise return fallback default.
-    """
-    templ = _read_json(credentials_template_path())
-    if templ:
-        # Tidy up any historical hardcoded username, if present in template
-        uid = str(get_nested(templ, "user.user_id", "")).strip().lower()
-        if uid == "gazuty":
-            set_nested(templ, "user.user_id", "YourUserName")
-        return templ
-
-    return default_credentials_structure()
-
-
 def load_credentials(path: Path | None = None) -> dict[str, Any]:
     p = path or credentials_path()
     return _read_json(p)
-
-
-def save_credentials(creds: dict[str, Any], path: Path | None = None) -> None:
-    p = path or credentials_path()
-    _write_json(p, creds)
-
-
-def ensure_credentials_file_exists() -> None:
-    """
-    If credentials file doesn't exist at the resolved credentials_path(),
-    create it from template (if present), otherwise create fallback default.
-    """
-    path = credentials_path()
-    if path.exists():
-        return
-
-    templ = load_credentials_template()
-    _write_json(path, templ)

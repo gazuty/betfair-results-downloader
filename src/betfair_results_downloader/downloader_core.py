@@ -421,40 +421,6 @@ def fetch_cleared_orders_df_range(
     )
 
 
-def fetch_cleared_orders_df(
-    *,
-    betfair: dict[str, Any],
-    lookback_days: int,
-    page_size: int = 200,
-) -> DownloadResult:
-    """
-    Legacy GUI/notebook entry point: download the last ``lookback_days`` of
-    settled orders using interactive login.
-
-    Preserved with an identical public signature so the GUI pipeline
-    (``pipeline.run_pipeline``) continues to work unchanged. Internally
-    delegates to :func:`fetch_cleared_orders_df_range` for the actual work;
-    the chunking is a transparent robustness improvement.
-    """
-    utc_now = datetime.now(timezone.utc)
-    from_dt = utc_now - timedelta(days=int(lookback_days))
-
-    result = fetch_cleared_orders_df_range(
-        betfair=betfair,
-        from_date=from_dt,
-        to_date=utc_now,
-        page_size=page_size,
-    )
-
-    # Preserve the exact legacy message format the GUI currently displays.
-    if result.attempted and result.df_co is not None:
-        result.message = (
-            f"Downloaded cleared orders: {len(result.df_co):,} rows "
-            f"(lookback_days={lookback_days})."
-        )
-    return result
-
-
 # -----------------------------
 # Enrichment: market catalogue
 # -----------------------------

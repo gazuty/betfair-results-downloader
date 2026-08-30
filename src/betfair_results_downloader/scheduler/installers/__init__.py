@@ -1,13 +1,16 @@
 """
 scheduler/installers
 ~~~~~~~~~~~~~~~~~~~~
-Platform-dispatching installer package for the Betfair Results scheduler
-(Phase 3.1+).
+Platform-dispatching installer package for the Betfair Results scheduler.
 
-:func:`get_installer` returns the correct backend for the current platform.
-Each backend implements ``install``, ``uninstall``, ``status``, and ``logs``
-with a consistent interface so ``__main__.py`` doesn't need to know which
-platform it's on.
+:func:`get_installer` returns the backend for the current platform.
+
+Only launchd is implemented. Backends for Windows Task Scheduler, systemd
+--user and cron existed but were never run: this is a single-user macOS
+tool, and carrying ~1,000 lines of untested cross-platform code cost more
+than it bought -- the run-history renderer alone was copy-pasted into all
+four and had already drifted between copies. They are recoverable from git
+history if another platform is ever needed.
 """
 
 from __future__ import annotations
@@ -17,14 +20,9 @@ import platform
 
 def get_installer():
     """
-    Return the appropriate scheduler installer for the current platform.
+    Return the scheduler installer for the current platform.
 
-    - macOS → :mod:`.launchd`
-    - Windows → :mod:`.taskscheduler`
-    - Linux with systemd → :mod:`.systemd_user`
-    - Linux without systemd → :mod:`.cron`
-
-    Raises ``RuntimeError`` on unsupported platforms.
+    Raises ``RuntimeError`` on anything but macOS.
     """
     system = platform.system()
 
@@ -33,30 +31,7 @@ def get_installer():
 
         return LaunchdInstaller()
 
-    if system == "Windows":
-        from .taskscheduler import TaskSchedulerInstaller
-
-        return TaskSchedulerInstaller()
-
-    if system == "Linux":
-        # Prefer systemd --user if available, fall back to cron
-        if _systemd_available():
-            from .systemd_user import SystemdUserInstaller
-
-            return SystemdUserInstaller()
-        from .cron import CronInstaller
-
-        return CronInstaller()
-
     raise RuntimeError(
         f"No scheduler installer available for platform: {system}. "
-        "Supported platforms: macOS (launchd), Windows (Task Scheduler), "
-        "Linux (systemd --user or cron)."
+        "Only macOS (launchd) is supported; see the package docstring."
     )
-
-
-def _systemd_available() -> bool:
-    """Return True if systemd --user appears to be available on this Linux system."""
-    import shutil
-
-    return shutil.which("systemctl") is not None
