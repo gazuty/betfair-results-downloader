@@ -9,6 +9,14 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def _betid_keys(df: pd.DataFrame) -> set[str]:
+    """The set of usable betId values in ``df``; empty when the column is absent."""
+    if df is None or df.empty or "betId" not in df.columns:
+        return set()
+    col = df["betId"].astype(str).str.strip()
+    return set(col[col.ne("") & col.ne("nan") & col.ne("None")])
+
+
 def clean_and_remove_duplicates(
     df: pd.DataFrame,
     *,
@@ -151,7 +159,7 @@ def update_csv_with_new_data(
 
     incoming = clean_and_remove_duplicates(new_data_df, status_cb=status_cb)
 
-    existing_rows: Optional[int] = None
+    existing_keys: Optional[set[str]] = None
     if path.exists():
         # dtype=str is load-bearing, not a style choice. With inferred types
         # pandas reads marketId ("1.251500100") as float64 and writes it back
@@ -159,7 +167,7 @@ def update_csv_with_new_data(
         # at 8.6% of rows on the live canonical. keep_default_na=False stops
         # empty strings becoming NaN and then the literal "nan" on write.
         existing = pd.read_csv(path, dtype=str, keep_default_na=False)
-        existing_rows = len(existing)
+        existing_keys = _betid_keys(existing)
 
         # union schema and align
         cols = sorted(set(existing.columns).union(set(incoming.columns)))
@@ -172,17 +180,24 @@ def update_csv_with_new_data(
 
     combined = clean_and_remove_duplicates(combined, status_cb=status_cb)
 
-    # A merge adds rows or leaves them alone; it never removes them. Archival
-    # is the only legitimate shrink and it happens elsewhere, so a drop here
-    # means a dedupe or schema fault -- and writing it would atomically
-    # replace the system of record with the damaged version.
-    if existing_rows is not None and len(combined) < existing_rows:
-        raise ValueError(
-            f"Refusing to write {path.name}: row count fell from "
-            f"{existing_rows:,} to {len(combined):,} during a merge that added "
-            f"{len(incoming):,} rows. This should be impossible; the existing "
-            f"file has been left untouched."
-        )
+    # No record that was in the file may disappear from it. Writing would
+    # atomically replace the system of record, so a dedupe or schema fault
+    # here is unrecoverable.
+    #
+    # Membership, not row count: if the canonical already contains duplicate
+    # betIds, deduping it legitimately produces fewer rows than it started
+    # with. Comparing counts would abort every run from then on and leave the
+    # file unrepairable through the normal path -- worse than the fault it
+    # is meant to catch.
+    if existing_keys is not None:
+        lost = existing_keys - _betid_keys(combined)
+        if lost:
+            raise ValueError(
+                f"Refusing to write {path.name}: {len(lost):,} betIds present "
+                f"in the existing file are absent after merging {len(incoming):,} "
+                f"incoming rows (e.g. {sorted(lost)[:3]}). The existing file has "
+                f"been left untouched."
+            )
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     combined.to_csv(tmp_path, index=False)

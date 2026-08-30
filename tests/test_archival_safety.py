@@ -139,7 +139,28 @@ def test_merge_refuses_to_shrink_the_canonical(tmp_path, monkeypatch) -> None:
         "betfair_results_downloader.csv_utils.clean_and_remove_duplicates", swallow
     )
 
-    with pytest.raises(ValueError, match="row count fell"):
+    with pytest.raises(ValueError, match="absent after merging"):
         update_csv_with_new_data(path, make_cleared_orders(10, first_bet_id=900))
 
     assert path.read_bytes() == before, "the existing file must be untouched"
+
+
+def test_existing_duplicates_can_still_be_cleaned_up(tmp_path) -> None:
+    """
+    A canonical that already contains duplicate betIds legitimately shrinks
+    when merged and deduped. Guarding on row count would abort every run from
+    then on and leave the file unrepairable through the normal path.
+    """
+    path = tmp_path / "cleared_orders_cleaned.csv"
+    df = make_cleared_orders(50)
+    doubled = pd.concat([df, df], ignore_index=True)
+    doubled.to_csv(path, index=False)
+    assert len(pd.read_csv(path)) == 100
+
+    _, combined = update_csv_with_new_data(
+        path, make_cleared_orders(10, first_bet_id=900, seed=4)
+    )
+
+    assert len(combined) == 60, "50 deduped + 10 new"
+    on_disk = pd.read_csv(path)
+    assert len(on_disk) == 60
