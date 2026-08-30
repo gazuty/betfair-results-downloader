@@ -91,10 +91,19 @@ def clean_and_remove_duplicates(
                     columns=sort_keys
                 )
 
-            out = out.drop_duplicates(subset=[bet_key], keep="last").reset_index(
-                drop=True
-            )
-            return out.drop(columns=[bet_key])
+            # Dedupe only rows that have a usable key. pandas treats NaN as
+            # equal to NaN in drop_duplicates, so including the unparseable
+            # ones would collapse every last one of them into a single row --
+            # harmless while the result stays in memory, destructive on the
+            # archival path where the originals are then deleted.
+            has_key = out[bet_key].notna()
+            keyed = out[has_key].drop_duplicates(subset=[bet_key], keep="last")
+            unkeyed = out[~has_key].drop_duplicates(keep="last")
+            if len(unkeyed):
+                out = pd.concat([keyed, unkeyed], ignore_index=True)
+            else:
+                out = keyed.reset_index(drop=True)
+            return out.drop(columns=[bet_key]).reset_index(drop=True)
         else:
             # All betIds are NaN - must fall back
             warn(
@@ -142,6 +151,7 @@ def update_csv_with_new_data(
 
     incoming = clean_and_remove_duplicates(new_data_df, status_cb=status_cb)
 
+    existing_rows: Optional[int] = None
     if path.exists():
         # dtype=str is load-bearing, not a style choice. With inferred types
         # pandas reads marketId ("1.251500100") as float64 and writes it back
@@ -149,6 +159,7 @@ def update_csv_with_new_data(
         # at 8.6% of rows on the live canonical. keep_default_na=False stops
         # empty strings becoming NaN and then the literal "nan" on write.
         existing = pd.read_csv(path, dtype=str, keep_default_na=False)
+        existing_rows = len(existing)
 
         # union schema and align
         cols = sorted(set(existing.columns).union(set(incoming.columns)))
@@ -160,6 +171,18 @@ def update_csv_with_new_data(
         combined = incoming
 
     combined = clean_and_remove_duplicates(combined, status_cb=status_cb)
+
+    # A merge adds rows or leaves them alone; it never removes them. Archival
+    # is the only legitimate shrink and it happens elsewhere, so a drop here
+    # means a dedupe or schema fault -- and writing it would atomically
+    # replace the system of record with the damaged version.
+    if existing_rows is not None and len(combined) < existing_rows:
+        raise ValueError(
+            f"Refusing to write {path.name}: row count fell from "
+            f"{existing_rows:,} to {len(combined):,} during a merge that added "
+            f"{len(incoming):,} rows. This should be impossible; the existing "
+            f"file has been left untouched."
+        )
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     combined.to_csv(tmp_path, index=False)
