@@ -20,7 +20,11 @@ from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError
 
 from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
-from .csv_utils import clean_and_remove_duplicates, update_csv_with_new_data
+from .csv_utils import (
+    betid_keys,
+    clean_and_remove_duplicates,
+    update_csv_with_new_data,
+)
 from .scheduler.date_windows import chunk_date_range
 
 
@@ -821,21 +825,65 @@ def archive_old_canonical_rows(
     for year in sorted(settled[old_mask].dt.year.unique()):
         year_mask = old_mask & (settled.dt.year == year)
         chunk = df_canonical[year_mask]
+        moving = int(year_mask.sum())
         archive_path = results_csv_dir / f"cleared_orders_archive_{year}.csv.gz"
+
         if archive_path.exists():
-            existing = pd.read_csv(archive_path, low_memory=False)
+            # dtype=str for the same reason as the canonical: inferred types
+            # silently truncate marketId, and the archive is the only
+            # remaining copy of these rows.
+            existing = pd.read_csv(archive_path, dtype=str, keep_default_na=False)
             cols = sorted(set(existing.columns).union(set(chunk.columns)))
             chunk = pd.concat(
                 [existing.reindex(columns=cols), chunk.reindex(columns=cols)],
                 ignore_index=True,
             )
         chunk = clean_and_remove_duplicates(chunk, status_cb=status_cb)
+
+        # These rows are about to be deleted from the canonical, and the
+        # snapshots are written from the trimmed frame, so the archive is the
+        # only place they will exist. Prove each one is actually there.
+        #
+        # Membership, not row count: re-archiving a row that is already in the
+        # archive is a legitimate no-op, so the archive growing by less than
+        # the number moved is expected. What is not acceptable is a row
+        # leaving the canonical without arriving here.
+        leaving = df_canonical.loc[year_mask]
+        if "betId" in leaving.columns and "betId" in chunk.columns:
+            # Same normalisation as the dedupe key, so a legacy "123.0" and a
+            # fresh 123 are recognised as one record rather than a loss.
+            missing = betid_keys(leaving) - betid_keys(chunk)
+            if missing:
+                raise ValueError(
+                    f"Refusing to archive into {archive_path.name}: "
+                    f"{len(missing):,} of the {moving:,} rows selected for "
+                    f"{year} are absent from the archive after the merge and "
+                    f"would be deleted from the canonical without being stored "
+                    f"anywhere (e.g. betId {sorted(missing)[:3]}). The "
+                    f"canonical has been left untouched."
+                )
+
+        # Rows with no usable betId cannot be checked by key, so count them.
+        def _keyless(frame):
+            """Rows the dedupe key cannot identify, so they cannot be checked by key."""
+            if "betId" not in frame.columns:
+                return len(frame)
+            return int(pd.to_numeric(frame["betId"], errors="coerce").isna().sum())
+
+        if _keyless(chunk) < _keyless(leaving):
+            raise ValueError(
+                f"Refusing to archive into {archive_path.name}: "
+                f"{_keyless(leaving):,} rows without a usable betId were "
+                f"selected for {year} but only {_keyless(chunk):,} are present "
+                f"in the archive. The canonical has been left untouched."
+            )
+
         tmp_path = archive_path.with_name(archive_path.name + ".tmp")
         chunk.to_csv(tmp_path, index=False, compression="gzip")
         tmp_path.replace(archive_path)
         if status_cb:
             status_cb(
-                f"Archive: moved {int(year_mask.sum()):,} rows settled before "
+                f"Archive: moved {moving:,} rows settled before "
                 f"{cutoff.date()} into {archive_path.name} (now {len(chunk):,} rows)."
             )
 

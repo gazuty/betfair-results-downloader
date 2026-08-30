@@ -9,6 +9,23 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def betid_keys(df: pd.DataFrame) -> set[float]:
+    """
+    The set of usable betId values in ``df``, normalised the same way the
+    dedupe key is.
+
+    Matching the dedupe normalisation matters: dedupe compares betIds
+    numerically, so a legacy "123.0" in the file and a fresh 123 from the API
+    are one record. Comparing raw strings would report the first as lost when
+    dedupe legitimately kept the second, and abort every run that overlapped
+    it.
+    """
+    if df is None or df.empty or "betId" not in df.columns:
+        return set()
+    numeric = pd.to_numeric(df["betId"], errors="coerce")
+    return set(numeric.dropna().unique().tolist())
+
+
 def clean_and_remove_duplicates(
     df: pd.DataFrame,
     *,
@@ -91,10 +108,19 @@ def clean_and_remove_duplicates(
                     columns=sort_keys
                 )
 
-            out = out.drop_duplicates(subset=[bet_key], keep="last").reset_index(
-                drop=True
-            )
-            return out.drop(columns=[bet_key])
+            # Dedupe only rows that have a usable key. pandas treats NaN as
+            # equal to NaN in drop_duplicates, so including the unparseable
+            # ones would collapse every last one of them into a single row --
+            # harmless while the result stays in memory, destructive on the
+            # archival path where the originals are then deleted.
+            has_key = out[bet_key].notna()
+            keyed = out[has_key].drop_duplicates(subset=[bet_key], keep="last")
+            unkeyed = out[~has_key].drop_duplicates(keep="last")
+            if len(unkeyed):
+                out = pd.concat([keyed, unkeyed], ignore_index=True)
+            else:
+                out = keyed.reset_index(drop=True)
+            return out.drop(columns=[bet_key]).reset_index(drop=True)
         else:
             # All betIds are NaN - must fall back
             warn(
@@ -142,6 +168,7 @@ def update_csv_with_new_data(
 
     incoming = clean_and_remove_duplicates(new_data_df, status_cb=status_cb)
 
+    existing_keys: Optional[set[float]] = None
     if path.exists():
         # dtype=str is load-bearing, not a style choice. With inferred types
         # pandas reads marketId ("1.251500100") as float64 and writes it back
@@ -149,6 +176,7 @@ def update_csv_with_new_data(
         # at 8.6% of rows on the live canonical. keep_default_na=False stops
         # empty strings becoming NaN and then the literal "nan" on write.
         existing = pd.read_csv(path, dtype=str, keep_default_na=False)
+        existing_keys = betid_keys(existing)
 
         # union schema and align
         cols = sorted(set(existing.columns).union(set(incoming.columns)))
@@ -160,6 +188,25 @@ def update_csv_with_new_data(
         combined = incoming
 
     combined = clean_and_remove_duplicates(combined, status_cb=status_cb)
+
+    # No record that was in the file may disappear from it. Writing would
+    # atomically replace the system of record, so a dedupe or schema fault
+    # here is unrecoverable.
+    #
+    # Membership, not row count: if the canonical already contains duplicate
+    # betIds, deduping it legitimately produces fewer rows than it started
+    # with. Comparing counts would abort every run from then on and leave the
+    # file unrepairable through the normal path -- worse than the fault it
+    # is meant to catch.
+    if existing_keys is not None:
+        lost = existing_keys - betid_keys(combined)
+        if lost:
+            raise ValueError(
+                f"Refusing to write {path.name}: {len(lost):,} betIds present "
+                f"in the existing file are absent after merging {len(incoming):,} "
+                f"incoming rows (e.g. {sorted(lost)[:3]}). The existing file has "
+                f"been left untouched."
+            )
 
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     combined.to_csv(tmp_path, index=False)

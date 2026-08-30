@@ -52,10 +52,14 @@ def test_warning_when_some_betids_invalid():
     assert len(messages) == 1
     assert "2 of 5 rows have invalid betId values" in messages[0]
 
-    # Behavior: dedupes on valid betIds, NaN betIds are treated as duplicates of each other
-    # Input: 5 rows (3 valid betIds, 2 invalid→NaN)
-    # Output: 4 rows (3 valid betIds, 1 NaN - last NaN kept)
-    assert len(result) == 4
+    # Rows with an unusable betId are deduped on full-row equality, not
+    # collapsed into one. Previously this asserted 4 rows: pandas treats NaN
+    # as equal to NaN in drop_duplicates, so "invalid" (profit 30) and "bad"
+    # (profit 50) became a single row. That is silent data loss in memory,
+    # and permanent loss on the archival path, where the originals are then
+    # deleted from the canonical.
+    assert len(result) == 5
+    assert sorted(result["profit"].astype(float)) == [10.0, 20.0, 30.0, 40.0, 50.0]
 
 
 def test_warning_when_betid_column_missing():
