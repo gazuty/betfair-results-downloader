@@ -23,10 +23,22 @@ def _canonical(results_dir):
     return results_dir / "cleared_orders_cleaned.csv"
 
 
+def _write(df, results_dir):
+    """
+    archive_months=0 disables archival deliberately.
+
+    These tests are about the merge, not the archive, and the fixture uses
+    fixed 2026 dates: with the 12-month default they would start moving rows
+    to archive files once the wall clock passed June 2027 and fail with no
+    product regression. Archival has its own tests.
+    """
+    return write_csv_outputs(df_co=df, results_csv_dir=results_dir, archive_months=0)
+
+
 def test_first_write_preserves_every_row_and_column(results_dir) -> None:
     df = make_cleared_orders(500)
 
-    write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    _write(df, results_dir)
 
     written = pd.read_csv(_canonical(results_dir), dtype=str, keep_default_na=False)
     assert len(written) == 500
@@ -39,11 +51,11 @@ def test_second_run_merges_without_losing_rows(results_dir) -> None:
     A dedupe regression here silently rewrites the system of record.
     """
     first = make_cleared_orders(500, first_bet_id=1)
-    write_csv_outputs(df_co=first, results_csv_dir=results_dir)
+    _write(first, results_dir)
 
     # 100 rows of overlap, 400 genuinely new -- the real shape of a run.
     second = make_cleared_orders(500, first_bet_id=401, seed=99)
-    write_csv_outputs(df_co=second, results_csv_dir=results_dir)
+    _write(second, results_dir)
 
     written = pd.read_csv(_canonical(results_dir), dtype=str, keep_default_na=False)
     ids = written["betId"].astype(int)
@@ -56,9 +68,9 @@ def test_second_run_merges_without_losing_rows(results_dir) -> None:
 def test_repeated_identical_run_is_idempotent(results_dir) -> None:
     df = make_cleared_orders(200)
 
-    write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    _write(df, results_dir)
     first = _canonical(results_dir).read_text(encoding="utf-8")
-    write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    _write(df, results_dir)
     second = _canonical(results_dir).read_text(encoding="utf-8")
 
     assert first == second, "re-running the same window must change nothing"
@@ -67,19 +79,50 @@ def test_repeated_identical_run_is_idempotent(results_dir) -> None:
 def test_snapshot_matches_the_canonical(results_dir) -> None:
     df = make_cleared_orders(300)
 
-    result = write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    result = _write(df, results_dir)
 
     canonical = pd.read_csv(_canonical(results_dir), dtype=str, keep_default_na=False)
     snapshot = pd.read_csv(result.snapshot_path, dtype=str, keep_default_na=False)
+
     assert len(snapshot) == len(canonical)
     assert set(snapshot.columns) == set(canonical.columns)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known defect, same root cause as the marketId truncation: "
+        "write_csv_outputs re-reads the canonical with inferred dtypes before "
+        "writing the snapshot, so numeric-looking string columns diverge "
+        "(12345678 in the canonical, 12345678.0 in the snapshot) on the very "
+        "first write. The snapshot is the only backup of the canonical, so "
+        "they should be identical. Fixed by the dtype PR."
+    ),
+)
+def test_snapshot_values_match_the_canonical(results_dir) -> None:
+    """
+    Shape alone would pass even if every value differed -- so compare
+    contents. The snapshot is the recovery copy; a snapshot that does not
+    match the file it snapshots is not a backup.
+    """
+    df = make_cleared_orders(300)
+
+    result = _write(df, results_dir)
+
+    canonical = pd.read_csv(_canonical(results_dir), dtype=str, keep_default_na=False)
+    snapshot = pd.read_csv(result.snapshot_path, dtype=str, keep_default_na=False)
+
+    cols = sorted(canonical.columns)
+    left = canonical[cols].sort_values("betId").reset_index(drop=True)
+    right = snapshot[cols].sort_values("betId").reset_index(drop=True)
+    pd.testing.assert_frame_equal(left, right)
 
 
 def test_numeric_columns_survive_the_round_trip(results_dir) -> None:
     df = make_cleared_orders(200)
     expected = df.set_index("betId")["profit"].round(2).to_dict()
 
-    write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    _write(df, results_dir)
     write_csv_outputs(
         df_co=make_cleared_orders(50, first_bet_id=500, seed=7),
         results_csv_dir=results_dir,
@@ -109,7 +152,7 @@ def test_market_ids_are_not_truncated_by_the_round_trip(results_dir) -> None:
     df = make_cleared_orders(500)
     expected = dict(zip(df["betId"].astype(str), df["marketId"].astype(str)))
 
-    write_csv_outputs(df_co=df, results_csv_dir=results_dir)
+    _write(df, results_dir)
     # A second run re-reads and rewrites every existing row.
     write_csv_outputs(
         df_co=make_cleared_orders(50, first_bet_id=900, seed=3),
