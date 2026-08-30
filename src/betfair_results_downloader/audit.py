@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _parse_iso_to_utc_date(value: str | None) -> date | None:
+def _parse_iso_to_utc(value: str | None) -> datetime | None:
     if not value:
         return None
     raw = value.strip()
@@ -20,7 +20,7 @@ def _parse_iso_to_utc_date(value: str | None) -> date | None:
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).date()
+    return dt.astimezone(timezone.utc)
 
 
 def compute_missing_settled_dates(
@@ -45,20 +45,39 @@ def compute_missing_settled_dates(
     seen_dates: set[date] = set()
     earliest: date | None = None
     latest: date | None = None
+    latest_dt: datetime | None = None
 
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            settled = _parse_iso_to_utc_date(row.get("settledDate"))
-            if settled is None:
+            settled_dt = _parse_iso_to_utc(row.get("settledDate"))
+            if settled_dt is None:
                 continue
+            if latest_dt is None or settled_dt > latest_dt:
+                latest_dt = settled_dt
+            settled = settled_dt.date()
             seen_dates.add(settled)
             if earliest is None or settled < earliest:
                 earliest = settled
             if latest is None or settled > latest:
                 latest = settled
 
-    today_utc = (now_utc or datetime.now(timezone.utc)).date()
+    now = now_utc or datetime.now(timezone.utc)
+    today_utc = now.date()
+
+    def _staleness() -> tuple[float | None, int | None]:
+        """
+        Staleness from the settlement timestamp, not the date boundary.
+
+        A row settled at 23:59 is minutes old at 00:01 the next day; measuring
+        by date would call that a full day stale and raise a false alarm on
+        every run just after UTC midnight.
+        """
+        if latest_dt is None:
+            return None, None
+        hours = max((now - latest_dt).total_seconds() / 3600.0, 0.0)
+        return round(hours, 2), int(hours // 24)
+
     if earliest is None or latest is None:
         return {
             "window_start": None,
@@ -66,6 +85,8 @@ def compute_missing_settled_dates(
             "earliest": None,
             "latest": None,
             "today": today_utc.isoformat(),
+            "hours_stale": None,
+            "days_stale": None,
             "num_missing": 0,
             "missing_ranges": [],
             "message": "No settledDate values found.",
@@ -88,12 +109,21 @@ def compute_missing_settled_dates(
             "earliest": earliest.isoformat(),
             "latest": latest.isoformat(),
             "today": today_utc.isoformat(),
+            "hours_stale": _staleness()[0],
+            "days_stale": _staleness()[1],
             "num_missing": 0,
             "missing_ranges": [],
         }
 
     audit_start = present_in_window[0]
-    audit_end = present_in_window[-1]
+    # Deliberately not present_in_window[-1]: clamping to the last day that
+    # HAS data makes a stopped pipeline structurally invisible, because the
+    # days between the final row and today are never examined.
+    #
+    # But stop at the last COMPLETED day. Today is still in progress, so
+    # counting it would report a missing day on every run made before the
+    # first settlement of the day.
+    audit_end = max(today_utc - timedelta(days=1), audit_start)
 
     present_set = set(present_in_window)
     missing_ranges: list[dict[str, Any]] = []
@@ -138,6 +168,8 @@ def compute_missing_settled_dates(
         "earliest": earliest.isoformat(),
         "latest": latest.isoformat(),
         "today": today_utc.isoformat(),
+        "hours_stale": _staleness()[0],
+        "days_stale": _staleness()[1],
         "num_missing": num_missing,
         "missing_ranges": missing_ranges,
     }

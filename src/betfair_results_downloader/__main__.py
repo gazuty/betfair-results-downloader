@@ -268,6 +268,9 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 
     print(f"Audit window  : {result['window_start']} .. {result['window_end']}")
     print(f"Data range    : {result['earliest']} .. {result['latest']}")
+    days_stale = result.get("days_stale")
+    if days_stale:
+        print(f"Data is STALE : newest row is {days_stale} day(s) old")
     missing = result.get("missing_ranges") or []
     if not missing:
         print("No missing settled-date gaps found in the audit window.")
