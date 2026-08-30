@@ -109,7 +109,9 @@ def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Pat
 def _extract_max_settled_at_utc(df: pd.DataFrame) -> Optional[datetime]:
     if df is None or df.empty or "settledDate" not in df.columns:
         return None
-    ts = pd.to_datetime(df["settledDate"], utc=True, errors="coerce").dropna()
+    ts = pd.to_datetime(
+        df["settledDate"], utc=True, errors="coerce", format="ISO8601"
+    ).dropna()
     if ts.empty:
         return None
     max_ts = ts.max().to_pydatetime()

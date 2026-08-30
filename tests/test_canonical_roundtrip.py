@@ -121,15 +121,6 @@ def test_numeric_columns_survive_the_round_trip(results_dir) -> None:
         assert got[bet_id] == pytest.approx(profit), f"profit drifted for {bet_id}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect: the canonical is read without dtype=, so pandas infers "
-        "float64 for marketId and strips trailing digits. Measured at 8.6% of "
-        "rows on the live file. Fixed in the dtype PR, which flips this to a "
-        "passing assertion."
-    ),
-)
 def test_market_ids_are_not_truncated_by_the_round_trip(results_dir) -> None:
     """
     Betfair market IDs are '1.' plus nine digits. A float round-trip destroys
@@ -190,3 +181,26 @@ def test_update_csv_returns_the_frame_it_wrote(tmp_path) -> None:
     on_disk = pd.read_csv(path)
     assert len(returned_frame) == len(on_disk) == 50
     assert set(returned_frame.columns) == set(on_disk.columns)
+
+
+def test_mixed_iso_renderings_all_parse() -> None:
+    """
+    Both ISO-8601 renderings of the same instant must parse. Without
+    format="ISO8601", pandas infers the format from the first row and coerces
+    every other rendering to NaT -- which for the report would mean silently
+    dropping rows and posting a confident $0.00.
+    """
+    from betfair_results_downloader.reporting.schema import _to_utc_datetime
+
+    series = pd.Series(
+        [
+            "2026-07-13 04:58:46+00:00",
+            "2026-07-13T04:58:46Z",
+            "2026-07-13T04:58:46.000Z",
+        ]
+    )
+
+    parsed = _to_utc_datetime(series)
+
+    assert parsed.notna().all(), "every rendering must parse, not just the first"
+    assert parsed.nunique() == 1, "they are the same instant"
