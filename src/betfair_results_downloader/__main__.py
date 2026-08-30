@@ -133,7 +133,7 @@ def _load_creds_and_schedule(validate: bool = False):
     return creds, schedule_cfg
 
 
-def _cmd_run(_args: argparse.Namespace) -> int:
+def _cmd_run(args: argparse.Namespace) -> int:
     """
     Run one scheduled download.
 
@@ -151,19 +151,49 @@ def _cmd_run(_args: argparse.Namespace) -> int:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    creds, schedule_cfg = _load_creds_and_schedule(validate=True)
+    # The scheduled job is unattended: a failure that only reaches
+    # launchd.err.log is a failure nobody sees. Announce every non-success
+    # outcome, including a credentials load that exits before the run starts.
+    creds, schedule_cfg = _load_creds_for_report(
+        args, validate=True, context="scheduled run"
+    )
 
     from .scheduler.runner import run_scheduled
 
-    result = run_scheduled(creds, schedule_cfg)
+    try:
+        result = run_scheduled(creds, schedule_cfg)
+    except Exception as exc:
+        # Not everything reaches _run_pipeline's RunResult conversion: a
+        # malformed optional section (a `paths` that is a string, say) passes
+        # validation and then raises during gap detection. Announcing by
+        # default means nothing may exit on a traceback.
+        msg = f"FAIL: scheduled run raised {type(exc).__name__}: {exc}"
+        print(msg)
+        if getattr(args, "post_slack", True):
+            _post_to_slack(f":warning: Betfair scheduled run failed\n{msg}", creds)
+        return 1
 
-    if result.ok:
+    if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")
         return 0
 
-    print(f"FAIL ({result.status}): {result.message}")
-    for err in result.errors:
-        print(f"  - {err}")
+    label = "PARTIAL" if result.ok else "FAIL"
+    lines = [f"{label} ({result.status}): {result.message}"]
+    lines.extend(f"  - {err}" for err in result.errors)
+    for line in lines:
+        print(line)
+
+    if getattr(args, "post_slack", True):
+        _post_to_slack(
+            ":warning: Betfair scheduled run "
+            + ("completed with problems" if result.ok else "failed")
+            + "\n"
+            + "\n".join(lines),
+            creds,
+        )
+
+    # A partial run is not a success: exiting 0 hides an Azure publish failure
+    # from launchd and from any monitoring built on the exit code.
     return 1
 
 
@@ -303,9 +333,22 @@ def _send_slack(text: str, creds: dict) -> int:
     return 0
 
 
-def _load_creds_for_report(args: argparse.Namespace):
+def _load_creds_for_report(
+    args: argparse.Namespace,
+    *,
+    validate: bool = False,
+    context: str = "DM report",
+):
     """
     Load credentials, announcing setup failures to Slack before they exit.
+
+    ``validate`` is passed through to _load_creds_and_schedule: the scheduled
+    run needs the full fail-fast validation, so that a bad timezone or an
+    oversized chunk setting exits 2 with collected errors rather than raising
+    from deep inside the pipeline, outside every notification handler.
+
+    ``context`` names the failing command in the alert. A run that never
+    started must not report itself as a broken report.
 
     ``_load_creds_and_schedule`` prints the reason and raises SystemExit, so
     without this wrapper the very failure the local Slack config exists to
@@ -319,12 +362,12 @@ def _load_creds_for_report(args: argparse.Namespace):
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            creds, schedule_cfg = _load_creds_and_schedule()
+            creds, schedule_cfg = _load_creds_and_schedule(validate=validate)
     except SystemExit:
         detail = buf.getvalue().strip() or "FAIL: could not load credentials.json"
         print(detail)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+            _post_to_slack(f":warning: Betfair {context} failed\n{detail}")
         raise
     except Exception as exc:
         # parse_schedule_config raises ValueError rather than exiting, e.g. on
@@ -336,7 +379,7 @@ def _load_creds_for_report(args: argparse.Namespace):
         detail = f"FAIL: could not load configuration: {type(exc).__name__}: {exc}"
         print(detail)
         if getattr(args, "post_slack", False):
-            _post_to_slack(f":warning: Betfair DM report failed\n{detail}")
+            _post_to_slack(f":warning: Betfair {context} failed\n{detail}")
         raise SystemExit(2) from exc
     captured = buf.getvalue()
     if captured:
@@ -518,10 +561,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "auth-test",
         help="Test cert-based non-interactive Betfair login and report the outcome.",
     )
-    sub.add_parser(
+    rn = sub.add_parser(
         "run",
         help="Run one scheduled download (gap-detect, fetch, enrich, CSV, optional Azure).",
     )
+    # Announcing is the default here, unlike dm-report: this is the unattended
+    # job, so silence is the wrong default when something goes wrong.
+    rn.add_argument(
+        "--no-post-slack",
+        dest="post_slack",
+        action="store_false",
+        help="Do not announce failures to Slack (announcing is the default).",
+    )
+    rn.set_defaults(post_slack=True)
     bf = sub.add_parser(
         "backfill",
         help="Manual backfill for an explicit date range.",

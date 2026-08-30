@@ -286,3 +286,115 @@ def test_explicit_csv_leaves_creds_unresolved_for_the_notifier(
 
     assert exit_code == 0
     assert seen["creds"] is None, "must stay None so the notifier resolves creds"
+
+
+def test_partial_local_slack_config_does_not_shadow_credentials(monkeypatch) -> None:
+    """
+    A half-written ~/.betfair/slack.json must not silence alerting by
+    shadowing a working credentials.json slack section.
+    """
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify, "_read_local_config", lambda: {"channel": "U-local"}
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert token == "xoxb-embedded", "embedded token must survive a partial local file"
+    assert channel == "U-local", "local values still win where present"
+
+
+def test_local_slack_config_overrides_credentials(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert (token, channel) == ("xoxb-local", "U-local")
+
+
+def test_empty_local_values_do_not_blank_out_credentials(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify, "_read_local_config", lambda: {"bot_token": "", "channel": None}
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"bot_token": "xoxb-embedded", "channel": "U-embedded"}}
+    )
+
+    assert (token, channel) == ("xoxb-embedded", "U-embedded")
+
+
+def test_local_config_is_not_silenced_by_a_stale_embedded_disable(monkeypatch) -> None:
+    """
+    A complete local config that never mentions `enabled` must not be switched
+    off by a stale `enabled: false` in credentials.json. Before the merge, the
+    local file was selected wholesale and this worked.
+    """
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    token, channel = slack_notify.load_slack_config(
+        {"slack": {"enabled": False, "bot_token": "xoxb-old", "channel": "U-old"}}
+    )
+
+    assert (token, channel) == ("xoxb-local", "U-local")
+
+
+def test_explicit_local_disable_is_honoured(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"enabled": False, "bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    with pytest.raises(slack_notify.SlackNotConfigured):
+        slack_notify.load_slack_config({"slack": {"bot_token": "x", "channel": "y"}})
+
+
+def test_embedded_disable_still_applies_without_a_local_file(monkeypatch) -> None:
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(slack_notify, "_read_local_config", lambda: None)
+
+    with pytest.raises(slack_notify.SlackNotConfigured):
+        slack_notify.load_slack_config(
+            {"slack": {"enabled": False, "bot_token": "x", "channel": "y"}}
+        )
+
+
+@pytest.mark.parametrize("bad", [["a", "list"], "a string", 42, None])
+def test_non_object_credentials_do_not_break_the_notifier(monkeypatch, bad) -> None:
+    """
+    A credentials.json with a non-object top level makes validation raise, and
+    the failure path hands that value back to the notifier. It must still be
+    able to announce the problem from the local file.
+    """
+    from betfair_results_downloader import slack_notify
+
+    monkeypatch.setattr(
+        slack_notify,
+        "_read_local_config",
+        lambda: {"bot_token": "xoxb-local", "channel": "U-local"},
+    )
+
+    assert slack_notify.load_slack_config(bad) == ("xoxb-local", "U-local")

@@ -45,6 +45,40 @@ class RunResult:
     download_finished_utc: Optional[datetime] = None
 
 
+def azure_state_configured(creds: dict[str, Any]) -> bool:
+    """
+    True when an Azure checkpoint is expected to be written.
+
+    ``upsert_schedule_state`` also returns False when Azure was never
+    configured, which is a supported CSV-only setup -- gap detection falls
+    back to the canonical CSV. Only a configured-but-unreachable Azure is a
+    problem worth downgrading a run for; without this distinction every
+    successful CSV-only run would alert.
+    """
+    return bool((creds.get("azure_sql") or {}).get("server"))
+
+
+def apply_azure_state_outcome(
+    result: "RunResult", creds: dict[str, Any], state_written: bool
+) -> "RunResult":
+    """
+    Downgrade ``result`` when a configured Azure checkpoint failed to write.
+
+    The checkpoint is what stops the next run re-downloading the same window,
+    so silently continuing means every future run repeats this one while still
+    reporting success.
+    """
+    if azure_state_configured(creds) and not state_written:
+        result.status = "partial"
+        reason = (
+            "Azure ScheduleState checkpoint was not written; "
+            "the next run will repeat this window."
+        )
+        result.errors.append(reason)
+        result.message = f"{result.message} {reason}".strip()
+    return result
+
+
 def _azure_publish_allowed(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> bool:
     user = creds.get("user") or {}
     enable_azure = bool(user.get("enable_azure_sql", False))
@@ -334,7 +368,7 @@ def run_scheduled(
         covered_utc, covered_local = derive_coverage_dates(
             from_dt_utc, to_dt_utc, schedule_cfg.timezone
         )
-        upsert_schedule_state(
+        state_written = upsert_schedule_state(
             creds,
             last_covered_date_utc=covered_utc,
             last_covered_date_local=covered_local,
@@ -347,8 +381,13 @@ def run_scheduled(
             last_successful_download_started_utc=result.download_started_utc,
             last_successful_download_finished_utc=result.download_finished_utc,
         )
-        write_today_success_marker(log_dir, today_local, marker_namespace="local")
-        write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
+        apply_azure_state_outcome(result, creds, state_written)
+        if result.status == "success":
+            # Only mark the day successful if it still is: a downgraded run
+            # exits 1, alerts, and is recorded as partial, so leaving a success
+            # marker behind would contradict every other signal.
+            write_today_success_marker(log_dir, today_local, marker_namespace="local")
+            write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 
     append_run_history(
         str(log_dir),

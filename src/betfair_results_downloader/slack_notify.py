@@ -46,11 +46,35 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
     """
     Return (bot_token, channel), preferring ~/.betfair/slack.json over the
     ``slack`` section of credentials.json. Raises SlackNotConfigured.
+
+    The two sources are merged per field rather than chosen wholesale: a local
+    file that exists but is incomplete (half-written, or holding only a
+    channel) must not shadow a working embedded config and silence alerting
+    altogether.
     """
-    cfg = _read_local_config()
-    if cfg is None:
-        cfg = (creds or {}).get("slack") or {}
-    if not cfg.get("enabled", True):
+    # creds may be any JSON shape: a syntactically valid credentials.json with
+    # an array at the top level makes validation raise, and the failure path
+    # then hands that value straight back here. Anything but a mapping is no
+    # config at all -- and must not stop the local file announcing the problem.
+    if not isinstance(creds, dict):
+        creds = {}
+    embedded = creds.get("slack") or {}
+    if not isinstance(embedded, dict):
+        embedded = {}
+    local = _read_local_config() or {}
+    cfg = {**embedded, **{k: v for k, v in local.items() if v not in (None, "")}}
+
+    # `enabled` follows whichever source actually supplies the credentials.
+    # Merging it like any other field would let a stale `enabled: false` in
+    # credentials.json silence a complete local config that never mentions the
+    # flag -- which, before the merge, was selected wholesale and worked.
+    if "enabled" in local:
+        enabled = bool(local["enabled"])
+    elif str(local.get("bot_token", "")).strip():
+        enabled = True
+    else:
+        enabled = bool(embedded.get("enabled", True))
+    if not enabled:
         raise SlackNotConfigured("slack config is disabled (enabled=false)")
     token = str(cfg.get("bot_token", "")).strip()
     channel = str(cfg.get("channel", "")).strip()
