@@ -10,6 +10,7 @@ configured daily run times can perform real download attempts.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,50 @@ class RunResult:
     last_confirmed_settled_at_utc: Optional[datetime] = None
     download_started_utc: Optional[datetime] = None
     download_finished_utc: Optional[datetime] = None
+
+
+# Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
+# every run; writing it onto a full disk is the one moment damage is possible,
+# and the 2026-08-30/31 incidents both began as a full disk nothing reported.
+DISK_HARD_FLOOR_BYTES = 2 * 1024**3
+DISK_SOFT_FLOOR_BYTES = 10 * 1024**3
+
+
+def check_disk_space(
+    results_dir: str | Path,
+    *,
+    hard_floor: int = DISK_HARD_FLOOR_BYTES,
+    soft_floor: int = DISK_SOFT_FLOOR_BYTES,
+) -> tuple[bool, Optional[str]]:
+    """
+    Return (ok_to_run, warning).
+
+    ok_to_run False means below the hard floor: refuse before touching the
+    canonical. A warning string means below the soft floor: run, but say so
+    on the same Slack path as everything else, days before it is an incident.
+    Unreadable filesystems return ok with no warning -- the preflight must
+    never be the thing that stops a run.
+    """
+    # The directory may not exist yet (first run) or may have been removed or
+    # evicted -- exactly the situations where the disk is most suspect. Walk
+    # to the nearest existing ancestor rather than waving the run through.
+    probe = Path(str(results_dir) or ".").expanduser()
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        usage = shutil.disk_usage(str(probe))
+    except OSError:
+        return True, None
+
+    free_gb = usage.free / 1024**3
+    if usage.free < hard_floor:
+        return False, (
+            f"Disk critically low: {free_gb:.1f} GB free. Refusing to rewrite "
+            f"the canonical onto a nearly full disk."
+        )
+    if usage.free < soft_floor:
+        return True, f"⚠️ Disk low: {free_gb:.1f} GB free."
+    return True, None
 
 
 def azure_state_configured(creds: dict[str, Any]) -> bool:
@@ -97,6 +142,22 @@ def _resolve_repo_root() -> Path:
 
 def _resolve_results_dir(creds: dict[str, Any]) -> Path:
     return resolve_results_dir(creds)
+
+
+def _preflight_disk(creds: dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """
+    Resolve the results directory and run the disk preflight against it.
+
+    A malformed ``paths`` section is not a disk problem: a resolution error
+    here skips the preflight so the pipeline itself fails with the real
+    configuration error, converted into a failed :class:`RunResult` exactly
+    as it was before the preflight existed.
+    """
+    try:
+        results_dir = _resolve_results_dir(creds)
+    except Exception:
+        return True, None
+    return check_disk_space(results_dir)
 
 
 def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Path:
@@ -354,11 +415,38 @@ def run_scheduled(
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
+    # The resolved directory, not the raw config: an empty results_csv_dir
+    # falls back to the OneDrive default, which can sit on a different
+    # filesystem from the working directory.
+    disk_ok, disk_warning = _preflight_disk(creds)
+    if not disk_ok:
+        logger.error(disk_warning)
+        result = RunResult(ok=False, status="failed", message=disk_warning)
+        # The refusal is the new failure mode; it belongs in the operational
+        # record alongside every other scheduled failure.
+        append_run_history(
+            str(log_dir),
+            {
+                "status": result.status,
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": datetime.now(timezone.utc).isoformat(),
+                "today_local": today_local.isoformat(),
+                "today_utc": today_utc.isoformat(),
+            },
+        )
+        return result
+
     logger.info("Computing incremental backfill window...")
     from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    if disk_warning:
+        # Attached before state and history are written: the operational
+        # record must carry the same warning the operator is alerted with --
+        # a later incident investigation reads run_history.jsonl, not Slack.
+        result.message = f"{result.message} {disk_warning}".strip()
     result.from_dt_utc = from_dt_utc
     result.to_dt_utc = to_dt_utc
     result.from_date = from_dt_utc.date()
@@ -436,6 +524,34 @@ def run_backfill(
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = datetime.now(timezone.utc)
 
+    # A manual backfill rewrites the same canonical as a scheduled run; the
+    # hard floor applies identically, against the resolved output directory
+    # (an empty results_csv_dir falls back to the OneDrive default, which can
+    # sit on a different filesystem from the working directory).
+    disk_ok, disk_warning = _preflight_disk(creds)
+    if not disk_ok:
+        logger.error(disk_warning)
+        result = RunResult(
+            ok=False,
+            status="failed",
+            from_date=from_date,
+            to_date=to_date,
+            message=disk_warning,
+        )
+        append_run_history(
+            str(log_dir),
+            {
+                "status": result.status,
+                "kind": "backfill",
+                "from_date": str(from_date),
+                "to_date": str(to_date),
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return result
+
     from_dt_utc = datetime(
         from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc
     )
@@ -446,6 +562,10 @@ def run_backfill(
 
     logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    if disk_warning:
+        # The operator sees only the result message; a soft warning discarded
+        # here would leave a manual rewrite of the canonical unwarned.
+        result.message = f"{result.message} {disk_warning}".strip()
     result.from_date = from_date
     result.to_date = to_date
     result.from_dt_utc = from_dt_utc
