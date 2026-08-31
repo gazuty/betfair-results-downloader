@@ -68,8 +68,14 @@ def check_disk_space(
     Unreadable filesystems return ok with no warning -- the preflight must
     never be the thing that stops a run.
     """
+    # The directory may not exist yet (first run) or may have been removed or
+    # evicted -- exactly the situations where the disk is most suspect. Walk
+    # to the nearest existing ancestor rather than waving the run through.
+    probe = Path(str(results_dir) or ".").expanduser()
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
     try:
-        usage = shutil.disk_usage(str(results_dir))
+        usage = shutil.disk_usage(str(probe))
     except OSError:
         return True, None
 
@@ -397,7 +403,21 @@ def run_scheduled(
     disk_ok, disk_warning = check_disk_space(results_dir or ".")
     if not disk_ok:
         logger.error(disk_warning)
-        return RunResult(ok=False, status="failed", message=disk_warning)
+        result = RunResult(ok=False, status="failed", message=disk_warning)
+        # The refusal is the new failure mode; it belongs in the operational
+        # record alongside every other scheduled failure.
+        append_run_history(
+            str(log_dir),
+            {
+                "status": result.status,
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": datetime.now(timezone.utc).isoformat(),
+                "today_local": today_local.isoformat(),
+                "today_utc": today_utc.isoformat(),
+            },
+        )
+        return result
 
     logger.info("Computing incremental backfill window...")
     from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
@@ -484,6 +504,22 @@ def run_backfill(
 
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = datetime.now(timezone.utc)
+
+    # A manual backfill rewrites the same canonical as a scheduled run; the
+    # hard floor applies identically.
+    backfill_results_dir = (
+        (creds.get("paths") or {}).get("results_csv_dir") or ""
+    ).strip()
+    disk_ok, _disk_warning = check_disk_space(backfill_results_dir or ".")
+    if not disk_ok:
+        logger.error(_disk_warning)
+        return RunResult(
+            ok=False,
+            status="failed",
+            from_date=from_date,
+            to_date=to_date,
+            message=_disk_warning,
+        )
 
     from_dt_utc = datetime(
         from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc

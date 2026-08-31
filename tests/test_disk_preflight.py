@@ -110,3 +110,107 @@ def test_dm_report_is_clean_on_a_healthy_disk(monkeypatch, tmp_path, capsys) -> 
 
     assert main(["dm-report", "--csv", str(csv_path)]) == 0
     assert "Disk low" not in capsys.readouterr().out
+
+
+def test_missing_results_dir_does_not_bypass_the_floor(monkeypatch, tmp_path) -> None:
+    """
+    A first run, or a removed/evicted output directory, is exactly when the
+    disk is most suspect. The check walks to the nearest existing ancestor
+    rather than waving the run through.
+    """
+    seen: list[str] = []
+
+    def usage(p):
+        seen.append(str(p))
+        return Usage(228 * GB, 0, 1 * GB)
+
+    monkeypatch.setattr(runner.shutil, "disk_usage", usage)
+
+    ok, warning = check_disk_space(tmp_path / "does" / "not" / "exist")
+
+    assert ok is False, "the hard floor must apply even before the dir exists"
+    assert seen and seen[0] == str(tmp_path), "probed the nearest existing ancestor"
+
+
+def test_backfill_refuses_below_the_hard_floor(monkeypatch) -> None:
+    """A manual backfill rewrites the same canonical; same floor."""
+    from datetime import date
+
+    _fake_usage(monkeypatch, 1 * GB)
+
+    result = runner.run_backfill(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+    )
+
+    assert result.ok is False
+    assert "critically low" in result.message
+
+
+def test_hard_floor_refusal_is_recorded_in_run_history(monkeypatch, tmp_path) -> None:
+    """The refusal is the new failure mode; it belongs in the operational record."""
+    _fake_usage(monkeypatch, 1 * GB)
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        runner, "append_run_history", lambda _d, entry: recorded.append(entry)
+    )
+
+    result = runner.run_scheduled(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+    )
+
+    assert result.ok is False
+    assert len(recorded) == 1
+    assert recorded[0]["status"] == "failed"
+    assert "critically low" in recorded[0]["message"]
+
+
+def test_successful_run_with_soft_warning_posts_to_slack(monkeypatch) -> None:
+    """A warning that only lands in scheduler stdout is not a warning."""
+    from betfair_results_downloader.__main__ import main
+    from betfair_results_downloader.scheduler.runner import RunResult
+
+    posted: list[str] = []
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._post_to_slack",
+        lambda text, creds=None: posted.append(text) or 0,
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {"results_csv_dir": "/tmp"}}, object()),
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.runner.run_scheduled",
+        lambda *a, **k: RunResult(
+            ok=True, status="success", message="All good. ⚠️ Disk low: 6.0 GB free."
+        ),
+    )
+
+    assert main(["run"]) == 0
+    assert len(posted) == 1
+    assert "Disk low" in posted[0]
+
+
+def test_successful_run_without_warning_stays_silent(monkeypatch) -> None:
+    from betfair_results_downloader.__main__ import main
+    from betfair_results_downloader.scheduler.runner import RunResult
+
+    posted: list[str] = []
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._post_to_slack",
+        lambda text, creds=None: posted.append(text) or 0,
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {"results_csv_dir": "/tmp"}}, object()),
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.runner.run_scheduled",
+        lambda *a, **k: RunResult(ok=True, status="success", message="All good."),
+    )
+
+    assert main(["run"]) == 0
+    assert posted == []

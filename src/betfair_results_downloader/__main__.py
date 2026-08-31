@@ -175,6 +175,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")
+        # A success can still carry a disk warning. It must reach Slack from
+        # here: a low disk gave this pipeline both of its incidents, and a
+        # warning that only lands in scheduler stdout is not a warning.
+        if "⚠️" in result.message and getattr(args, "post_slack", True):
+            _post_to_slack(
+                f":warning: Betfair scheduled run succeeded with a warning\n{result.message}",
+                creds,
+            )
         return 0
 
     label = "PARTIAL" if result.ok else "FAIL"
