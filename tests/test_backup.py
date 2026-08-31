@@ -215,3 +215,16 @@ def test_non_string_results_dir_fails_loudly() -> None:
 
     with pytest.raises(ResultsDirNotConfigured, match="must be a string"):
         resolve_results_dir({"paths": {"results_csv_dir": True}})
+
+
+def test_pathological_backup_dir_warns_but_never_raises(tmp_path) -> None:
+    """
+    A NUL byte in a configured path raises ValueError from pathlib, not
+    OSError. The contract is best-effort: a backup must never turn an
+    already-successful run into a failure, whatever the exception type.
+    """
+    src = _make_source(tmp_path)
+
+    warning = backup_compressed_outputs(src, Path("bad\x00dir"), retention=5)
+
+    assert warning is not None and warning.startswith("⚠️")

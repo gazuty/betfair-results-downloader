@@ -41,6 +41,32 @@ def backup_compressed_outputs(
     status_cb: Optional[Callable[[str], None]] = None,
 ) -> Optional[str]:
     """
+    Best-effort wrapper around :func:`_backup_compressed_outputs_inner`.
+
+    The contract is "never raises", and the specific handlers below catch
+    what we anticipate (OSError). Pathological inputs can still surface
+    other types -- ValueError for a NUL byte in a configured path,
+    RuntimeError for a symlink loop under resolve() -- and a backup must
+    never turn an already-successful run into a failure, so anything
+    unanticipated is converted to a warning here.
+    """
+    try:
+        return _backup_compressed_outputs_inner(
+            results_csv_dir, backup_dir, retention=retention, status_cb=status_cb
+        )
+    except Exception as exc:
+        logger.warning("Backup failed unexpectedly: %s: %s", type(exc).__name__, exc)
+        return f"⚠️ Backup failed unexpectedly: {type(exc).__name__}: {exc}"
+
+
+def _backup_compressed_outputs_inner(
+    results_csv_dir: Path,
+    backup_dir: Path,
+    *,
+    retention: int = 14,
+    status_cb: Optional[Callable[[str], None]] = None,
+) -> Optional[str]:
+    """
     Copy dated snapshots and yearly archives from ``results_csv_dir`` into
     ``backup_dir``, then prune dated snapshots there beyond ``retention``.
 
