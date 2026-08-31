@@ -399,8 +399,10 @@ def run_scheduled(
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
-    results_dir = ((creds.get("paths") or {}).get("results_csv_dir") or "").strip()
-    disk_ok, disk_warning = check_disk_space(results_dir or ".")
+    # The resolved directory, not the raw config: an empty results_csv_dir
+    # falls back to the OneDrive default, which can sit on a different
+    # filesystem from the working directory.
+    disk_ok, disk_warning = check_disk_space(_resolve_results_dir(creds))
     if not disk_ok:
         logger.error(disk_warning)
         result = RunResult(ok=False, status="failed", message=disk_warning)
@@ -506,20 +508,32 @@ def run_backfill(
     run_started = datetime.now(timezone.utc)
 
     # A manual backfill rewrites the same canonical as a scheduled run; the
-    # hard floor applies identically.
-    backfill_results_dir = (
-        (creds.get("paths") or {}).get("results_csv_dir") or ""
-    ).strip()
-    disk_ok, _disk_warning = check_disk_space(backfill_results_dir or ".")
+    # hard floor applies identically, against the resolved output directory
+    # (an empty results_csv_dir falls back to the OneDrive default, which can
+    # sit on a different filesystem from the working directory).
+    disk_ok, disk_warning = check_disk_space(_resolve_results_dir(creds))
     if not disk_ok:
-        logger.error(_disk_warning)
-        return RunResult(
+        logger.error(disk_warning)
+        result = RunResult(
             ok=False,
             status="failed",
             from_date=from_date,
             to_date=to_date,
-            message=_disk_warning,
+            message=disk_warning,
         )
+        append_run_history(
+            str(log_dir),
+            {
+                "status": result.status,
+                "kind": "backfill",
+                "from_date": str(from_date),
+                "to_date": str(to_date),
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return result
 
     from_dt_utc = datetime(
         from_date.year, from_date.month, from_date.day, 0, 0, 0, tzinfo=timezone.utc
@@ -531,6 +545,10 @@ def run_backfill(
 
     logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    if disk_warning and result.ok:
+        # The operator sees only the result message; a soft warning discarded
+        # here would leave a manual rewrite of the canonical unwarned.
+        result.message = f"{result.message} {disk_warning}".strip()
     result.from_date = from_date
     result.to_date = to_date
     result.from_dt_utc = from_dt_utc

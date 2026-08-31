@@ -214,3 +214,73 @@ def test_successful_run_without_warning_stays_silent(monkeypatch) -> None:
 
     assert main(["run"]) == 0
     assert posted == []
+
+
+def test_empty_config_checks_the_resolved_fallback_dir(monkeypatch, tmp_path) -> None:
+    """
+    An empty results_csv_dir is a supported config that falls back to the
+    OneDrive default -- potentially a different filesystem from the working
+    directory. The preflight must check where the canonical actually goes.
+    """
+    probed: list[str] = []
+    resolved = tmp_path / "fallback"
+    resolved.mkdir()
+
+    def usage(p):
+        probed.append(str(p))
+        return Usage(228 * GB, 0, 1 * GB)
+
+    monkeypatch.setattr(runner.shutil, "disk_usage", usage)
+    monkeypatch.setattr(runner, "_resolve_results_dir", lambda _c: resolved)
+    monkeypatch.setattr(runner, "compute_backfill_window", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "append_run_history", lambda *a, **k: None)
+
+    result = runner.run_scheduled({"paths": {}, "user": {}}, runner.ScheduleConfig())
+
+    assert result.ok is False
+    assert probed and probed[0] == str(resolved), "must probe the resolved dir, not cwd"
+
+
+def test_backfill_refusal_is_recorded(monkeypatch) -> None:
+    from datetime import date
+
+    _fake_usage(monkeypatch, 1 * GB)
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        runner, "append_run_history", lambda _d, entry: recorded.append(entry)
+    )
+
+    result = runner.run_backfill(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+    )
+
+    assert result.ok is False
+    assert len(recorded) == 1
+    assert recorded[0]["kind"] == "backfill"
+
+
+def test_backfill_soft_warning_reaches_the_result(monkeypatch) -> None:
+    from datetime import date
+
+    _fake_usage(monkeypatch, 6 * GB)
+    monkeypatch.setattr(runner, "append_run_history", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_run_pipeline",
+        lambda *a, **k: runner.RunResult(
+            ok=True, status="success", message="Backfill done."
+        ),
+    )
+
+    result = runner.run_backfill(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+    )
+
+    assert result.ok is True
+    assert "Disk low" in result.message
