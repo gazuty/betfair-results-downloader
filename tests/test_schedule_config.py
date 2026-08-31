@@ -340,3 +340,16 @@ class TestResultsDirValidation:
     def test_set_results_dir_is_valid(self) -> None:
         result = validate_credentials(self._creds({"results_csv_dir": "~/BetfairData"}))
         assert result.ok, result.errors
+
+    def test_non_string_results_dir_is_an_error(self) -> None:
+        """str() coercion would resolve `true` to a directory named True."""
+        result = validate_credentials(self._creds({"results_csv_dir": True}))
+        assert not result.ok
+        assert any("must be a string" in e for e in result.errors)
+
+    def test_non_string_backup_dir_is_an_error(self) -> None:
+        result = validate_credentials(
+            self._creds({"results_csv_dir": "~/BetfairData", "backup_dir": 123})
+        )
+        assert not result.ok
+        assert any("backup_dir must be a string" in e for e in result.errors)

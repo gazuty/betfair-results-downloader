@@ -199,3 +199,19 @@ def test_backup_dir_aliasing_the_working_dir_is_refused(tmp_path) -> None:
 
     assert warning is not None and warning.startswith("⚠️")
     assert sorted(f.name for f in src.iterdir()) == before
+
+
+def test_non_string_backup_dir_resolves_to_none() -> None:
+    """Runtime stays forgiving; validate_credentials is the loud gate."""
+    assert resolve_backup_dir({"paths": {"backup_dir": True}}) is None
+
+
+def test_non_string_results_dir_fails_loudly() -> None:
+    from betfair_results_downloader.paths import (
+        ResultsDirNotConfigured,
+        resolve_results_dir,
+    )
+    import pytest
+
+    with pytest.raises(ResultsDirNotConfigured, match="must be a string"):
+        resolve_results_dir({"paths": {"results_csv_dir": True}})

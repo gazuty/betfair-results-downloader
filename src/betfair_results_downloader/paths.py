@@ -23,8 +23,14 @@ def resolve_results_dir(creds: dict[str, Any]) -> Path:
     used by ``scheduler/runner.py``, ``scheduler/gap_detector.py``, and the
     dm-report command.
     """
-    raw = str((creds.get("paths") or {}).get("results_csv_dir", "") or "").strip()
-    if not raw:
+    raw = (creds.get("paths") or {}).get("results_csv_dir", "")
+    if raw is not None and not isinstance(raw, str):
+        # str() coercion would quietly resolve `true` to a relative
+        # directory named "True" and write the canonical there.
+        raise ResultsDirNotConfigured(
+            f"paths.results_csv_dir must be a string, got {type(raw).__name__}"
+        )
+    if not (raw or "").strip():
         raise ResultsDirNotConfigured(
             "paths.results_csv_dir is not set in credentials.json. Set it to "
             "the local working directory that holds cleared_orders_cleaned.csv "
@@ -32,7 +38,7 @@ def resolve_results_dir(creds: dict[str, Any]) -> Path:
             "locations was removed deliberately: OneDrive eviction corrupted "
             "reads of the canonical."
         )
-    return Path(raw).expanduser()
+    return Path(raw.strip()).expanduser()
 
 
 def resolve_backup_dir(creds: dict[str, Any]) -> Optional[Path]:
@@ -42,5 +48,11 @@ def resolve_backup_dir(creds: dict[str, Any]) -> Optional[Path]:
     Returns None when unset -- backups are optional, and their absence
     must not fail a run. See :mod:`betfair_results_downloader.backup`.
     """
-    raw = str((creds.get("paths") or {}).get("backup_dir", "") or "").strip()
+    raw = (creds.get("paths") or {}).get("backup_dir", "")
+    if not isinstance(raw, str):
+        # Forgiving at runtime -- the backup must never be able to fail a
+        # run -- but validate_credentials rejects a non-string up front so
+        # normal dispatch never reaches here with one.
+        return None
+    raw = raw.strip()
     return Path(raw).expanduser() if raw else None

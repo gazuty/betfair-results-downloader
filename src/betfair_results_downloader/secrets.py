@@ -227,11 +227,23 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
         paths_cfg = {}
     if not isinstance(paths_cfg, dict):
         errors.append("paths must be an object when present")
-    elif not str(paths_cfg.get("results_csv_dir", "") or "").strip():
-        errors.append(
-            "Missing paths.results_csv_dir (required; the OneDrive-guessing "
-            "fallback was removed)"
-        )
+    else:
+        rdir = paths_cfg.get("results_csv_dir")
+        if rdir is not None and not isinstance(rdir, str):
+            errors.append(
+                f"paths.results_csv_dir must be a string, got {type(rdir).__name__}"
+            )
+        elif not (rdir or "").strip():
+            errors.append(
+                "Missing paths.results_csv_dir (required; the "
+                "OneDrive-guessing fallback was removed)"
+            )
+        bdir = paths_cfg.get("backup_dir")
+        if bdir is not None and not isinstance(bdir, str):
+            errors.append(
+                f"paths.backup_dir must be a string when present, "
+                f"got {type(bdir).__name__}"
+            )
 
     # Schedule validation (no-op when schedule.enabled=false)
     sched_errors, sched_warnings = _validate_schedule_section(creds)
