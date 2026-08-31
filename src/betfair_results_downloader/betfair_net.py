@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, TypeVar
 
+import requests
 from betfairlightweight.exceptions import APIError, StatusCodeError
 
 T = TypeVar("T")
@@ -39,6 +40,17 @@ _TRANSIENT_STATUS_MARKERS = ("429", "502", "503", "504")
 
 def is_transient_betfair_error(exc: Exception) -> bool:
     """True when a retry has a realistic chance of succeeding."""
+    # Raw requests failures. The installed betfairlightweight wraps every
+    # exception into APIError (login.py and baseendpoint.py both end in a
+    # broad `except Exception`), so today these cannot escape -- verified
+    # against the live 09:00 incident, whose ReadTimeout arrived wrapped.
+    # Classified anyway: three lines of insurance against a future library
+    # version narrowing its wrapping, in the module whose whole job is
+    # resilience.
+    if isinstance(
+        exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+    ):
+        return True
     msg = str(exc)
     if isinstance(exc, StatusCodeError):
         return any(code in msg for code in _TRANSIENT_STATUS_MARKERS)
@@ -63,7 +75,12 @@ def retry_betfair_call(
     for attempt in range(1, max_attempts + 1):
         try:
             return fn()
-        except (APIError, StatusCodeError) as exc:
+        except (
+            APIError,
+            StatusCodeError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+        ) as exc:
             if not is_transient_betfair_error(exc) or attempt == max_attempts:
                 raise
             sleep(min(2.0**attempt, max_delay))

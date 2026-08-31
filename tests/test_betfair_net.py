@@ -122,3 +122,32 @@ def test_login_is_wrapped_in_the_retry() -> None:
 
     src = inspect.getsource(auth)
     assert "retry_betfair_call(client.login" in src
+
+
+class TestRawRequestsFailures:
+    """
+    The installed betfairlightweight wraps every exception into APIError
+    (login.py and baseendpoint.py both end in a broad `except Exception`),
+    so raw requests failures cannot currently escape. These exist as
+    insurance against a future library version narrowing that wrapping.
+    """
+
+    def test_raw_read_timeout_is_transient_and_retried(self) -> None:
+        import requests
+
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise requests.exceptions.ReadTimeout("Read timed out.")
+            return "ok"
+
+        assert retry_betfair_call(flaky, sleep=lambda _s: None) == "ok"
+
+    def test_raw_connection_error_is_transient(self) -> None:
+        import requests
+
+        assert is_transient_betfair_error(
+            requests.exceptions.ConnectionError("Connection aborted.")
+        )
