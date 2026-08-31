@@ -167,3 +167,35 @@ def test_same_size_rewrite_is_still_recopied(tmp_path) -> None:
 
     assert warning is None
     assert (dst / snap.name).read_bytes() == b"B" * original_size
+
+
+def test_uncompressed_snapshots_are_never_copied(tmp_path) -> None:
+    """
+    With user.compress_snapshots=false the dated snapshot is a full
+    canonical-sized .csv rewritten every run -- copying it daily is the
+    repeated large OneDrive transfer this design exists to retire.
+    """
+    src = _make_source(tmp_path)
+    (src / "cleared_orders_cleaned_2026-08-31.csv").write_text("betId\nbig\n")
+    dst = tmp_path / "backup"
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    assert not (dst / "cleared_orders_cleaned_2026-08-31.csv").exists()
+    assert (dst / "cleared_orders_cleaned_2026-08-31.csv.gz").exists()
+
+
+def test_backup_dir_aliasing_the_working_dir_is_refused(tmp_path) -> None:
+    """
+    Same directory on both sides means no second copy exists -- and the
+    prune step would delete real working-set snapshots. Must warn, and
+    must not touch a single source file.
+    """
+    src = _make_source(tmp_path)
+    before = sorted(f.name for f in src.iterdir())
+
+    warning = backup_compressed_outputs(src, src, retention=1)
+
+    assert warning is not None and warning.startswith("⚠️")
+    assert sorted(f.name for f in src.iterdir()) == before

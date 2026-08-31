@@ -24,11 +24,12 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Kept in sync with downloader_core's snapshot naming; duplicated here so
-# importing the backup module does not drag in pandas.
-_SNAPSHOT_NAME_RE = re.compile(
-    r"^cleared_orders_cleaned_(\d{4}-\d{2}-\d{2})\.csv(\.gz)?$"
-)
+# Compressed-only, deliberately narrower than downloader_core's snapshot
+# pattern (duplicated rather than imported so this module does not drag in
+# pandas): with user.compress_snapshots=false the dated snapshot is a full
+# canonical-sized .csv rewritten every run, and copying that daily is the
+# large repeated OneDrive transfer this design exists to retire.
+_SNAPSHOT_NAME_RE = re.compile(r"^cleared_orders_cleaned_(\d{4}-\d{2}-\d{2})\.csv\.gz$")
 _ARCHIVE_NAME_RE = re.compile(r"^cleared_orders_archive_(\d{4})\.csv\.gz$")
 
 
@@ -56,6 +57,18 @@ def backup_compressed_outputs(
     Never raises.
     """
     problems: list[str] = []
+
+    # A backup_dir aliasing the working directory would silently "succeed"
+    # with no second copy in existence -- and worse, the prune step below
+    # would then delete real working-set snapshots. Refuse up front.
+    try:
+        if backup_dir.resolve() == results_csv_dir.resolve():
+            return (
+                f"⚠️ Backup skipped: backup_dir is the working directory "
+                f"itself ({backup_dir}); no disaster-recovery copy exists."
+            )
+    except OSError:
+        pass
 
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
