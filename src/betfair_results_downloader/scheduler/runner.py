@@ -144,6 +144,22 @@ def _resolve_results_dir(creds: dict[str, Any]) -> Path:
     return resolve_results_dir(creds)
 
 
+def _preflight_disk(creds: dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """
+    Resolve the results directory and run the disk preflight against it.
+
+    A malformed ``paths`` section is not a disk problem: a resolution error
+    here skips the preflight so the pipeline itself fails with the real
+    configuration error, converted into a failed :class:`RunResult` exactly
+    as it was before the preflight existed.
+    """
+    try:
+        results_dir = _resolve_results_dir(creds)
+    except Exception:
+        return True, None
+    return check_disk_space(results_dir)
+
+
 def _resolve_log_dir(creds: dict[str, Any], schedule_cfg: ScheduleConfig) -> Path:
     if schedule_cfg.log_dir:
         return Path(schedule_cfg.log_dir).expanduser()
@@ -402,7 +418,7 @@ def run_scheduled(
     # The resolved directory, not the raw config: an empty results_csv_dir
     # falls back to the OneDrive default, which can sit on a different
     # filesystem from the working directory.
-    disk_ok, disk_warning = check_disk_space(_resolve_results_dir(creds))
+    disk_ok, disk_warning = _preflight_disk(creds)
     if not disk_ok:
         logger.error(disk_warning)
         result = RunResult(ok=False, status="failed", message=disk_warning)
@@ -426,6 +442,11 @@ def run_scheduled(
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    if disk_warning and result.ok:
+        # Attached before state and history are written: the operational
+        # record must carry the same warning the operator is alerted with --
+        # a later incident investigation reads run_history.jsonl, not Slack.
+        result.message = f"{result.message} {disk_warning}".strip()
     result.from_dt_utc = from_dt_utc
     result.to_dt_utc = to_dt_utc
     result.from_date = from_dt_utc.date()
@@ -484,10 +505,6 @@ def run_scheduled(
         },
     )
 
-    if disk_warning and result.ok:
-        # Surface on the run's own message so it reaches the same Slack path
-        # as failures do -- a warning nobody sees is not a warning.
-        result.message = f"{result.message} {disk_warning}".strip()
     return result
 
 
@@ -511,7 +528,7 @@ def run_backfill(
     # hard floor applies identically, against the resolved output directory
     # (an empty results_csv_dir falls back to the OneDrive default, which can
     # sit on a different filesystem from the working directory).
-    disk_ok, disk_warning = check_disk_space(_resolve_results_dir(creds))
+    disk_ok, disk_warning = _preflight_disk(creds)
     if not disk_ok:
         logger.error(disk_warning)
         result = RunResult(

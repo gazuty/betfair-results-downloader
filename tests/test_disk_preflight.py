@@ -284,3 +284,80 @@ def test_backfill_soft_warning_reaches_the_result(monkeypatch) -> None:
 
     assert result.ok is True
     assert "Disk low" in result.message
+
+
+def test_malformed_paths_section_skips_the_preflight() -> None:
+    """
+    A non-object ``paths`` section passes validate_credentials but breaks
+    directory resolution. That is a configuration error, not a disk problem:
+    the preflight steps aside so the pipeline fails with the real error,
+    converted to a failed RunResult as it was before the preflight existed.
+    """
+    ok, warning = runner._preflight_disk({"paths": "oops", "user": {}})
+    assert ok is True
+    assert warning is None
+
+
+def test_malformed_paths_backfill_still_fails_cleanly(monkeypatch) -> None:
+    """A manual backfill must return a failed result, never a traceback."""
+    from datetime import date
+
+    monkeypatch.setattr(runner, "append_run_history", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_run_pipeline",
+        lambda *a, **k: runner.RunResult(
+            ok=False, status="failed", message="paths must be an object"
+        ),
+    )
+
+    result = runner.run_backfill(
+        {"paths": "oops", "user": {}},
+        runner.ScheduleConfig(),
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+    )
+
+    assert result.ok is False
+    assert result.status == "failed"
+
+
+def test_scheduled_soft_warning_lands_in_run_history(monkeypatch) -> None:
+    """
+    run_history.jsonl is the record an incident investigation reads; the
+    warning must be on the message before it is persisted, not only on the
+    result returned to the caller.
+    """
+    from datetime import datetime, timezone
+
+    _fake_usage(monkeypatch, 6 * GB)
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        runner, "append_run_history", lambda _d, entry: recorded.append(entry)
+    )
+    monkeypatch.setattr(
+        runner,
+        "compute_backfill_window",
+        lambda *a, **k: (
+            datetime(2026, 6, 1, tzinfo=timezone.utc),
+            datetime(2026, 6, 2, tzinfo=timezone.utc),
+            "test window",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_pipeline",
+        lambda *a, **k: runner.RunResult(
+            ok=True, status="partial", message="Ran, Azure skipped."
+        ),
+    )
+
+    result = runner.run_scheduled(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+    )
+
+    assert result.ok is True
+    assert "Disk low" in result.message
+    assert len(recorded) == 1
+    assert "Disk low" in recorded[0]["message"], "history must carry the warning"
