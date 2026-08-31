@@ -1,0 +1,148 @@
+"""
+One-way backup to paths.backup_dir.
+
+H4 moved the working set off OneDrive onto local disk after Files
+On-Demand eviction twice broke reads of the canonical (2026-08-30/31).
+OneDrive's remaining job is disaster recovery: it receives compressed
+copies after each run and must never be able to fail that run.
+"""
+
+from __future__ import annotations
+
+import gzip
+import inspect
+from pathlib import Path
+
+from betfair_results_downloader.backup import backup_compressed_outputs
+from betfair_results_downloader.paths import resolve_backup_dir
+
+
+def _make_source(tmp_path: Path) -> Path:
+    src = tmp_path / "results"
+    src.mkdir()
+    (src / "cleared_orders_cleaned.csv").write_text("betId\n1\n")
+    for day in ("2026-08-29", "2026-08-30", "2026-08-31"):
+        with gzip.open(src / f"cleared_orders_cleaned_{day}.csv.gz", "wb") as fh:
+            fh.write(f"betId\n{day}\n".encode())
+    with gzip.open(src / "cleared_orders_archive_2025.csv.gz", "wb") as fh:
+        fh.write(b"betId\nold\n")
+    (src / "unrelated.txt").write_text("not ours")
+    return src
+
+
+def test_copies_snapshots_and_archives_only(tmp_path) -> None:
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    names = sorted(f.name for f in dst.iterdir())
+    assert "cleared_orders_cleaned_2026-08-31.csv.gz" in names
+    assert "cleared_orders_archive_2025.csv.gz" in names
+    # The uncompressed canonical is what this design retired from OneDrive.
+    assert "cleared_orders_cleaned.csv" not in names
+    assert "unrelated.txt" not in names
+
+
+def test_unchanged_files_are_not_recopied(tmp_path) -> None:
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    backup_compressed_outputs(src, dst, retention=5)
+
+    target = dst / "cleared_orders_cleaned_2026-08-31.csv.gz"
+    before = target.stat().st_mtime_ns
+    backup_compressed_outputs(src, dst, retention=5)
+    assert target.stat().st_mtime_ns == before
+
+
+def test_grown_same_day_snapshot_is_recopied(tmp_path) -> None:
+    """A later run the same day rewrites the snapshot with more rows."""
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    backup_compressed_outputs(src, dst, retention=5)
+
+    snap = src / "cleared_orders_cleaned_2026-08-31.csv.gz"
+    with gzip.open(snap, "wb") as fh:
+        fh.write(b"betId\n2026-08-31\nanother-row-entirely\n")
+
+    backup_compressed_outputs(src, dst, retention=5)
+    with gzip.open(dst / snap.name, "rb") as fh:
+        assert b"another-row-entirely" in fh.read()
+
+
+def test_prunes_old_snapshots_but_never_archives(tmp_path) -> None:
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+
+    warning = backup_compressed_outputs(src, dst, retention=2)
+
+    assert warning is None
+    names = sorted(f.name for f in dst.iterdir())
+    assert "cleared_orders_cleaned_2026-08-29.csv.gz" not in names
+    assert "cleared_orders_cleaned_2026-08-30.csv.gz" in names
+    assert "cleared_orders_cleaned_2026-08-31.csv.gz" in names
+    assert "cleared_orders_archive_2025.csv.gz" in names
+
+
+def test_source_is_never_modified(tmp_path) -> None:
+    src = _make_source(tmp_path)
+    before = sorted(f.name for f in src.iterdir())
+    backup_compressed_outputs(src, tmp_path / "backup", retention=1)
+    assert sorted(f.name for f in src.iterdir()) == before
+
+
+def test_uncreatable_backup_dir_warns_but_never_raises(tmp_path) -> None:
+    src = _make_source(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a dir must go")
+
+    warning = backup_compressed_outputs(src, blocker / "backup", retention=5)
+
+    assert warning is not None
+    assert warning.startswith("⚠️"), "must carry the marker the Slack path keys on"
+
+
+def test_copy_failure_warns_and_continues(tmp_path, monkeypatch) -> None:
+    import betfair_results_downloader.backup as backup_mod
+
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    real_copy = backup_mod.shutil.copyfile
+    failed_once: list[str] = []
+
+    def flaky(a, b):
+        if "2026-08-29" in str(a) and not failed_once:
+            failed_once.append(str(a))
+            raise OSError(28, "No space left on device")
+        return real_copy(a, b)
+
+    monkeypatch.setattr(backup_mod.shutil, "copyfile", flaky)
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is not None and "2026-08-29" in warning
+    # The failure of one file must not stop the others.
+    assert (dst / "cleared_orders_cleaned_2026-08-31.csv.gz").exists()
+
+
+def test_resolve_backup_dir_unset_is_none() -> None:
+    assert resolve_backup_dir({"paths": {}}) is None
+    assert resolve_backup_dir({}) is None
+    assert resolve_backup_dir({"paths": {"backup_dir": ""}}) is None
+
+
+def test_resolve_backup_dir_expands_tilde() -> None:
+    got = resolve_backup_dir({"paths": {"backup_dir": "~/OneDriveBackup"}})
+    assert got == Path("~/OneDriveBackup").expanduser()
+
+
+def test_pipeline_calls_the_backup_after_the_csv_write() -> None:
+    """The wiring, asserted at source level like the login-retry test."""
+    from betfair_results_downloader.scheduler import runner
+
+    source = inspect.getsource(runner._run_pipeline_inner)
+    assert "backup_compressed_outputs(" in source
+    assert source.index("write_csv_outputs(") < source.index(
+        "backup_compressed_outputs("
+    )

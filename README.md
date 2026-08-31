@@ -75,7 +75,7 @@ Editable install (`-e`) is recommended so you can pull updates without reinstall
 
 ### Credentials file
 
-The app reads credentials from `secrets/credentials.json` by default. You can store the real file anywhere (recommended: a cloud-synced folder like OneDrive or iCloud Drive, so both your laptop and desktop share the same config) and point at it via a tiny pointer file.
+The app reads credentials from `secrets/credentials.json` by default. You can store the real file anywhere (recommended: a local, non-cloud-synced directory such as `~/.betfair/`, mode 600 — cloud sync clients can evict the file to an online-only placeholder, which breaks non-interactive login, and their version history retains old copies of your secrets) and point at it via a tiny pointer file.
 
 **To store `credentials.json` outside the repo:**
 
@@ -617,7 +617,8 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `results_csv_dir` | string | Recommended | Absolute path to where canonical and snapshot CSVs should be written. When empty, the cross-platform OneDrive resolver (`paths.py`) is used as a fallback. |
+| `results_csv_dir` | string | **Required** | Path to where canonical and snapshot CSVs are written (`~` is expanded). Use a **local, non-cloud-synced** directory such as `~/BetfairData` — cloud sync eviction corrupted reads of the canonical twice. When empty, the run fails loudly; the old OneDrive-guessing fallback was removed. |
+| `backup_dir` | string | Optional | One-way disaster-recovery copy target (e.g. an OneDrive folder). After each successful CSV write, compressed snapshots and yearly archives are copied there and dated snapshots pruned to `user.snapshot_retention_days`. Backup failures warn (to Slack) but never fail the run. Nothing is ever read back from it. |
 
 ### `schedule` (optional — for scheduled automatic downloads)
 
@@ -668,7 +669,8 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
     "canonical_archive_months": 12
   },
   "paths": {
-    "results_csv_dir": "/Users/me/OneDrive/BF/Results Database"
+    "results_csv_dir": "~/BetfairData",
+    "backup_dir": "/Users/me/OneDrive/BF/Results Database"
   },
   "azure_sql": {
     "server": "myserver.database.windows.net",
@@ -687,6 +689,8 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 ## Outputs
 
 ### CSV outputs (`paths.results_csv_dir`)
+
+`results_csv_dir` should be **local disk** (default layout: `~/BetfairData`). If `paths.backup_dir` is set, compressed snapshots and yearly archives are also copied there after each successful run as a one-way disaster-recovery backup.
 
 - **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the rolling dataset (last `user.canonical_archive_months` months, default 12). Idempotent updates via `betId` dedupe.
 - **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv.gz`. Dated gzip copies of the canonical for short-term rollback; only the newest `user.snapshot_retention_days` (default 14) are kept, older ones are deleted after each run.
@@ -745,7 +749,8 @@ src/betfair_results_downloader/
   audit.py                # Settled-date gap analysis (backs the `audit` command)
   secrets.py              # Credentials resolver + validator
   config.py               # ScheduleConfig dataclass + event type constants
-  paths.py                # Cross-platform OneDrive path resolver
+  paths.py                # Results/backup dir resolution (fail-loud, no guessing)
+  backup.py               # One-way compressed backup to paths.backup_dir
   __main__.py             # CLI entry point (auth-test, run, backfill, audit, schedule, dm-report)
   scheduler/              # Scheduled-downloads package
     auth.py               # build_api_client() — cert-based login

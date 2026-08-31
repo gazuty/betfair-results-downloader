@@ -1,59 +1,46 @@
 from __future__ import annotations
 
-import platform
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
-_ONEDRIVE_RELATIVE = (
-    Path("BF Documentation") / "BF Results and Analysis" / "Results Database"
-)
-
-
-def get_results_database_dir() -> Path:
-    """
-    Return the path to the Results Database folder, resolved cross-platform.
-
-    Tries known OneDrive locations in order and returns the first that exists.
-    If none exist, returns the OS-appropriate default without crashing.
-    """
-    system = platform.system()
-
-    if system == "Darwin":
-        candidates = [
-            Path.home()
-            / "Library"
-            / "CloudStorage"
-            / "OneDrive-Personal"
-            / _ONEDRIVE_RELATIVE,
-            Path.home() / "OneDrive" / _ONEDRIVE_RELATIVE,
-        ]
-    elif system == "Windows":
-        candidates = [
-            Path.home() / "OneDrive" / _ONEDRIVE_RELATIVE,
-        ]
-    else:
-        # Linux / CI: only try the home-based symlink convention
-        candidates = [
-            Path.home() / "OneDrive" / _ONEDRIVE_RELATIVE,
-        ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    # Nothing found — return the first (most specific) candidate as the default
-    # so callers get a sensible path to show in error messages.
-    return candidates[0]
+class ResultsDirNotConfigured(RuntimeError):
+    """Raised when ``paths.results_csv_dir`` is missing from credentials."""
 
 
 def resolve_results_dir(creds: dict[str, Any]) -> Path:
     """
-    Resolve the results CSV directory from credentials, falling back to
-    :func:`get_results_database_dir` when ``paths.results_csv_dir`` is empty.
+    Resolve the results CSV directory from ``paths.results_csv_dir``.
 
-    This is the single source of truth for results directory resolution —
-    used by both ``scheduler/runner.py`` and ``scheduler/gap_detector.py``.
+    Fails loudly when unset. Until H4 this silently fell back to guessing
+    OneDrive locations -- which is exactly how the working set ended up on
+    a cloud-sync directory whose Files On-Demand eviction broke reads of
+    the canonical twice (2026-08-30/31). A pipeline that guesses where its
+    system of record lives eventually guesses wrong; better to refuse and
+    say what to set.
+
+    This is the single source of truth for results directory resolution --
+    used by ``scheduler/runner.py``, ``scheduler/gap_detector.py``, and the
+    dm-report command.
     """
-    raw = (creds.get("paths") or {}).get("results_csv_dir", "")
-    return Path(raw) if raw else get_results_database_dir()
+    raw = str((creds.get("paths") or {}).get("results_csv_dir", "") or "").strip()
+    if not raw:
+        raise ResultsDirNotConfigured(
+            "paths.results_csv_dir is not set in credentials.json. Set it to "
+            "the local working directory that holds cleared_orders_cleaned.csv "
+            "(e.g. ~/BetfairData). The old behaviour of guessing OneDrive "
+            "locations was removed deliberately: OneDrive eviction corrupted "
+            "reads of the canonical."
+        )
+    return Path(raw).expanduser()
+
+
+def resolve_backup_dir(creds: dict[str, Any]) -> Optional[Path]:
+    """
+    Resolve the one-way backup directory from ``paths.backup_dir``.
+
+    Returns None when unset -- backups are optional, and their absence
+    must not fail a run. See :mod:`betfair_results_downloader.backup`.
+    """
+    raw = str((creds.get("paths") or {}).get("backup_dir", "") or "").strip()
+    return Path(raw).expanduser() if raw else None
