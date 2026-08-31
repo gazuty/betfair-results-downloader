@@ -228,3 +228,28 @@ def test_pathological_backup_dir_warns_but_never_raises(tmp_path) -> None:
     warning = backup_compressed_outputs(src, Path("bad\x00dir"), retention=5)
 
     assert warning is not None and warning.startswith("⚠️")
+
+
+def test_temp_files_are_unique_per_process(tmp_path, monkeypatch) -> None:
+    """
+    Overlapping runs sharing one mounted backup_dir must not truncate or
+    rename each other's in-progress copy: the temp name carries the pid.
+    """
+    import betfair_results_downloader.backup as backup_mod
+
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    monkeypatch.setattr(backup_mod.os, "getpid", lambda: 424242)
+    tmp_names: list[str] = []
+    real_copy = backup_mod.shutil.copy2
+
+    def capture(a, b):
+        tmp_names.append(Path(b).name)
+        return real_copy(a, b)
+
+    monkeypatch.setattr(backup_mod.shutil, "copy2", capture)
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    assert tmp_names and all(".424242.tmp" in n for n in tmp_names)
