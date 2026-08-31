@@ -361,3 +361,43 @@ def test_scheduled_soft_warning_lands_in_run_history(monkeypatch) -> None:
     assert "Disk low" in result.message
     assert len(recorded) == 1
     assert "Disk low" in recorded[0]["message"], "history must carry the warning"
+
+
+def test_disk_warning_survives_a_failed_run(monkeypatch) -> None:
+    """
+    A pipeline failure on a low disk is exactly when the disk context
+    matters: the warning must reach the failure alert and the history,
+    not be discarded because the run did not succeed.
+    """
+    from datetime import datetime, timezone
+
+    _fake_usage(monkeypatch, 6 * GB)
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        runner, "append_run_history", lambda _d, entry: recorded.append(entry)
+    )
+    monkeypatch.setattr(
+        runner,
+        "compute_backfill_window",
+        lambda *a, **k: (
+            datetime(2026, 6, 1, tzinfo=timezone.utc),
+            datetime(2026, 6, 2, tzinfo=timezone.utc),
+            "test window",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_run_pipeline",
+        lambda *a, **k: runner.RunResult(
+            ok=False, status="failed", message="Betfair login failed."
+        ),
+    )
+
+    result = runner.run_scheduled(
+        {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
+        runner.ScheduleConfig(),
+    )
+
+    assert result.ok is False
+    assert "Disk low" in result.message
+    assert recorded and "Disk low" in recorded[0]["message"]

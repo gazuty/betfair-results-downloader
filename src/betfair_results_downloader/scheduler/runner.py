@@ -442,7 +442,7 @@ def run_scheduled(
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
-    if disk_warning and result.ok:
+    if disk_warning:
         # Attached before state and history are written: the operational
         # record must carry the same warning the operator is alerted with --
         # a later incident investigation reads run_history.jsonl, not Slack.
@@ -562,7 +562,7 @@ def run_backfill(
 
     logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
     result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
-    if disk_warning and result.ok:
+    if disk_warning:
         # The operator sees only the result message; a soft warning discarded
         # here would leave a manual rewrite of the canonical unwarned.
         result.message = f"{result.message} {disk_warning}".strip()
