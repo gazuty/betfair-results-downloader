@@ -108,7 +108,7 @@ def test_copy_failure_warns_and_continues(tmp_path, monkeypatch) -> None:
 
     src = _make_source(tmp_path)
     dst = tmp_path / "backup"
-    real_copy = backup_mod.shutil.copyfile
+    real_copy = backup_mod.shutil.copy2
     failed_once: list[str] = []
 
     def flaky(a, b):
@@ -117,7 +117,7 @@ def test_copy_failure_warns_and_continues(tmp_path, monkeypatch) -> None:
             raise OSError(28, "No space left on device")
         return real_copy(a, b)
 
-    monkeypatch.setattr(backup_mod.shutil, "copyfile", flaky)
+    monkeypatch.setattr(backup_mod.shutil, "copy2", flaky)
 
     warning = backup_compressed_outputs(src, dst, retention=5)
 
@@ -146,3 +146,24 @@ def test_pipeline_calls_the_backup_after_the_csv_write() -> None:
     assert source.index("write_csv_outputs(") < source.index(
         "backup_compressed_outputs("
     )
+
+
+def test_same_size_rewrite_is_still_recopied(tmp_path) -> None:
+    """
+    Size equality is not identity: a same-day rewrite can replace a row
+    with an incoming one of the same betId and keep the byte count. The
+    mtime changes on any rewrite, and that is what the skip check keys on.
+    """
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    backup_compressed_outputs(src, dst, retention=5)
+
+    snap = src / "cleared_orders_cleaned_2026-08-31.csv.gz"
+    original_size = snap.stat().st_size
+    snap.write_bytes(b"B" * original_size)
+    assert snap.stat().st_size == original_size
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    assert (dst / snap.name).read_bytes() == b"B" * original_size

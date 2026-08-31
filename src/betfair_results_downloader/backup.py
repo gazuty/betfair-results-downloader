@@ -45,9 +45,12 @@ def backup_compressed_outputs(
 
     One-way: the source directory is never modified, the uncompressed
     canonical is never copied (271MB re-uploaded four times a day is what
-    this design retired), and archives are never pruned. A file already
-    present with the same size is skipped -- snapshots and archives only
-    grow, so an equal size means an identical earlier copy.
+    this design retired), and archives are never pruned. Copies preserve
+    the source mtime (copy2), and a file already present with the same
+    size AND mtime is skipped -- the rsync heuristic. Size alone is not
+    identity: a same-day rewrite can replace rows without changing the
+    byte count. Hashing would be exact but reads the backup-side file,
+    which on a cloud-sync directory re-downloads it every run.
 
     Returns a warning string describing any problems, or None when clean.
     Never raises.
@@ -73,11 +76,19 @@ def backup_compressed_outputs(
         dst = backup_dir / src.name
         tmp = dst.with_name(dst.name + ".tmp")
         try:
-            if dst.exists() and dst.stat().st_size == src.stat().st_size:
-                continue
+            src_stat = src.stat()
+            if dst.exists():
+                dst_stat = dst.stat()
+                if (
+                    dst_stat.st_size == src_stat.st_size
+                    and dst_stat.st_mtime_ns == src_stat.st_mtime_ns
+                ):
+                    continue
             # tmp + rename: an interrupted copy must not leave a truncated
             # file under a name the retention logic would treat as good.
-            shutil.copyfile(src, tmp)
+            # copy2 preserves the source mtime, which is what makes the
+            # skip check above safe on the next run.
+            shutil.copy2(src, tmp)
             tmp.replace(dst)
             copied += 1
         except OSError as exc:
