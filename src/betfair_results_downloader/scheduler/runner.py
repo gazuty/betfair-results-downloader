@@ -10,6 +10,7 @@ configured daily run times can perform real download attempts.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,44 @@ class RunResult:
     last_confirmed_settled_at_utc: Optional[datetime] = None
     download_started_utc: Optional[datetime] = None
     download_finished_utc: Optional[datetime] = None
+
+
+# Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
+# every run; writing it onto a full disk is the one moment damage is possible,
+# and the 2026-08-30/31 incidents both began as a full disk nothing reported.
+DISK_HARD_FLOOR_BYTES = 2 * 1024**3
+DISK_SOFT_FLOOR_BYTES = 10 * 1024**3
+
+
+def check_disk_space(
+    results_dir: str | Path,
+    *,
+    hard_floor: int = DISK_HARD_FLOOR_BYTES,
+    soft_floor: int = DISK_SOFT_FLOOR_BYTES,
+) -> tuple[bool, Optional[str]]:
+    """
+    Return (ok_to_run, warning).
+
+    ok_to_run False means below the hard floor: refuse before touching the
+    canonical. A warning string means below the soft floor: run, but say so
+    on the same Slack path as everything else, days before it is an incident.
+    Unreadable filesystems return ok with no warning -- the preflight must
+    never be the thing that stops a run.
+    """
+    try:
+        usage = shutil.disk_usage(str(results_dir))
+    except OSError:
+        return True, None
+
+    free_gb = usage.free / 1024**3
+    if usage.free < hard_floor:
+        return False, (
+            f"Disk critically low: {free_gb:.1f} GB free. Refusing to rewrite "
+            f"the canonical onto a nearly full disk."
+        )
+    if usage.free < soft_floor:
+        return True, f"⚠️ Disk low: {free_gb:.1f} GB free."
+    return True, None
 
 
 def azure_state_configured(creds: dict[str, Any]) -> bool:
@@ -354,6 +393,12 @@ def run_scheduled(
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
+    results_dir = ((creds.get("paths") or {}).get("results_csv_dir") or "").strip()
+    disk_ok, disk_warning = check_disk_space(results_dir or ".")
+    if not disk_ok:
+        logger.error(disk_warning)
+        return RunResult(ok=False, status="failed", message=disk_warning)
+
     logger.info("Computing incremental backfill window...")
     from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
@@ -417,6 +462,10 @@ def run_scheduled(
         },
     )
 
+    if disk_warning and result.ok:
+        # Surface on the run's own message so it reaches the same Slack path
+        # as failures do -- a warning nobody sees is not a warning.
+        result.message = f"{result.message} {disk_warning}".strip()
     return result
 
 

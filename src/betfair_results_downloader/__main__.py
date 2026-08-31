@@ -453,12 +453,24 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
             _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
         return 1
 
+    # The twice-daily report is the one message that is always read, which
+    # makes it the right carrier for a disk warning: the 2026-08-30/31
+    # incidents both began as a disk that filled with nothing reporting it.
+    from pathlib import Path as _Path
+
+    from .scheduler.runner import check_disk_space
+
+    _ok, disk_warning = check_disk_space(_Path(report.source_csv).parent)
+    text = report.text
+    if disk_warning:
+        text = f"{text}\n\n{disk_warning}"
+
     if getattr(args, "show_source", False):
         print(f"Source CSV: {report.source_csv}")
         print()
-    print(report.text)
+    print(text)
     if getattr(args, "post_slack", False):
-        return _post_to_slack(report.text, creds)
+        return _post_to_slack(text, creds)
     return 0
 
 
