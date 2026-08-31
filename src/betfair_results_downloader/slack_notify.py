@@ -16,14 +16,19 @@ Uses only the standard library so the scheduled job gains no dependencies.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
+import time
 import urllib.error
 import urllib.request
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 _SLACK_POST_URL = "https://slack.com/api/chat.postMessage"
 _TIMEOUT_SECONDS = 15
+_MAX_ATTEMPTS = 3
+_BACKOFF_CAP_SECONDS = 8.0
+_RETRY_AFTER_CAP_SECONDS = 30.0
 
 
 class SlackNotConfigured(RuntimeError):
@@ -89,16 +94,38 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
     return token, channel
 
 
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Slack's Retry-After is whole seconds; anything unparsable is ignored."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, _RETRY_AFTER_CAP_SECONDS)
+
+
 def post_message(
     text: str,
     creds: Optional[dict[str, Any]] = None,
     channel_override: Optional[str] = None,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """
     Post ``text`` to Slack. Returns the message timestamp on success.
 
-    Raises SlackNotConfigured if unconfigured, or RuntimeError if Slack
-    rejects the call. Callers decide whether that is fatal.
+    Transient failures -- network errors, timeouts, HTTP 429/5xx, and
+    garbage response bodies -- are retried up to ``_MAX_ATTEMPTS`` times
+    with exponential backoff, honouring Slack's Retry-After header on 429.
+    This module carries the pipeline's failure alerts, so a single dropped
+    packet must not silence the very message that reports a problem.
+
+    Raises SlackNotConfigured if unconfigured (never retried), or
+    RuntimeError if Slack rejects the call or every attempt fails.
+    Callers decide whether that is fatal.
     """
     token, channel = load_slack_config(creds)
     payload = json.dumps(
@@ -119,12 +146,39 @@ def post_message(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Slack request failed: {exc}") from exc
 
-    if not body.get("ok"):
-        raise RuntimeError(f"Slack API error: {body.get('error', 'unknown')}")
-    return str(body.get("ts", ""))
+    last_error: Optional[Exception] = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        delay: Optional[float] = None
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # HTTPError first: it subclasses URLError. 429 and 5xx are
+            # transient; any other status is Slack telling us the request
+            # itself is wrong, and repeating it would not change the answer.
+            if exc.code == 429:
+                delay = _parse_retry_after(exc.headers.get("Retry-After"))
+            elif exc.code < 500:
+                raise RuntimeError(f"Slack request failed: {exc}") from exc
+            last_error = exc
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            # OSError covers URLError (DNS/connection failures), TimeoutError
+            # (a read that times out after the connection is up), and
+            # ConnectionResetError raised by resp.read() once urlopen has
+            # already returned. http.client.HTTPException covers
+            # IncompleteRead -- a peer that closes mid-body. ValueError
+            # covers JSONDecodeError/UnicodeDecodeError on a garbled body.
+            last_error = exc
+        else:
+            if not body.get("ok"):
+                raise RuntimeError(f"Slack API error: {body.get('error', 'unknown')}")
+            return str(body.get("ts", ""))
+        if attempt < _MAX_ATTEMPTS:
+            sleep(
+                delay if delay is not None else min(2.0**attempt, _BACKOFF_CAP_SECONDS)
+            )
+
+    raise RuntimeError(
+        f"Slack request failed after {_MAX_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
