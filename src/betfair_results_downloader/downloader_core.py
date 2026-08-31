@@ -17,8 +17,9 @@ import pandas as pd
 
 import betfairlightweight
 from betfairlightweight import filters
-from betfairlightweight.exceptions import APIError
+from betfairlightweight.exceptions import APIError  # noqa: F401 (kept for callers/tests)
 
+from .betfair_net import retry_betfair_call
 from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
 from .csv_utils import (
     betid_keys,
@@ -112,22 +113,16 @@ def _call_list_cleared_orders(
     """
     Call listClearedOrders with retry/backoff for Betfair TIMEOUT_ERROR.
     """
-    for attempt in range(1, max_retries + 1):
-        try:
-            return trading.betting.list_cleared_orders(
-                bet_status="SETTLED",
-                settled_date_range=settled_range,
-                from_record=from_record,
-                record_count=record_count,
-                include_item_description=True,
-            )
-        except APIError as e:
-            msg = str(e)
-            is_timeout = ("TIMEOUT_ERROR" in msg) or ("ANGX-0010" in msg)
-            if (not is_timeout) or attempt == max_retries:
-                raise
-            sleep_s = min(2**attempt, 20)
-            time.sleep(sleep_s)
+    return retry_betfair_call(
+        lambda: trading.betting.list_cleared_orders(
+            bet_status="SETTLED",
+            settled_date_range=settled_range,
+            from_record=from_record,
+            record_count=record_count,
+            include_item_description=True,
+        ),
+        max_attempts=max_retries,
+    )
 
 
 def _extract_item_description_fields(order: dict) -> dict:
@@ -384,7 +379,13 @@ def fetch_cleared_orders_df_range(
             )
 
             indexrecord = 0
-            while True:
+            # Betfair says whether more pages exist; asking for one page past
+            # the end just to receive an empty list wastes a round-trip per
+            # chunk, and an API that clamped from_record instead of returning
+            # empty would loop a launchd job forever. Cap iterations so no
+            # response shape can spin unattended.
+            max_pages = 10_000
+            for _page in range(max_pages):
                 cleared_orders = _call_list_cleared_orders(
                     trading=trading,
                     settled_range=settled_range,
@@ -397,6 +398,17 @@ def fetch_cleared_orders_df_range(
                     break
                 all_rows.extend(_extract_item_description_fields(row) for row in batch)
                 indexrecord += page_size
+                # Honour an explicit "no more pages"; an absent key falls back
+                # to the legacy paginate-until-empty behaviour rather than
+                # guessing, so a response missing the field cannot truncate a
+                # download.
+                if data.get("moreAvailable") is False:
+                    break
+            else:
+                raise RuntimeError(
+                    f"Cleared-orders pagination exceeded {max_pages:,} pages for "
+                    f"one chunk; aborting rather than looping unattended."
+                )
     finally:
         if owns_client:
             try:
@@ -442,19 +454,14 @@ def _call_list_market_catalogue(
     Call listMarketCatalogue with the same TIMEOUT_ERROR retry/backoff policy
     as :func:`_call_list_cleared_orders`.
     """
-    for attempt in range(1, max_retries + 1):
-        try:
-            return trading.betting.list_market_catalogue(
-                filter=filters.market_filter(market_ids=market_ids),
-                max_results=1000,
-                market_projection=["MARKET_START_TIME", "EVENT"],
-            )
-        except APIError as e:
-            msg = str(e)
-            is_timeout = ("TIMEOUT_ERROR" in msg) or ("ANGX-0010" in msg)
-            if (not is_timeout) or attempt == max_retries:
-                raise
-            time.sleep(min(2**attempt, 20))
+    return retry_betfair_call(
+        lambda: trading.betting.list_market_catalogue(
+            filter=filters.market_filter(market_ids=market_ids),
+            max_results=1000,
+            market_projection=["MARKET_START_TIME", "EVENT"],
+        ),
+        max_attempts=max_retries,
+    )
 
 
 def enrich_with_market_catalogue(

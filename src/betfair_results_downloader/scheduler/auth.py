@@ -5,6 +5,8 @@ from typing import Any
 
 import betfairlightweight
 
+from ..betfair_net import retry_betfair_call
+
 
 CERT_FILENAME = "client-2048.crt"
 KEY_FILENAME = "client-2048.key"
@@ -72,5 +74,9 @@ def build_api_client(betfair_creds: dict[str, Any]) -> betfairlightweight.APICli
         app_key=app_key,
         certs=str(certs_dir),
     )
-    client.login()
+    # Three attempts, not one. The cert-SSO endpoint has bad seconds: the
+    # 2026-08-31 09:00 scheduled run died on a single un-retried login read
+    # timeout, and 2026-07-19 shows the same as a connection reset. A genuine
+    # credential rejection is not transient and still fails on the first try.
+    retry_betfair_call(client.login, max_attempts=3)
     return client
