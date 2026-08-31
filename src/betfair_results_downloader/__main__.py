@@ -261,10 +261,16 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     Exit codes: 0=report produced (gaps or not), 2=bad configuration.
     """
     from .audit import compute_missing_settled_dates
-    from .paths import resolve_results_dir
+    from .paths import ResultsDirNotConfigured, resolve_results_dir
 
     creds, _schedule_cfg = _load_creds_and_schedule()
-    results_dir = resolve_results_dir(creds)
+    try:
+        results_dir = resolve_results_dir(creds)
+    except (ResultsDirNotConfigured, AttributeError) as exc:
+        # AttributeError: paths may be any JSON shape; a bare string must
+        # exit as bad configuration, not with a traceback.
+        print(f"FAIL: {exc}")
+        return 2
     canonical = results_dir / "cleared_orders_cleaned.csv"
 
     result = compute_missing_settled_dates(canonical, window_days=args.window)
@@ -416,13 +422,15 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
     results_dir = ""
     if not getattr(args, "csv", None):
         creds, _schedule_cfg = _load_creds_for_report(args)
-        # paths may be any JSON shape; a bare string would raise AttributeError
-        # here, outside every notification handler.
-        paths_cfg = creds.get("paths")
-        if not isinstance(paths_cfg, dict):
-            paths_cfg = {}
-        results_dir = str(paths_cfg.get("results_csv_dir") or "").strip()
-        if not results_dir:
+        from .paths import ResultsDirNotConfigured, resolve_results_dir
+
+        try:
+            # The shared resolver, so ~ expands here exactly as it does for
+            # the scheduled run that wrote the CSV this report reads.
+            results_dir = str(resolve_results_dir(creds))
+        except (ResultsDirNotConfigured, AttributeError):
+            # AttributeError: paths may be any JSON shape; a bare string must
+            # fail this handler's way, not with a traceback.
             msg = "FAIL: paths.results_csv_dir is not configured in credentials.json"
             print(msg)
             if getattr(args, "post_slack", False):
