@@ -129,3 +129,48 @@ class TestFetchClearedOrdersRange:
         assert result.attempted is True
         assert result.rows_downloaded == 0
         assert "betId" in result.df_co.columns
+
+
+def test_pagination_stops_when_no_more_available(monkeypatch):
+    """
+    Betfair says whether more pages exist. Relying on an empty final page
+    costs a wasted round-trip per chunk, and an API that clamped from_record
+    instead of returning empty would loop a launchd job forever.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+
+    from betfair_results_downloader import downloader_core
+
+    pages = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return _json.dumps(self._payload)
+
+    def fake_call(*, trading, settled_range, from_record, record_count):
+        pages.append(from_record)
+        return _Resp(
+            {
+                "clearedOrders": [
+                    _order(str(from_record + i)) for i in range(record_count)
+                ],
+                "moreAvailable": False,  # full page, but nothing further
+            }
+        )
+
+    monkeypatch.setattr(downloader_core, "_call_list_cleared_orders", fake_call)
+
+    result = downloader_core.fetch_cleared_orders_df_range(
+        betfair={},
+        from_date=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        to_date=datetime(2026, 6, 2, tzinfo=timezone.utc),
+        api_client=object(),
+        page_size=50,
+    )
+
+    assert len(pages) == 1, "a full page with moreAvailable=False must not fetch again"
+    assert result.rows_downloaded == 50
