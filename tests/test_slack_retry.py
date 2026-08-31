@@ -196,3 +196,42 @@ def test_unparsable_retry_after_falls_back_to_backoff(monkeypatch) -> None:
 
     assert slack_notify.post_message("hello", creds, sleep=sleeps.append) == "123.456"
     assert sleeps == [2.0]
+
+
+def test_read_side_failures_are_retried(monkeypatch) -> None:
+    """
+    urlopen can return successfully and the failure then surface from
+    resp.read(): IncompleteRead when the peer closes mid-body, or a raw
+    ConnectionResetError. Neither is a URLError, because urlopen already
+    returned -- they must still be transient.
+    """
+    import http.client
+
+    creds = _configure(monkeypatch)
+    calls: list[int] = []
+
+    class _ExplodingResponse:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        def read(self) -> bytes:
+            raise self._exc
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def urlopen(req, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return _ExplodingResponse(http.client.IncompleteRead(b"partial"))
+        if len(calls) == 2:
+            return _ExplodingResponse(ConnectionResetError("reset by peer"))
+        return _FakeResponse(_OK_BODY)
+
+    monkeypatch.setattr(slack_notify.urllib.request, "urlopen", urlopen)
+
+    assert slack_notify.post_message("hello", creds, sleep=lambda _s: None) == "123.456"
+    assert len(calls) == 3

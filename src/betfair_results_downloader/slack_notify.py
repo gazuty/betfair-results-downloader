@@ -16,6 +16,7 @@ Uses only the standard library so the scheduled job gains no dependencies.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import time
@@ -161,11 +162,13 @@ def post_message(
             elif exc.code < 500:
                 raise RuntimeError(f"Slack request failed: {exc}") from exc
             last_error = exc
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-            # URLError: DNS/connection failures. TimeoutError: a read that
-            # times out after the connection is up escapes URLError's wrap.
-            # ValueError covers JSONDecodeError/UnicodeDecodeError -- a
-            # truncated or garbled body from a proxy or a dying connection.
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            # OSError covers URLError (DNS/connection failures), TimeoutError
+            # (a read that times out after the connection is up), and
+            # ConnectionResetError raised by resp.read() once urlopen has
+            # already returned. http.client.HTTPException covers
+            # IncompleteRead -- a peer that closes mid-body. ValueError
+            # covers JSONDecodeError/UnicodeDecodeError on a garbled body.
             last_error = exc
         else:
             if not body.get("ok"):
