@@ -62,7 +62,7 @@ def test_unreadable_filesystem_never_blocks_the_run(monkeypatch) -> None:
     assert warning is None
 
 
-def test_run_scheduled_refuses_below_the_hard_floor(monkeypatch) -> None:
+def test_run_scheduled_refuses_below_the_hard_floor(monkeypatch, tmp_path) -> None:
     """The refusal happens before gap detection, download, or any write."""
     _fake_usage(monkeypatch, 1 * GB)
 
@@ -73,7 +73,10 @@ def test_run_scheduled_refuses_below_the_hard_floor(monkeypatch) -> None:
 
     result = runner.run_scheduled(
         {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
-        runner.ScheduleConfig(),
+        # An explicit log_dir: the default resolves to the real repo
+        # outputs/, and this test's refusal would be recorded in the
+        # production run_history.jsonl on every pytest run.
+        runner.ScheduleConfig(log_dir=str(tmp_path)),
     )
 
     assert result.ok is False
@@ -132,7 +135,7 @@ def test_missing_results_dir_does_not_bypass_the_floor(monkeypatch, tmp_path) ->
     assert seen and seen[0] == str(tmp_path), "probed the nearest existing ancestor"
 
 
-def test_backfill_refuses_below_the_hard_floor(monkeypatch) -> None:
+def test_backfill_refuses_below_the_hard_floor(monkeypatch, tmp_path) -> None:
     """A manual backfill rewrites the same canonical; same floor."""
     from datetime import date
 
@@ -140,7 +143,9 @@ def test_backfill_refuses_below_the_hard_floor(monkeypatch) -> None:
 
     result = runner.run_backfill(
         {"paths": {"results_csv_dir": "/anywhere"}, "user": {}},
-        runner.ScheduleConfig(),
+        # Explicit log_dir for the same reason as the scheduled variant:
+        # never record test refusals in the real run_history.jsonl.
+        runner.ScheduleConfig(log_dir=str(tmp_path)),
         date(2026, 6, 1),
         date(2026, 6, 2),
     )
