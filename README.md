@@ -733,7 +733,7 @@ Full design document (architecture, config schema, safety gates, state model, er
 - **Retry pattern:** primary run at user-configured time (default `06:00`) with additional windows at `09:00`, `19:00`, `23:00`; every window performs a real incremental download from the timestamp checkpoint (day-level skip suppression was retired with the intraday checkpoint redesign)
 - **Safety:** four-gate Azure publish model (`enable_azure_sql` + `dry_run=false` + `schedule.publish_to_azure` + `schedule.allow_azure_publish`)
 - **Auth:** cert-based only — shipped in Phase 1.1, verified via `auth-test`
-- **Concurrency:** two-machine concurrent runs are accepted as safe due to full idempotency (`betId` dedupe + `(UserID, MarketID)` incremental sync)
+- **Concurrency:** one scheduler machine owns the working set. (The old two-machine claim rested on both machines rewriting the same OneDrive canonical with `betId` dedupe; since the working set moved to local disk, a second machine would hold a divergent canonical. If a second machine must run, give it its own `results_csv_dir` **and its own `backup_dir`** — the backup copier assumes a single writer per backup directory.)
 - **Backfill:** `python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD` for manual catch-up
 
 ---

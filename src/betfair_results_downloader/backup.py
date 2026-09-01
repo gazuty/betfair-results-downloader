@@ -81,6 +81,16 @@ def _backup_compressed_outputs_inner(
     byte count. Hashing would be exact but reads the backup-side file,
     which on a cloud-sync directory re-downloads it every run.
 
+    Single writer per backup directory, by contract (see the README's
+    concurrency note): since the working set moved to local disk there is
+    no shared canonical for two machines to converge on, so this module
+    does not attempt cross-machine freshness ranking -- neither mtime
+    (writer wall-clock; lies under skew) nor compressed size (not
+    monotonic with row count once archival trims old rows) can order two
+    divergent sources correctly. A second machine gets its own
+    backup_dir; the uuid temp names below stay as insurance against a
+    misconfigured overlap ever corrupting a file in transit.
+
     Returns a warning string describing any problems, or None when clean.
     Never raises.
     """
@@ -128,25 +138,6 @@ def _backup_compressed_outputs_inner(
                     dst_stat.st_size == src_stat.st_size
                     and dst_stat.st_mtime_ns == src_stat.st_mtime_ns
                 ):
-                    continue
-                if (
-                    dst_stat.st_mtime_ns > src_stat.st_mtime_ns
-                    and dst_stat.st_size >= src_stat.st_size
-                ):
-                    # A newer copy already landed -- in a two-machine setup
-                    # a lagging run must not roll the disaster-recovery
-                    # copy back to its older source. mtime alone would be
-                    # fooled by clock skew, so the data-derived signal
-                    # breaks the tie: snapshots and archives only grow, so
-                    # a source carrying newer rows is larger and copies
-                    # regardless of what the wall clocks claim. copy2
-                    # preserves source mtimes, so a genuinely fresher
-                    # source on a later run also wins on mtime.
-                    if status_cb:
-                        status_cb(
-                            f"Backup: {src.name} skipped; a newer copy is "
-                            f"already in {backup_dir}."
-                        )
                     continue
             # tmp + rename: an interrupted copy must not leave a truncated
             # file under a name the retention logic would treat as good.
