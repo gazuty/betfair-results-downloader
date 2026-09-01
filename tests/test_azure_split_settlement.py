@@ -78,3 +78,23 @@ def test_pipeline_aggregates_from_the_canonical() -> None:
 
     source = inspect.getsource(runner._run_pipeline_inner)
     assert "select_azure_rows_from_canonical(csvr.df_canonical, df_co)" in source
+
+
+def test_archived_out_markets_still_publish_from_the_window() -> None:
+    """
+    A backfill can download rows old enough that write_csv_outputs
+    archives them straight out of the canonical. Their markets must
+    still publish from the window rows, as they always did, rather than
+    silently vanish from an empty selection.
+    """
+    canonical = pd.DataFrame([_row("1.111", "b1", "4.0")], dtype=str)
+    window = pd.DataFrame(
+        [_row("1.111", "b1", "4.0"), _row("1.222", "b9", "7.5")], dtype=str
+    )
+
+    selected = select_azure_rows_from_canonical(canonical, window)
+
+    assert set(selected["marketId"]) == {"1.111", "1.222"}
+    prep = prepare_azure_dataset(df_co=selected)
+    profits = {str(m): p for m, p, _ in prep.rows_to_write}
+    assert profits["1.222"] == Decimal("7.50")

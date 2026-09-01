@@ -957,7 +957,18 @@ def select_azure_rows_from_canonical(
     ):
         return df_window
     window_ids = set(df_window["marketId"].astype(str))
-    return df_canonical[df_canonical["marketId"].astype(str).isin(window_ids)].copy()
+    canonical_ids = df_canonical["marketId"].astype(str)
+    mask = canonical_ids.isin(window_ids)
+    selected = df_canonical[mask]
+    # A backfill can download rows old enough that write_csv_outputs
+    # archives them straight out of the canonical. Their markets must
+    # still publish from the window rows themselves, as they always did,
+    # rather than silently vanish from an "empty" selection.
+    missing_ids = window_ids - set(canonical_ids[mask])
+    if missing_ids:
+        missing_rows = df_window[df_window["marketId"].astype(str).isin(missing_ids)]
+        selected = pd.concat([selected, missing_rows], ignore_index=True)
+    return selected.copy()
 
 
 def _money2(x: Any) -> Decimal:
