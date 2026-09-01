@@ -470,6 +470,30 @@ def _call_list_market_catalogue(
     )
 
 
+def coalesce_catalogue_columns(
+    df_work: pd.DataFrame, df_catalogue: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Merge catalogue metadata onto ``df_work`` by marketId, preferring
+    values already present (extracted from itemDescription) and filling
+    only the gaps from the catalogue. Never leaves ``*_cat`` suffix
+    columns behind, and columns the work frame lacks entirely come
+    across from the catalogue as-is.
+    """
+    overlap_cols = [
+        c for c in df_catalogue.columns if c != "marketId" and c in df_work.columns
+    ]
+    df_out = df_work.merge(
+        df_catalogue, on="marketId", how="left", suffixes=("", "_cat")
+    )
+    for col in overlap_cols:
+        cat_col = f"{col}_cat"
+        if cat_col in df_out.columns:
+            df_out[col] = df_out[col].fillna(df_out[cat_col])
+            df_out.drop(columns=[cat_col], inplace=True)
+    return df_out
+
+
 def enrich_with_market_catalogue(
     *,
     df_co: pd.DataFrame,
@@ -632,20 +656,7 @@ def enrich_with_market_catalogue(
     cache_rows = len(df_new_cache) if not df_new_cache.empty else 0
 
     if not df_new_cache.empty:
-        # Columns that may already exist from itemDescription extraction
-        overlap_cols = [
-            c for c in df_new_cache.columns if c != "marketId" and c in df_work.columns
-        ]
-        df_out = df_work.merge(
-            df_new_cache, on="marketId", how="left", suffixes=("", "_cat")
-        )
-
-        # Coalesce: prefer itemDescription values, fall back to catalogue
-        for col in overlap_cols:
-            cat_col = f"{col}_cat"
-            if cat_col in df_out.columns:
-                df_out[col] = df_out[col].fillna(df_out[cat_col])
-                df_out.drop(columns=[cat_col], inplace=True)
+        df_out = coalesce_catalogue_columns(df_work, df_new_cache)
 
         # --- Message clarity tweak (cache-only vs API) ---
         if returned_total == 0 and cache_hits > 0:

@@ -128,6 +128,75 @@ class TestUpsertScheduleState:
         assert "Australia/Sydney" in params
         assert confirmed.replace(tzinfo=None) in params
 
+    def test_every_placeholder_gets_its_own_parameter_in_order(self) -> None:
+        """
+        The MERGE binds 24 positional placeholders; a mis-ordered
+        parameter among them writes one column's value into another and
+        no other test can see it. Pin the full tuple by index, with a
+        distinct value for every parameter so any swap fails.
+        """
+        mock_conn, mock_cursor = _make_mock_conn()
+        confirmed = datetime(2026, 4, 5, 5, 45, 1, tzinfo=timezone.utc)
+        dl_started = datetime(2026, 4, 5, 5, 50, 2, tzinfo=timezone.utc)
+        dl_finished = datetime(2026, 4, 5, 5, 55, 3, tzinfo=timezone.utc)
+        run_started = datetime(2026, 4, 5, 6, 0, 4, tzinfo=timezone.utc)
+        run_finished = datetime(2026, 4, 5, 6, 5, 5, tzinfo=timezone.utc)
+        local = TODAY + timedelta(days=1)
+
+        with patch(
+            "betfair_results_downloader.scheduler.state._open_azure_connection",
+            return_value=mock_conn,
+        ):
+            assert upsert_schedule_state(
+                BASE_CREDS,
+                last_covered_date_utc=TODAY,
+                last_covered_date_local=local,
+                last_covered_timezone="Australia/Sydney",
+                status="success",
+                message="pinned message",
+                run_started_utc=run_started,
+                run_finished_utc=run_finished,
+                last_confirmed_settled_at_utc=confirmed,
+                last_successful_download_started_utc=dl_started,
+                last_successful_download_finished_utc=dl_finished,
+            )
+
+        sql = mock_cursor.execute.call_args[0][0]
+        params = tuple(mock_cursor.execute.call_args[0][1:])
+        assert sql.count("?") == len(params), "every placeholder bound exactly once"
+
+        naive = lambda dt: dt.replace(tzinfo=None)  # noqa: E731
+        expected = (
+            # USING (SELECT ? AS UserID)
+            "TestUser",
+            # WHEN MATCHED ... UPDATE SET
+            TODAY,  # LastCoveredDateUtc
+            local,  # LastCoveredDateLocal
+            "Australia/Sydney",  # LastCoveredTimezone
+            naive(confirmed),  # CASE WHEN ? IS NULL
+            naive(confirmed),  # CASE ... OR ? >
+            naive(confirmed),  # CASE ... THEN ?
+            naive(dl_started),  # LastSuccessfulDownloadStartedUtc
+            naive(dl_finished),  # LastSuccessfulDownloadFinishedUtc
+            naive(run_started),  # LastRunStartedUtc
+            naive(run_finished),  # LastRunFinishedUtc
+            "success",  # LastRunStatus
+            "pinned message",  # LastRunMessage
+            # WHEN NOT MATCHED ... VALUES
+            "TestUser",
+            TODAY,
+            local,
+            "Australia/Sydney",
+            naive(confirmed),
+            naive(dl_started),
+            naive(dl_finished),
+            naive(run_started),
+            naive(run_finished),
+            "success",
+            "pinned message",
+        )
+        assert params == expected
+
     def test_message_truncated_to_1000_chars(self) -> None:
         mock_conn, mock_cursor = _make_mock_conn()
         long_msg = "x" * 2000
