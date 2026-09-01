@@ -129,6 +129,13 @@ def _backup_compressed_outputs_inner(
                     and dst_stat.st_mtime_ns == src_stat.st_mtime_ns
                 ):
                     continue
+                if dst_stat.st_mtime_ns > src_stat.st_mtime_ns:
+                    # A newer copy already landed -- in a two-machine setup
+                    # a lagging run must not roll the disaster-recovery
+                    # copy back to its older source. Because copy2
+                    # preserves the source mtime, a genuinely fresher
+                    # source on the next run still wins this comparison.
+                    continue
             # tmp + rename: an interrupted copy must not leave a truncated
             # file under a name the retention logic would treat as good.
             # copy2 preserves the source mtime, which is what makes the

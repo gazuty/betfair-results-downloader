@@ -256,3 +256,27 @@ def test_temp_files_are_globally_unique(tmp_path, monkeypatch) -> None:
     assert tmp_names and all(".424242." in n and n.endswith(".tmp") for n in tmp_names)
     # The nonce, not just the pid: same-pid runs on two machines must differ.
     assert all(n.split(".424242.")[1] != "tmp" for n in tmp_names)
+
+
+def test_stale_source_never_rolls_back_a_newer_backup(tmp_path) -> None:
+    """
+    Two-machine setups: a lagging run whose snapshot is older than what
+    already landed in the backup dir must not overwrite it.
+    """
+    import os
+
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    backup_compressed_outputs(src, dst, retention=5)
+
+    snap = src / "cleared_orders_cleaned_2026-08-31.csv.gz"
+    backed = dst / snap.name
+    kept_bytes = backed.read_bytes()
+    snap.write_bytes(b"stale rewrite from the lagging machine")
+    # The other machine's copy is newer than this machine's source.
+    os.utime(snap, ns=(snap.stat().st_atime_ns, backed.stat().st_mtime_ns - 10**9))
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    assert backed.read_bytes() == kept_bytes
