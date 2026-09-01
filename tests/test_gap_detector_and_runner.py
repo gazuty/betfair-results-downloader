@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from betfair_results_downloader.config import ScheduleConfig, parse_schedule_config
 from betfair_results_downloader.scheduler.gap_detector import (
@@ -397,15 +398,20 @@ class TestRunScheduled:
 
 
 class TestResolveResultsDir:
-    def test_falls_back_to_get_results_database_dir_when_empty(self) -> None:
-        sentinel = Path("/mock/onedrive/results")
+    def test_empty_results_dir_fails_loudly(self) -> None:
+        """
+        The OneDrive-guessing fallback was removed in H4: a pipeline that
+        guesses where its system of record lives eventually guesses wrong.
+        """
+        from betfair_results_downloader.paths import ResultsDirNotConfigured
+
         creds = {**BASE_CREDS, "paths": {"results_csv_dir": ""}}
-        with patch(
-            "betfair_results_downloader.paths.get_results_database_dir",
-            return_value=sentinel,
-        ):
-            result = _resolve_results_dir(creds)
-        assert result == sentinel
+        with pytest.raises(ResultsDirNotConfigured, match="results_csv_dir"):
+            _resolve_results_dir(creds)
+
+    def test_tilde_paths_are_expanded(self) -> None:
+        creds = {**BASE_CREDS, "paths": {"results_csv_dir": "~/BetfairData"}}
+        assert _resolve_results_dir(creds) == Path("~/BetfairData").expanduser()
 
 
 class TestMaxSettledDateFromCsv:

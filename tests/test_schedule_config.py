@@ -308,3 +308,48 @@ class TestValidateCredentialsScheduleIntegration:
         result = validate_credentials(creds)
         assert not result.ok
         assert any("certs_dir" in e for e in result.errors)
+
+
+class TestResultsDirValidation:
+    """paths.results_csv_dir is required since H4 removed the fallback."""
+
+    def _creds(self, paths) -> dict:
+        return {
+            "betfair": {"username": "u", "password": "p", "app_key": "k"},
+            "user": {"enable_azure_sql": False},
+            "paths": paths,
+        }
+
+    def test_missing_results_dir_is_an_error(self) -> None:
+        result = validate_credentials(self._creds({}))
+        assert not result.ok
+        assert any("results_csv_dir" in e for e in result.errors)
+
+    def test_absent_paths_section_is_an_error(self) -> None:
+        creds = self._creds({})
+        del creds["paths"]
+        result = validate_credentials(creds)
+        assert not result.ok
+        assert any("results_csv_dir" in e for e in result.errors)
+
+    def test_non_object_paths_is_an_error(self) -> None:
+        result = validate_credentials(self._creds("not-an-object"))
+        assert not result.ok
+        assert any("paths must be an object" in e for e in result.errors)
+
+    def test_set_results_dir_is_valid(self) -> None:
+        result = validate_credentials(self._creds({"results_csv_dir": "~/BetfairData"}))
+        assert result.ok, result.errors
+
+    def test_non_string_results_dir_is_an_error(self) -> None:
+        """str() coercion would resolve `true` to a directory named True."""
+        result = validate_credentials(self._creds({"results_csv_dir": True}))
+        assert not result.ok
+        assert any("must be a string" in e for e in result.errors)
+
+    def test_non_string_backup_dir_is_an_error(self) -> None:
+        result = validate_credentials(
+            self._creds({"results_csv_dir": "~/BetfairData", "backup_dir": 123})
+        )
+        assert not result.ok
+        assert any("backup_dir must be a string" in e for e in result.errors)

@@ -219,6 +219,32 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
             errors.append("Missing azure_sql.password (Azure enabled)")
         # driver is optional; we'll provide a default
 
+    # Results directory: required since H4 removed the OneDrive-guessing
+    # fallback. Rejecting it here gives download commands their documented
+    # exit 2 for bad configuration instead of a mid-run failure.
+    paths_cfg = creds.get("paths")
+    if paths_cfg is None:
+        paths_cfg = {}
+    if not isinstance(paths_cfg, dict):
+        errors.append("paths must be an object when present")
+    else:
+        rdir = paths_cfg.get("results_csv_dir")
+        if rdir is not None and not isinstance(rdir, str):
+            errors.append(
+                f"paths.results_csv_dir must be a string, got {type(rdir).__name__}"
+            )
+        elif not (rdir or "").strip():
+            errors.append(
+                "Missing paths.results_csv_dir (required; the "
+                "OneDrive-guessing fallback was removed)"
+            )
+        bdir = paths_cfg.get("backup_dir")
+        if bdir is not None and not isinstance(bdir, str):
+            errors.append(
+                f"paths.backup_dir must be a string when present, "
+                f"got {type(bdir).__name__}"
+            )
+
     # Schedule validation (no-op when schedule.enabled=false)
     sched_errors, sched_warnings = _validate_schedule_section(creds)
     errors.extend(sched_errors)

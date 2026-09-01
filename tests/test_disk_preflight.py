@@ -216,11 +216,12 @@ def test_successful_run_without_warning_stays_silent(monkeypatch) -> None:
     assert posted == []
 
 
-def test_empty_config_checks_the_resolved_fallback_dir(monkeypatch, tmp_path) -> None:
+def test_preflight_probes_the_resolved_dir(monkeypatch, tmp_path) -> None:
     """
-    An empty results_csv_dir is a supported config that falls back to the
-    OneDrive default -- potentially a different filesystem from the working
-    directory. The preflight must check where the canonical actually goes.
+    The preflight must check where the canonical actually goes -- the
+    resolved directory, which can sit on a different filesystem from the
+    working directory. (Resolution itself is monkeypatched here; since H4
+    an empty results_csv_dir fails loudly instead of falling back.)
     """
     probed: list[str] = []
     resolved = tmp_path / "fallback"

@@ -313,6 +313,26 @@ def _run_pipeline_inner(
         )
         logger.info("CSV result: %s", csvr.message)
 
+        # One-way backup of the compressed outputs, after the local write
+        # succeeded. Best-effort by design: OneDrive being offline or full
+        # must never fail a run that just succeeded locally, but the
+        # warning rides the result message so the ⚠️ reaches Slack.
+        from ..backup import backup_compressed_outputs  # noqa: PLC0415
+        from ..paths import resolve_backup_dir  # noqa: PLC0415
+
+        backup_warning: Optional[str] = None
+        backup_dir = resolve_backup_dir(creds)
+        if backup_dir is not None:
+            backup_warning = backup_compressed_outputs(
+                results_dir,
+                backup_dir,
+                retention=int(user.get("snapshot_retention_days", 14)),
+                status_cb=_say,
+            )
+            if backup_warning:
+                logger.warning(backup_warning)
+        warn_suffix = f" {backup_warning}" if backup_warning else ""
+
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)
 
         azure_published = False
@@ -354,7 +374,7 @@ def _run_pipeline_inner(
                     download_finished_utc=datetime.now(timezone.utc),
                     message=(
                         f"CSV written ({csvr.rows_in_canonical:,} rows canonical). "
-                        f"Azure publish failed: {exc}"
+                        f"Azure publish failed: {exc}{warn_suffix}"
                     ),
                 )
         else:
@@ -378,7 +398,7 @@ def _run_pipeline_inner(
             f"Scheduled run complete: {dl.rows_downloaded:,} rows downloaded, "
             f"{csvr.rows_in_canonical:,} rows in canonical, "
             f"azure={'published' if azure_published else 'skipped'}. "
-            f"Elapsed {elapsed:.1f}s."
+            f"Elapsed {elapsed:.1f}s.{warn_suffix}"
         )
         logger.info(summary)
 

@@ -10,6 +10,7 @@ SystemExit, which would otherwise bypass the notifier entirely.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -398,3 +399,45 @@ def test_non_object_credentials_do_not_break_the_notifier(monkeypatch, bad) -> N
     )
 
     assert slack_notify.load_slack_config(bad) == ("xoxb-local", "U-local")
+
+
+def test_audit_missing_results_dir_exits_2(monkeypatch, capsys) -> None:
+    """audit's documented contract: exit 2 for bad configuration, no traceback."""
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {}}, None),
+    )
+
+    exit_code = main(["audit"])
+
+    assert exit_code == 2
+    assert "results_csv_dir" in capsys.readouterr().out
+
+
+def test_dm_report_expands_tilde_in_results_dir(monkeypatch) -> None:
+    """
+    The scheduled run resolves ~/BetfairData through resolve_results_dir;
+    the report reading the same config must land on the same directory,
+    not a literal ./~ path.
+    """
+    captured: dict = {}
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_for_report",
+        lambda *a, **k: ({"paths": {"results_csv_dir": "~/BetfairData"}}, None),
+    )
+
+    def capture(results_dir, report_dt=None, csv_path=None):
+        captured["results_dir"] = results_dir
+        raise FileNotFoundError("stop here")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.reporting.daily_dm_report."
+        "build_daily_dm_report_from_results_dir",
+        capture,
+    )
+
+    exit_code = main(["dm-report"])
+
+    assert exit_code == 1
+    assert "~" not in captured["results_dir"]
+    assert captured["results_dir"] == str(Path("~/BetfairData").expanduser())
