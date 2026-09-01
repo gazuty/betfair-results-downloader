@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from betfair_results_downloader.azure_common import build_conn_str
 from betfair_results_downloader.secrets import get_credentials_path, load_credentials
 
 # Each batch is executed separately: SQL Server compiles a batch before running
@@ -95,20 +96,6 @@ WHERE LastCoveredDateLocal IS NOT NULL
 ]
 
 
-def _build_conn_str(azsql: dict) -> str:
-    port = azsql.get("port", 1433)
-    return (
-        f"DRIVER={{{azsql['driver']}}};"
-        f"SERVER={azsql['server']},{port};"
-        f"DATABASE={azsql['database']};"
-        f"UID={azsql['username']};"
-        f"PWD={azsql['password']};"
-        "Encrypt=yes;"
-        "TrustServerCertificate=no;"
-        "Connection Timeout=30;"
-    )
-
-
 def main() -> int:
     creds_path = get_credentials_path()
     print(f"Credentials: {creds_path}")
@@ -128,7 +115,7 @@ def main() -> int:
         print("ERROR: pyodbc not installed. Run: pip install pyodbc")
         return 1
 
-    conn_str = _build_conn_str(azsql)
+    conn_str = build_conn_str(azsql)
     print(f"Connecting to {azsql.get('server')}/{azsql.get('database')}...")
     try:
         with pyodbc.connect(conn_str, autocommit=True) as conn:
