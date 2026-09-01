@@ -1001,7 +1001,27 @@ def _rows_not_already_held(base: pd.DataFrame, candidate: pd.DataFrame) -> pd.Da
     return pd.concat([extra_keyed, keyless])
 
 
-_AZURE_PREP_COLUMNS = {"eventTypeId", "marketId", "profit", "betId", "placedDate"}
+def _window_may_touch_archives(df_window: pd.DataFrame, archive_months: int) -> bool:
+    """
+    Whether the window could involve bets old enough to sit in a yearly
+    archive -- the gate that keeps four daily scheduled runs from
+    re-reading every archive: their markets settled today, nowhere near
+    the cutoff. Stays conservative (True) when there is no settledDate
+    to reason with or any of them fail to parse.
+    """
+    if archive_months <= 0:
+        return True  # no cutoff to reason with; the glob guard still applies
+    if "settledDate" not in df_window.columns:
+        return True
+    settled = pd.to_datetime(
+        df_window["settledDate"], utc=True, errors="coerce", format="ISO8601"
+    )
+    if bool(settled.isna().any()):
+        return True
+    cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(
+        months=archive_months
+    )
+    return bool((settled < cutoff).any())
 
 
 def _archived_rows_for_markets(
@@ -1024,12 +1044,10 @@ def _archived_rows_for_markets(
         return hits
     for path in paths:
         try:
-            df = pd.read_csv(
-                path,
-                dtype=str,
-                keep_default_na=False,
-                usecols=lambda c: c in _AZURE_PREP_COLUMNS,
-            )
+            # Full rows, not an Azure-column projection: keyless bets are
+            # deduplicated by full-row identity, and a projection would
+            # make two different bets look identical.
+            df = pd.read_csv(path, dtype=str, keep_default_na=False)
         except (OSError, ValueError) as exc:
             logger.warning(
                 "Could not read archive %s for Azure aggregation: %s -- "
@@ -1052,6 +1070,7 @@ def select_azure_rows_from_canonical(
     df_window: pd.DataFrame,
     *,
     results_csv_dir: Optional[Path] = None,
+    archive_months: int = 12,
 ) -> pd.DataFrame:
     """
     Return every known bet for the marketIds the window touched.
@@ -1068,8 +1087,10 @@ def select_azure_rows_from_canonical(
       rows old enough that write_csv_outputs archives them straight
       back out);
     - rows already sitting in the yearly archives for those markets,
-      when ``results_csv_dir`` is given (bets archived by an EARLIER
-      run are in neither the canonical nor the window).
+      when ``results_csv_dir`` is given AND the window contains bets
+      old enough to plausibly be archived (bets archived by an EARLIER
+      run are in neither the canonical nor the window; scheduled runs
+      settle today and skip the archive read entirely).
 
     Falls back to the window frame when the canonical is unavailable,
     which preserves the old behaviour rather than skipping the publish.
@@ -1089,7 +1110,9 @@ def select_azure_rows_from_canonical(
         extra = _rows_not_already_held(selected, df_window)
         if len(extra):
             selected = pd.concat([selected, extra], ignore_index=True)
-    if results_csv_dir is not None:
+    if results_csv_dir is not None and _window_may_touch_archives(
+        df_window, archive_months
+    ):
         for archived in _archived_rows_for_markets(results_csv_dir, window_ids):
             extra = _rows_not_already_held(selected, archived)
             if len(extra):

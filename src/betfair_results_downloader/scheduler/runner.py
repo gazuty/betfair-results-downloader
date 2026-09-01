@@ -350,7 +350,10 @@ def _run_pipeline_inner(
                 # select_azure_rows_from_canonical.
                 prep = prepare_azure_dataset(
                     df_co=select_azure_rows_from_canonical(
-                        csvr.df_canonical, df_co, results_csv_dir=results_dir
+                        csvr.df_canonical,
+                        df_co,
+                        results_csv_dir=results_dir,
+                        archive_months=int(user.get("canonical_archive_months", 12)),
                     )
                 )
                 if not prep.attempted:

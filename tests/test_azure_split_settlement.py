@@ -78,7 +78,8 @@ def test_pipeline_aggregates_from_the_canonical() -> None:
 
     source = inspect.getsource(runner._run_pipeline_inner)
     assert "select_azure_rows_from_canonical(" in source
-    assert "csvr.df_canonical, df_co, results_csv_dir=results_dir" in source
+    assert "csvr.df_canonical," in source
+    assert "results_csv_dir=results_dir," in source
 
 
 def test_archived_out_markets_still_publish_from_the_window() -> None:
@@ -252,3 +253,65 @@ def test_null_profit_on_a_racing_row_aborts_preparation() -> None:
 
     assert prep.attempted is False
     assert "missing or unparseable" in prep.message
+
+
+def test_recent_windows_never_read_the_archives(tmp_path) -> None:
+    """
+    Four scheduled runs a day whose markets settled today must not pay
+    O(all historical data) to re-read every yearly archive. A window
+    with only recent settledDates skips the archive pass entirely.
+    """
+    archive = pd.DataFrame([_row("1.234", "b1", "5.0")], dtype=str)
+    archive.to_csv(tmp_path / "cleared_orders_archive_2025.csv.gz", index=False)
+    recent = _row("1.234", "b2", "-2.0")
+    recent["settledDate"] = "2099-01-01T10:00:00.000Z"  # far after any cutoff
+    canonical = pd.DataFrame([recent], dtype=str)
+    window = pd.DataFrame([recent], dtype=str)
+
+    selected = select_azure_rows_from_canonical(
+        canonical, window, results_csv_dir=tmp_path, archive_months=12
+    )
+
+    assert sorted(selected["betId"]) == ["b2"], "archive pass skipped"
+
+
+def test_old_windows_do_read_the_archives(tmp_path) -> None:
+    archive = pd.DataFrame([_row("1.234", "b1", "5.0")], dtype=str)
+    archive.to_csv(tmp_path / "cleared_orders_archive_2020.csv.gz", index=False)
+    old = _row("1.234", "b2", "-2.0")
+    old["settledDate"] = "2020-01-01T10:00:00.000Z"
+    canonical = pd.DataFrame([old], dtype=str)
+    window = pd.DataFrame([old], dtype=str)
+
+    selected = select_azure_rows_from_canonical(
+        canonical, window, results_csv_dir=tmp_path, archive_months=12
+    )
+
+    assert sorted(selected["betId"]) == ["b1", "b2"]
+
+
+def test_keyless_archived_rows_keep_their_full_identity(tmp_path) -> None:
+    """
+    Two keyless bets can agree on every Azure column and differ only in
+    another field (e.g. runnerName). The archive read must keep full
+    rows, or the projection would make the distinct archived bet look
+    like a duplicate and drop it.
+    """
+    held = _row("1.234", "", "5.0")
+    held["runnerName"] = "Alpha"
+    archived = _row("1.234", "", "5.0")  # same Azure columns...
+    archived["runnerName"] = "Beta"  # ...different bet
+    pd.DataFrame([archived], dtype=str).to_csv(
+        tmp_path / "cleared_orders_archive_2020.csv.gz", index=False
+    )
+    held["settledDate"] = "2020-01-01T10:00:00.000Z"
+    canonical = pd.DataFrame([held], dtype=str)
+    window = pd.DataFrame([held], dtype=str)
+
+    selected = select_azure_rows_from_canonical(
+        canonical, window, results_csv_dir=tmp_path, archive_months=12
+    )
+
+    assert len(selected) == 2, "distinct keyless archived bet kept"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("10.00"), "")]
