@@ -315,3 +315,43 @@ def test_keyless_archived_rows_keep_their_full_identity(tmp_path) -> None:
     assert len(selected) == 2, "distinct keyless archived bet kept"
     prep = prepare_azure_dataset(df_co=selected)
     assert prep.rows_to_write == [(Decimal("1.234"), Decimal("10.00"), "")]
+
+
+def test_mixed_placed_date_types_do_not_break_aggregation() -> None:
+    """
+    Canonical rows carry string placedDates; freshly downloaded rows
+    carry Timestamps. The aggregation must not compute min/max over the
+    incomparable mix (nothing downstream read those aggregates anyway).
+    """
+    canonical_row = _row("1.234", "b1", "5.0")
+    window_row = _row("1.234", "b2", "-2.0")
+    window_row["placedDate"] = pd.Timestamp("2026-08-31T10:00:00Z")
+    df = pd.DataFrame([canonical_row, window_row])
+
+    prep = prepare_azure_dataset(df_co=df)
+
+    assert prep.attempted is True
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("3.00"), "")]
+
+
+def test_windows_near_the_cutoff_still_read_the_archives(tmp_path) -> None:
+    """
+    A window settled just inside the retention boundary can belong to a
+    market whose earlier bets were already archived; the age gate must
+    keep sixty days of slack over the cutoff rather than skipping.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    archive = pd.DataFrame([_row("1.234", "b1", "5.0")], dtype=str)
+    archive.to_csv(tmp_path / "cleared_orders_archive_2025.csv.gz", index=False)
+    near = _row("1.234", "b2", "-2.0")
+    just_inside = datetime.now(timezone.utc) - timedelta(days=350)
+    near["settledDate"] = just_inside.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    canonical = pd.DataFrame([near], dtype=str)
+    window = pd.DataFrame([near], dtype=str)
+
+    selected = select_azure_rows_from_canonical(
+        canonical, window, results_csv_dir=tmp_path, archive_months=12
+    )
+
+    assert sorted(selected["betId"]) == ["b1", "b2"]

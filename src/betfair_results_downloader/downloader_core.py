@@ -1021,7 +1021,12 @@ def _window_may_touch_archives(df_window: pd.DataFrame, archive_months: int) -> 
     cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(
         months=archive_months
     )
-    return bool((settled < cutoff).any())
+    # Sixty days of slack over the cutoff: all bets of one market settle
+    # within days of each other (a market settles as one event; split
+    # settlements span days at most), so a market with archived bets
+    # cannot also settle a fresh bet months later -- but a window
+    # straddling the boundary by mere weeks must still trigger the read.
+    return bool((settled < cutoff + pd.DateOffset(days=60)).any())
 
 
 def _archived_rows_for_markets(
@@ -1195,11 +1200,13 @@ def prepare_azure_dataset(
             rows_to_write=None,
         )
 
+    # No placedDate min/max aggregates: nothing downstream reads them,
+    # and the mixed frame (canonical rows carry string dates, freshly
+    # downloaded rows carry Timestamps) would make min/max raise
+    # TypeError on incomparable values.
     df_market_results = df_azure_upload.groupby("marketId", as_index=False).agg(
         Profit=("profit", "sum"),
         Bets=("betId", "count"),
-        FirstPlaced=("placedDate", "min"),
-        LastPlaced=("placedDate", "max"),
     )
 
     rows_to_write: list[tuple[Decimal, Decimal, str]] = []
