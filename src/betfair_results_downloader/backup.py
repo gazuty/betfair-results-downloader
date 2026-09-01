@@ -129,12 +129,24 @@ def _backup_compressed_outputs_inner(
                     and dst_stat.st_mtime_ns == src_stat.st_mtime_ns
                 ):
                     continue
-                if dst_stat.st_mtime_ns > src_stat.st_mtime_ns:
+                if (
+                    dst_stat.st_mtime_ns > src_stat.st_mtime_ns
+                    and dst_stat.st_size >= src_stat.st_size
+                ):
                     # A newer copy already landed -- in a two-machine setup
                     # a lagging run must not roll the disaster-recovery
-                    # copy back to its older source. Because copy2
-                    # preserves the source mtime, a genuinely fresher
-                    # source on the next run still wins this comparison.
+                    # copy back to its older source. mtime alone would be
+                    # fooled by clock skew, so the data-derived signal
+                    # breaks the tie: snapshots and archives only grow, so
+                    # a source carrying newer rows is larger and copies
+                    # regardless of what the wall clocks claim. copy2
+                    # preserves source mtimes, so a genuinely fresher
+                    # source on a later run also wins on mtime.
+                    if status_cb:
+                        status_cb(
+                            f"Backup: {src.name} skipped; a newer copy is "
+                            f"already in {backup_dir}."
+                        )
                     continue
             # tmp + rename: an interrupted copy must not leave a truncated
             # file under a name the retention logic would treat as good.

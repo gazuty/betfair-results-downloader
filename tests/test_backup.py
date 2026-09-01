@@ -272,7 +272,7 @@ def test_stale_source_never_rolls_back_a_newer_backup(tmp_path) -> None:
     snap = src / "cleared_orders_cleaned_2026-08-31.csv.gz"
     backed = dst / snap.name
     kept_bytes = backed.read_bytes()
-    snap.write_bytes(b"stale rewrite from the lagging machine")
+    snap.write_bytes(b"old")  # smaller AND older than what already landed
     # The other machine's copy is newer than this machine's source.
     os.utime(snap, ns=(snap.stat().st_atime_ns, backed.stat().st_mtime_ns - 10**9))
 
@@ -280,3 +280,28 @@ def test_stale_source_never_rolls_back_a_newer_backup(tmp_path) -> None:
 
     assert warning is None
     assert backed.read_bytes() == kept_bytes
+
+
+def test_clock_skew_cannot_hide_a_larger_source(tmp_path) -> None:
+    """
+    mtime is writer wall-clock and can lie (skew, future-dated sync
+    timestamps). Snapshots and archives only grow, so a source larger
+    than the destination carries newer rows and must copy even when its
+    mtime looks older.
+    """
+    import os
+
+    src = _make_source(tmp_path)
+    dst = tmp_path / "backup"
+    backup_compressed_outputs(src, dst, retention=5)
+
+    snap = src / "cleared_orders_cleaned_2026-08-31.csv.gz"
+    backed = dst / snap.name
+    grown = backed.read_bytes() + b"newer rows despite a skewed clock"
+    snap.write_bytes(grown)
+    os.utime(snap, ns=(snap.stat().st_atime_ns, backed.stat().st_mtime_ns - 10**9))
+
+    warning = backup_compressed_outputs(src, dst, retention=5)
+
+    assert warning is None
+    assert backed.read_bytes() == grown
