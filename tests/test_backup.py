@@ -230,10 +230,11 @@ def test_pathological_backup_dir_warns_but_never_raises(tmp_path) -> None:
     assert warning is not None and warning.startswith("⚠️")
 
 
-def test_temp_files_are_unique_per_process(tmp_path, monkeypatch) -> None:
+def test_temp_files_are_globally_unique(tmp_path, monkeypatch) -> None:
     """
-    Overlapping runs sharing one mounted backup_dir must not truncate or
-    rename each other's in-progress copy: the temp name carries the pid.
+    Overlapping runs sharing one backup dir -- including from different
+    machines, where pids can collide -- must not truncate or rename each
+    other's in-progress copy: the temp name carries pid AND a uuid nonce.
     """
     import betfair_results_downloader.backup as backup_mod
 
@@ -252,4 +253,6 @@ def test_temp_files_are_unique_per_process(tmp_path, monkeypatch) -> None:
     warning = backup_compressed_outputs(src, dst, retention=5)
 
     assert warning is None
-    assert tmp_names and all(".424242.tmp" in n for n in tmp_names)
+    assert tmp_names and all(".424242." in n and n.endswith(".tmp") for n in tmp_names)
+    # The nonce, not just the pid: same-pid runs on two machines must differ.
+    assert all(n.split(".424242.")[1] != "tmp" for n in tmp_names)

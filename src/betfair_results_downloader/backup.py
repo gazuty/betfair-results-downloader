@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -114,10 +115,11 @@ def _backup_compressed_outputs_inner(
     copied = 0
     for src in candidates:
         dst = backup_dir / src.name
-        # Per-process temp name: overlapping runs sharing one mounted
-        # backup_dir must not truncate or rename each other's in-progress
+        # Globally unique temp name: overlapping runs sharing one backup
+        # directory -- including from different machines, where pids can
+        # collide -- must not truncate or rename each other's in-progress
         # copy. The final replace() is atomic either way.
-        tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+        tmp = dst.with_name(f"{dst.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
         try:
             src_stat = src.stat()
             if dst.exists():
