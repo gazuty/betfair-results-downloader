@@ -998,8 +998,29 @@ def select_azure_rows_from_canonical(
     # canonical dedupe's numeric semantics (legacy "123.0" and fresh 123
     # are one bet), so this cannot double-count.
     if "betId" in selected.columns and "betId" in df_window.columns:
-        held = set(selected["betId"].map(_decimal_key))
-        extra = df_window[~df_window["betId"].map(_decimal_key).isin(held)]
+        sel_numeric = pd.to_numeric(selected["betId"], errors="coerce")
+        win_numeric = pd.to_numeric(df_window["betId"], errors="coerce")
+        held = set(selected["betId"][sel_numeric.notna()].map(_decimal_key))
+        keyed_mask = win_numeric.notna()
+        extra_keyed = df_window[
+            keyed_mask & ~df_window["betId"].map(_decimal_key).isin(held)
+        ]
+        # A bet with an unusable betId has no identity beyond its full
+        # row -- exactly how clean_and_remove_duplicates preserves such
+        # rows -- so two distinct keyless bets must not collapse onto a
+        # shared "" key. Compare them by full-row equality instead.
+        keyless = df_window[~keyed_mask]
+        if len(keyless):
+            common = [c for c in df_window.columns if c in selected.columns]
+            sel_keyless_rows = set(
+                map(tuple, selected[sel_numeric.isna()][common].astype(str).values)
+            )
+            keep = [
+                tuple(r) not in sel_keyless_rows
+                for r in keyless[common].astype(str).values
+            ]
+            keyless = keyless[keep]
+        extra = pd.concat([extra_keyed, keyless])
     else:  # pragma: no cover - both frames always carry betId
         extra = df_window[
             ~df_window["marketId"].map(_decimal_key).isin(set(canonical_ids))

@@ -194,3 +194,22 @@ def test_legacy_float_betids_do_not_double_count() -> None:
     assert len(selected) == 1, "same bet, one row"
     prep = prepare_azure_dataset(df_co=selected)
     assert prep.rows_to_write == [(Decimal("1.234"), Decimal("5.00"), "")]
+
+
+def test_distinct_keyless_bets_are_both_kept() -> None:
+    """
+    Two different bets can both carry an unusable betId (empty string).
+    clean_and_remove_duplicates preserves such rows by full-row identity,
+    so the supplement must not collapse them onto a shared empty key --
+    that would drop an archived keyless bet and understate the market.
+    """
+    kept = _row("1.234", "", "5.0")
+    archived = _row("1.234", "", "-2.0")  # distinct bet, same unusable id
+    canonical = pd.DataFrame([kept], dtype=str)
+    window = pd.DataFrame([kept, archived], dtype=str)
+
+    selected = select_azure_rows_from_canonical(canonical, window)
+
+    assert len(selected) == 2, "identical row deduped, distinct row kept"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("3.00"), "")]
