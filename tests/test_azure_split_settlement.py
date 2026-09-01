@@ -134,3 +134,63 @@ def test_unparseable_profit_aborts_preparation() -> None:
     assert prep.attempted is False
     assert "unparseable" in prep.message
     assert prep.rows_to_write is None
+
+
+def test_prep_failure_becomes_a_partial_run() -> None:
+    """A failed preparation must never fall through to success."""
+    from betfair_results_downloader.scheduler import runner
+
+    source = inspect.getsource(runner._run_pipeline_inner)
+    assert "if not prep.attempted:" in source
+    assert source.index("if not prep.attempted:") < source.index(
+        "if prep.rows_to_write:"
+    )
+
+
+def test_malformed_profit_in_excluded_sport_does_not_block_racing() -> None:
+    """
+    Downloads include every sport; Azure publishes only racing. A garbage
+    profit on a soccer row must not stop the racing markets publishing.
+    """
+    soccer = _row("1.555", "b9", "garbage")
+    soccer["eventTypeId"] = "1"  # soccer -- excluded from Azure
+    df = pd.DataFrame([_row("1.234", "b1", "5.0"), soccer], dtype=str)
+
+    prep = prepare_azure_dataset(df_co=df)
+
+    assert prep.attempted is True
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("5.00"), "")]
+
+
+def test_float_damaged_market_spellings_select_together() -> None:
+    """
+    8.6% of historical rows carry float-damaged marketIds (1.2515001 for
+    1.251500100). Numerically -- and in Azure's Decimal key -- they are
+    one market, so selection and grouping must treat them as one.
+    """
+    canonical = pd.DataFrame(
+        [_row("1.2515001", "b1", "5.0"), _row("1.999", "b3", "9.0")], dtype=str
+    )
+    window = pd.DataFrame([_row("1.251500100", "b2", "-2.0")], dtype=str)
+
+    selected = select_azure_rows_from_canonical(canonical, window)
+
+    assert sorted(selected["betId"]) == ["b1", "b2"], "damaged spelling included"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.2515001"), Decimal("3.00"), "")]
+
+
+def test_legacy_float_betids_do_not_double_count() -> None:
+    """
+    The canonical dedupe treats legacy "123.0" and fresh 123 as one bet
+    (betid_keys); the supplement must use the same normalisation or the
+    window copy of an already-held bet would be counted twice.
+    """
+    canonical = pd.DataFrame([_row("1.234", "123.0", "5.0")], dtype=str)
+    window = pd.DataFrame([_row("1.234", "123", "5.0")], dtype=str)
+
+    selected = select_azure_rows_from_canonical(canonical, window)
+
+    assert len(selected) == 1, "same bet, one row"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("5.00"), "")]

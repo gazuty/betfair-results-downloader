@@ -351,7 +351,13 @@ def _run_pipeline_inner(
                 prep = prepare_azure_dataset(
                     df_co=select_azure_rows_from_canonical(csvr.df_canonical, df_co)
                 )
-                if prep.attempted and prep.rows_to_write:
+                if not prep.attempted:
+                    # A failed preparation (e.g. unparseable profits) is an
+                    # Azure failure, not an empty publish: falling through
+                    # would report success and advance the checkpoint with
+                    # the affected markets silently stale.
+                    raise RuntimeError(prep.message or "Azure prep failed.")
+                if prep.rows_to_write:
                     az = publish_to_azure_sql(
                         creds=creds,
                         rows_to_write=prep.rows_to_write,

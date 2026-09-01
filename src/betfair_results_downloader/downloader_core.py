@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
@@ -931,6 +931,32 @@ def write_csv_outputs(
 # -----------------------------
 
 
+def _decimal_key(value: Any) -> str:
+    """
+    A lossless numeric comparison key, falling back to the stripped
+    string for anything non-numeric.
+
+    Used for marketIds -- historical rows hold float-damaged spellings
+    (``1.2515001`` for ``1.251500100``) that are one market numerically
+    and one Decimal MarketID in Azure -- and for betIds, where the
+    canonical dedupe already treats legacy ``123.0`` and fresh ``123``
+    as one bet (matching ``betid_keys``' numeric semantics).
+    """
+    raw = str(value).strip()
+    try:
+        d = Decimal(raw)
+    except InvalidOperation:
+        return raw
+    if d.is_nan():
+        return raw
+    d = d.normalize()
+    if d.as_tuple().exponent > 0:
+        # normalize() turns 100 into 1E+2; never return scientific
+        # notation for anything.
+        d = d.quantize(Decimal(1))
+    return str(d)
+
+
 def select_azure_rows_from_canonical(
     df_canonical: Optional[pd.DataFrame],
     df_window: pd.DataFrame,
@@ -956,21 +982,28 @@ def select_azure_rows_from_canonical(
         or "marketId" not in df_window.columns
     ):
         return df_window
-    window_ids = set(df_window["marketId"].astype(str))
-    canonical_ids = df_canonical["marketId"].astype(str)
+    # Compare losslessly normalized keys on both sides: historical rows
+    # can hold float-damaged spellings of the same market (see
+    # _decimal_key), and a raw-string comparison would leave those old
+    # bets out of the aggregation.
+    window_ids = set(df_window["marketId"].map(_decimal_key))
+    canonical_ids = df_canonical["marketId"].map(_decimal_key)
     selected = df_canonical[canonical_ids.isin(window_ids)]
     # A backfill can download rows old enough that write_csv_outputs
     # archives them straight out of the canonical -- removing a whole
     # market, or only its older bets when settlements straddle the
     # archival cutoff. Supplement by betId: any window row whose bet the
     # canonical no longer holds contributes itself to the aggregation,
-    # so neither case understates the market. betId is the canonical's
-    # own dedupe key, so this cannot double-count.
+    # so neither case understates the market. _decimal_key matches the
+    # canonical dedupe's numeric semantics (legacy "123.0" and fresh 123
+    # are one bet), so this cannot double-count.
     if "betId" in selected.columns and "betId" in df_window.columns:
-        held = set(selected["betId"].astype(str))
-        extra = df_window[~df_window["betId"].astype(str).isin(held)]
+        held = set(selected["betId"].map(_decimal_key))
+        extra = df_window[~df_window["betId"].map(_decimal_key).isin(held)]
     else:  # pragma: no cover - both frames always carry betId
-        extra = df_window[~df_window["marketId"].astype(str).isin(set(canonical_ids))]
+        extra = df_window[
+            ~df_window["marketId"].map(_decimal_key).isin(set(canonical_ids))
+        ]
     if len(extra):
         selected = pd.concat([selected, extra], ignore_index=True)
     return selected.copy()
@@ -1011,14 +1044,20 @@ def prepare_azure_dataset(
     df_stage["eventTypeId"] = pd.to_numeric(
         df_stage["eventTypeId"], errors="coerce"
     ).astype("Int64")
+
+    df_azure_upload = df_stage[
+        df_stage["eventTypeId"].isin(list(allowed_event_type_ids))
+    ].copy()
     # The canonical is read with dtype=str; summing string profits would
     # concatenate them. Coerce here so both sources aggregate identically
     # -- but a value that FAILS to coerce must abort preparation, exactly
     # as it aborted _money2 before: pandas would otherwise skip the NaN
-    # and publish an understated market total as a success.
-    original_profit = df_stage["profit"]
-    df_stage["profit"] = pd.to_numeric(original_profit, errors="coerce")
-    coercion_failed = df_stage["profit"].isna() & original_profit.notna()
+    # and publish an understated market total as a success. Validated
+    # after the sport filter, so a malformed profit in a sport Azure
+    # never publishes cannot block the racing markets that do.
+    original_profit = df_azure_upload["profit"]
+    df_azure_upload["profit"] = pd.to_numeric(original_profit, errors="coerce")
+    coercion_failed = df_azure_upload["profit"].isna() & original_profit.notna()
     if bool(coercion_failed.any()):
         example = str(original_profit[coercion_failed].iloc[0])
         return AzurePrepResult(
@@ -1028,10 +1067,11 @@ def prepare_azure_dataset(
             f"Azure prep failed: {int(coercion_failed.sum())} unparseable "
             f"profit value(s), e.g. {example!r}.",
         )
-
-    df_azure_upload = df_stage[
-        df_stage["eventTypeId"].isin(list(allowed_event_type_ids))
-    ].copy()
+    # Group on losslessly normalized market keys: 8.6% of historical rows
+    # carry float-damaged spellings (1.2515001 for 1.251500100), and both
+    # spellings are the same Decimal MarketID in Azure. Grouping raw
+    # strings would split one market into two rows_to_write.
+    df_azure_upload["marketId"] = df_azure_upload["marketId"].map(_decimal_key)
     if df_azure_upload.empty:
         return AzurePrepResult(
             attempted=True,
