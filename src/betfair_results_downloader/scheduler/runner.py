@@ -349,7 +349,9 @@ def _run_pipeline_inner(
                 # canonical, not just this window's rows -- see
                 # select_azure_rows_from_canonical.
                 prep = prepare_azure_dataset(
-                    df_co=select_azure_rows_from_canonical(csvr.df_canonical, df_co)
+                    df_co=select_azure_rows_from_canonical(
+                        csvr.df_canonical, df_co, results_csv_dir=results_dir
+                    )
                 )
                 if not prep.attempted:
                     # A failed preparation (e.g. unparseable profits) is an

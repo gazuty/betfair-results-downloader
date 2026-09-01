@@ -67,9 +67,9 @@ def test_missing_canonical_falls_back_to_the_window() -> None:
     """No canonical must mean old behaviour, never a skipped publish."""
     window = pd.DataFrame([_row("1.234", "b2", "-2.0")], dtype=str)
 
-    assert select_azure_rows_from_canonical(None, window) is window
+    assert select_azure_rows_from_canonical(None, window).equals(window)
     empty = pd.DataFrame()
-    assert select_azure_rows_from_canonical(empty, window) is window
+    assert select_azure_rows_from_canonical(empty, window).equals(window)
 
 
 def test_pipeline_aggregates_from_the_canonical() -> None:
@@ -77,7 +77,8 @@ def test_pipeline_aggregates_from_the_canonical() -> None:
     from betfair_results_downloader.scheduler import runner
 
     source = inspect.getsource(runner._run_pipeline_inner)
-    assert "select_azure_rows_from_canonical(csvr.df_canonical, df_co)" in source
+    assert "select_azure_rows_from_canonical(" in source
+    assert "csvr.df_canonical, df_co, results_csv_dir=results_dir" in source
 
 
 def test_archived_out_markets_still_publish_from_the_window() -> None:
@@ -213,3 +214,41 @@ def test_distinct_keyless_bets_are_both_kept() -> None:
     assert len(selected) == 2, "identical row deduped, distinct row kept"
     prep = prepare_azure_dataset(df_co=selected)
     assert prep.rows_to_write == [(Decimal("1.234"), Decimal("3.00"), "")]
+
+
+def test_bets_archived_by_an_earlier_run_are_included(tmp_path) -> None:
+    """
+    A bet archived by an EARLIER run is in neither the canonical nor the
+    window. When results_csv_dir is given, the yearly archives supply it
+    -- without double-counting bets the window re-downloaded.
+    """
+    archive = pd.DataFrame(
+        [_row("1.234", "b1", "5.0"), _row("1.777", "b7", "9.0")], dtype=str
+    )
+    archive.to_csv(tmp_path / "cleared_orders_archive_2025.csv.gz", index=False)
+    canonical = pd.DataFrame([_row("1.234", "b2", "-2.0")], dtype=str)
+    window = pd.DataFrame([_row("1.234", "b2", "-2.0")], dtype=str)
+
+    selected = select_azure_rows_from_canonical(
+        canonical, window, results_csv_dir=tmp_path
+    )
+
+    assert sorted(selected["betId"]) == ["b1", "b2"], "archived bet restored"
+    assert "1.777" not in set(selected["marketId"]), "untouched market excluded"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("3.00"), "")]
+
+
+def test_null_profit_on_a_racing_row_aborts_preparation() -> None:
+    """
+    A racing row with no usable profit at all must abort: pandas would
+    silently skip the NaN and publish an understated total as success.
+    """
+    row = _row("1.234", "b1", "5.0")
+    row["profit"] = None
+    df = pd.DataFrame([row, _row("1.234", "b2", "-2.0")])
+
+    prep = prepare_azure_dataset(df_co=df)
+
+    assert prep.attempted is False
+    assert "missing or unparseable" in prep.message
