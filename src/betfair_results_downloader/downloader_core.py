@@ -958,16 +958,21 @@ def select_azure_rows_from_canonical(
         return df_window
     window_ids = set(df_window["marketId"].astype(str))
     canonical_ids = df_canonical["marketId"].astype(str)
-    mask = canonical_ids.isin(window_ids)
-    selected = df_canonical[mask]
+    selected = df_canonical[canonical_ids.isin(window_ids)]
     # A backfill can download rows old enough that write_csv_outputs
-    # archives them straight out of the canonical. Their markets must
-    # still publish from the window rows themselves, as they always did,
-    # rather than silently vanish from an "empty" selection.
-    missing_ids = window_ids - set(canonical_ids[mask])
-    if missing_ids:
-        missing_rows = df_window[df_window["marketId"].astype(str).isin(missing_ids)]
-        selected = pd.concat([selected, missing_rows], ignore_index=True)
+    # archives them straight out of the canonical -- removing a whole
+    # market, or only its older bets when settlements straddle the
+    # archival cutoff. Supplement by betId: any window row whose bet the
+    # canonical no longer holds contributes itself to the aggregation,
+    # so neither case understates the market. betId is the canonical's
+    # own dedupe key, so this cannot double-count.
+    if "betId" in selected.columns and "betId" in df_window.columns:
+        held = set(selected["betId"].astype(str))
+        extra = df_window[~df_window["betId"].astype(str).isin(held)]
+    else:  # pragma: no cover - both frames always carry betId
+        extra = df_window[~df_window["marketId"].astype(str).isin(set(canonical_ids))]
+    if len(extra):
+        selected = pd.concat([selected, extra], ignore_index=True)
     return selected.copy()
 
 
@@ -1007,8 +1012,22 @@ def prepare_azure_dataset(
         df_stage["eventTypeId"], errors="coerce"
     ).astype("Int64")
     # The canonical is read with dtype=str; summing string profits would
-    # concatenate them. Coerce here so both sources aggregate identically.
-    df_stage["profit"] = pd.to_numeric(df_stage["profit"], errors="coerce")
+    # concatenate them. Coerce here so both sources aggregate identically
+    # -- but a value that FAILS to coerce must abort preparation, exactly
+    # as it aborted _money2 before: pandas would otherwise skip the NaN
+    # and publish an understated market total as a success.
+    original_profit = df_stage["profit"]
+    df_stage["profit"] = pd.to_numeric(original_profit, errors="coerce")
+    coercion_failed = df_stage["profit"].isna() & original_profit.notna()
+    if bool(coercion_failed.any()):
+        example = str(original_profit[coercion_failed].iloc[0])
+        return AzurePrepResult(
+            False,
+            0,
+            0,
+            f"Azure prep failed: {int(coercion_failed.sum())} unparseable "
+            f"profit value(s), e.g. {example!r}.",
+        )
 
     df_azure_upload = df_stage[
         df_stage["eventTypeId"].isin(list(allowed_event_type_ids))

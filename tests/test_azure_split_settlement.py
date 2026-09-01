@@ -98,3 +98,39 @@ def test_archived_out_markets_still_publish_from_the_window() -> None:
     prep = prepare_azure_dataset(df_co=selected)
     profits = {str(m): p for m, p, _ in prep.rows_to_write}
     assert profits["1.222"] == Decimal("7.50")
+
+
+def test_partially_archived_market_keeps_its_archived_bets() -> None:
+    """
+    Settlements straddling the archival cutoff: the canonical keeps the
+    newer bet and archives the older one. The market is still present in
+    the canonical, so a marketId-level fallback would miss the archived
+    bet and understate the profit -- the supplement must work by betId.
+    """
+    canonical = pd.DataFrame([_row("1.234", "b2", "-2.0")], dtype=str)
+    window = pd.DataFrame(
+        [_row("1.234", "b1", "5.0"), _row("1.234", "b2", "-2.0")], dtype=str
+    )
+
+    selected = select_azure_rows_from_canonical(canonical, window)
+
+    assert sorted(selected["betId"]) == ["b1", "b2"], "archived bet restored"
+    prep = prepare_azure_dataset(df_co=selected)
+    assert prep.rows_to_write == [(Decimal("1.234"), Decimal("3.00"), "")]
+
+
+def test_unparseable_profit_aborts_preparation() -> None:
+    """
+    A profit that fails numeric coercion must abort, exactly as it
+    aborted _money2 before -- pandas would otherwise skip the NaN and
+    publish an understated market total as a success.
+    """
+    df = pd.DataFrame(
+        [_row("1.234", "b1", "5.0"), _row("1.234", "b2", "garbage")], dtype=str
+    )
+
+    prep = prepare_azure_dataset(df_co=df)
+
+    assert prep.attempted is False
+    assert "unparseable" in prep.message
+    assert prep.rows_to_write is None
