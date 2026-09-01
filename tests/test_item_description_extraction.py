@@ -106,10 +106,19 @@ class TestExtractItemDescriptionFields:
 
 
 class TestEnrichmentCoalescing:
-    """Verify that itemDescription values take precedence over catalogue."""
+    """
+    Exercise the production coalesce (coalesce_catalogue_columns), not a
+    copy of it: the old version of this test pasted the merge logic into
+    the test body and asserted on its own duplicate, so it could never
+    catch a regression in the real function.
+    """
 
     def test_item_description_wins_over_catalogue(self) -> None:
         """If both sources supply evt_eventName, keep itemDescription's value."""
+        from betfair_results_downloader.downloader_core import (
+            coalesce_catalogue_columns,
+        )
+
         df_work = pd.DataFrame(
             {
                 "marketId": ["1.111", "1.222"],
@@ -124,17 +133,7 @@ class TestEnrichmentCoalescing:
             }
         )
 
-        overlap_cols = [
-            c for c in df_catalogue.columns if c != "marketId" and c in df_work.columns
-        ]
-        df_out = df_work.merge(
-            df_catalogue, on="marketId", how="left", suffixes=("", "_cat")
-        )
-        for col in overlap_cols:
-            cat_col = f"{col}_cat"
-            if cat_col in df_out.columns:
-                df_out[col] = df_out[col].fillna(df_out[cat_col])
-                df_out.drop(columns=[cat_col], inplace=True)
+        df_out = coalesce_catalogue_columns(df_work, df_catalogue)
 
         # itemDescription value kept for market 1.111
         assert (
@@ -148,3 +147,39 @@ class TestEnrichmentCoalescing:
         )
         # No leftover _cat column
         assert "evt_eventName_cat" not in df_out.columns
+        # Untouched work columns survive
+        assert list(df_out["profit"]) == [10.0, 20.0]
+
+    def test_new_catalogue_columns_come_across_unsuffixed(self) -> None:
+        """A column the work frame lacks arrives from the catalogue as-is."""
+        from betfair_results_downloader.downloader_core import (
+            coalesce_catalogue_columns,
+        )
+
+        df_work = pd.DataFrame({"marketId": ["1.111"], "profit": [10.0]})
+        df_catalogue = pd.DataFrame({"marketId": ["1.111"], "evt_countryCode": ["GB"]})
+
+        df_out = coalesce_catalogue_columns(df_work, df_catalogue)
+
+        assert df_out.loc[0, "evt_countryCode"] == "GB"
+        assert "evt_countryCode_cat" not in df_out.columns
+
+    def test_unmatched_markets_keep_their_rows(self) -> None:
+        """A left merge: work rows without catalogue entries survive."""
+        from betfair_results_downloader.downloader_core import (
+            coalesce_catalogue_columns,
+        )
+
+        df_work = pd.DataFrame(
+            {"marketId": ["1.111", "1.333"], "evt_eventName": [None, None]}
+        )
+        df_catalogue = pd.DataFrame(
+            {"marketId": ["1.111"], "evt_eventName": ["From Catalogue"]}
+        )
+
+        df_out = coalesce_catalogue_columns(df_work, df_catalogue)
+
+        assert len(df_out) == 2
+        assert pd.isna(
+            df_out.loc[df_out["marketId"] == "1.333", "evt_eventName"].iloc[0]
+        )
