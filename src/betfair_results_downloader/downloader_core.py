@@ -85,6 +85,9 @@ class CsvWriteResult:
     snapshot_path: Path
     rows_in_canonical: int
     message: str
+    # The full post-write canonical frame, held so Azure aggregation can
+    # cover split settlements without re-reading the 270MB file from disk.
+    df_canonical: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -919,12 +922,42 @@ def write_csv_outputs(
         snapshot_path=snapshot_path,
         rows_in_canonical=len(df_trimmed),
         message=f"Wrote canonical + snapshot CSV. canonical_rows={len(df_trimmed):,}.",
+        df_canonical=df_trimmed,
     )
 
 
 # -----------------------------
 # Azure prep (filter + aggregate + rows_to_write)
 # -----------------------------
+
+
+def select_azure_rows_from_canonical(
+    df_canonical: Optional[pd.DataFrame],
+    df_window: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Return the canonical rows for every marketId the window touched.
+
+    A market can settle across two download windows (a partial cash-out
+    today, the remainder tomorrow). Aggregating the window frame alone
+    would overwrite that market's Azure profit with only the latest
+    window's bets, so the aggregation source is the canonical -- which
+    holds every settled bet for the market -- restricted to the window's
+    marketIds. Falls back to the window frame when the canonical is
+    unavailable, which preserves the old behaviour rather than skipping
+    the publish.
+    """
+    if (
+        df_canonical is None
+        or df_canonical.empty
+        or "marketId" not in df_canonical.columns
+        or df_window is None
+        or df_window.empty
+        or "marketId" not in df_window.columns
+    ):
+        return df_window
+    window_ids = set(df_window["marketId"].astype(str))
+    return df_canonical[df_canonical["marketId"].astype(str).isin(window_ids)].copy()
 
 
 def _money2(x: Any) -> Decimal:
@@ -962,6 +995,9 @@ def prepare_azure_dataset(
     df_stage["eventTypeId"] = pd.to_numeric(
         df_stage["eventTypeId"], errors="coerce"
     ).astype("Int64")
+    # The canonical is read with dtype=str; summing string profits would
+    # concatenate them. Coerce here so both sources aggregate identically.
+    df_stage["profit"] = pd.to_numeric(df_stage["profit"], errors="coerce")
 
     df_azure_upload = df_stage[
         df_stage["eventTypeId"].isin(list(allowed_event_type_ids))
