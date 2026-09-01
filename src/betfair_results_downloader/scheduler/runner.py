@@ -339,11 +339,30 @@ def _run_pipeline_inner(
         if _azure_publish_allowed(creds, schedule_cfg):
             logger.info("Azure publish gates open, publishing...")
             try:
-                from ..downloader_core import prepare_azure_dataset  # noqa: PLC0415
+                from ..downloader_core import (  # noqa: PLC0415
+                    prepare_azure_dataset,
+                    select_azure_rows_from_canonical,
+                )
                 from ..azure_publish import publish_to_azure_sql  # noqa: PLC0415
 
-                prep = prepare_azure_dataset(df_co=df_co)
-                if prep.attempted and prep.rows_to_write:
+                # Split settlements: aggregate each touched market from the
+                # canonical, not just this window's rows -- see
+                # select_azure_rows_from_canonical.
+                prep = prepare_azure_dataset(
+                    df_co=select_azure_rows_from_canonical(
+                        csvr.df_canonical,
+                        df_co,
+                        results_csv_dir=results_dir,
+                        archive_months=int(user.get("canonical_archive_months", 12)),
+                    )
+                )
+                if not prep.attempted:
+                    # A failed preparation (e.g. unparseable profits) is an
+                    # Azure failure, not an empty publish: falling through
+                    # would report success and advance the checkpoint with
+                    # the affected markets silently stale.
+                    raise RuntimeError(prep.message or "Azure prep failed.")
+                if prep.rows_to_write:
                     az = publish_to_azure_sql(
                         creds=creds,
                         rows_to_write=prep.rows_to_write,

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
 
 import gzip
 import json
+import logging
 import re
 import shutil
 import time
@@ -27,6 +28,8 @@ from .csv_utils import (
     update_csv_with_new_data,
 )
 from .scheduler.date_windows import chunk_date_range
+
+logger = logging.getLogger(__name__)
 
 
 DateLike = Union[date, datetime]
@@ -85,6 +88,9 @@ class CsvWriteResult:
     snapshot_path: Path
     rows_in_canonical: int
     message: str
+    # The full post-write canonical frame, held so Azure aggregation can
+    # cover split settlements without re-reading the 270MB file from disk.
+    df_canonical: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -919,12 +925,204 @@ def write_csv_outputs(
         snapshot_path=snapshot_path,
         rows_in_canonical=len(df_trimmed),
         message=f"Wrote canonical + snapshot CSV. canonical_rows={len(df_trimmed):,}.",
+        df_canonical=df_trimmed,
     )
 
 
 # -----------------------------
 # Azure prep (filter + aggregate + rows_to_write)
 # -----------------------------
+
+
+def _decimal_key(value: Any) -> str:
+    """
+    A lossless numeric comparison key, falling back to the stripped
+    string for anything non-numeric.
+
+    Used for marketIds -- historical rows hold float-damaged spellings
+    (``1.2515001`` for ``1.251500100``) that are one market numerically
+    and one Decimal MarketID in Azure -- and for betIds, where the
+    canonical dedupe already treats legacy ``123.0`` and fresh ``123``
+    as one bet (matching ``betid_keys``' numeric semantics).
+    """
+    raw = str(value).strip()
+    try:
+        d = Decimal(raw)
+    except InvalidOperation:
+        return raw
+    if d.is_nan():
+        return raw
+    d = d.normalize()
+    if d.as_tuple().exponent > 0:
+        # normalize() turns 100 into 1E+2; never return scientific
+        # notation for anything.
+        d = d.quantize(Decimal(1))
+    return str(d)
+
+
+def _rows_not_already_held(base: pd.DataFrame, candidate: pd.DataFrame) -> pd.DataFrame:
+    """
+    Candidate rows whose bets ``base`` does not already hold.
+
+    Keyed bets match on :func:`_decimal_key` -- the canonical dedupe's
+    numeric semantics, so legacy "123.0" and fresh 123 are one bet and
+    cannot double-count. A bet with an unusable betId has no identity
+    beyond its full row -- exactly how clean_and_remove_duplicates
+    preserves such rows -- so keyless candidates match by full-row
+    equality over the shared columns instead of collapsing onto a
+    shared "" key.
+    """
+    if candidate is None or candidate.empty:
+        return pd.DataFrame()
+    if base is None or base.empty:
+        return candidate
+    if "betId" not in base.columns or "betId" not in candidate.columns:
+        # pragma: no cover - both frames always carry betId in practice
+        base_ids = set(base["marketId"].map(_decimal_key))
+        return candidate[~candidate["marketId"].map(_decimal_key).isin(base_ids)]
+    base_numeric = pd.to_numeric(base["betId"], errors="coerce")
+    cand_numeric = pd.to_numeric(candidate["betId"], errors="coerce")
+    held = set(base["betId"][base_numeric.notna()].map(_decimal_key))
+    keyed_mask = cand_numeric.notna()
+    extra_keyed = candidate[
+        keyed_mask & ~candidate["betId"].map(_decimal_key).isin(held)
+    ]
+    keyless = candidate[~keyed_mask]
+    if len(keyless):
+        common = [c for c in candidate.columns if c in base.columns]
+        base_keyless_rows = set(
+            map(tuple, base[base_numeric.isna()][common].astype(str).values)
+        )
+        keep = [
+            tuple(r) not in base_keyless_rows
+            for r in keyless[common].astype(str).values
+        ]
+        keyless = keyless[keep]
+    return pd.concat([extra_keyed, keyless])
+
+
+def _window_may_touch_archives(df_window: pd.DataFrame, archive_months: int) -> bool:
+    """
+    Whether the window could involve bets old enough to sit in a yearly
+    archive -- the gate that keeps four daily scheduled runs from
+    re-reading every archive: their markets settled today, nowhere near
+    the cutoff. Stays conservative (True) when there is no settledDate
+    to reason with or any of them fail to parse.
+    """
+    if archive_months <= 0:
+        return True  # no cutoff to reason with; the glob guard still applies
+    if "settledDate" not in df_window.columns:
+        return True
+    settled = pd.to_datetime(
+        df_window["settledDate"], utc=True, errors="coerce", format="ISO8601"
+    )
+    if bool(settled.isna().any()):
+        return True
+    cutoff = pd.Timestamp(datetime.now(timezone.utc)) - pd.DateOffset(
+        months=archive_months
+    )
+    # Sixty days of slack over the cutoff: all bets of one market settle
+    # within days of each other (a market settles as one event; split
+    # settlements span days at most), so a market with archived bets
+    # cannot also settle a fresh bet months later -- but a window
+    # straddling the boundary by mere weeks must still trigger the read.
+    return bool((settled < cutoff + pd.DateOffset(days=60)).any())
+
+
+def _archived_rows_for_markets(
+    results_csv_dir: Path, market_keys: set[str]
+) -> list[pd.DataFrame]:
+    """
+    Rows from the yearly archives whose market the window touched.
+
+    Best-effort by explicit trade-off: an unreadable archive logs a
+    warning and is skipped rather than blocking the publish. Archives
+    hold rows settled over a year ago, and a scheduled run's markets
+    settled today -- the only run that could be understated by a skipped
+    archive is a manual backfill of ancient dates, and the warning names
+    the file to re-run afterwards.
+    """
+    hits: list[pd.DataFrame] = []
+    try:
+        paths = sorted(Path(results_csv_dir).glob("cleared_orders_archive_*.csv.gz"))
+    except OSError:
+        return hits
+    for path in paths:
+        try:
+            # Full rows, not an Azure-column projection: keyless bets are
+            # deduplicated by full-row identity, and a projection would
+            # make two different bets look identical.
+            df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Could not read archive %s for Azure aggregation: %s -- "
+                "skipping it; re-run the backfill after fixing the file if "
+                "this window touched pre-archive markets.",
+                path.name,
+                exc,
+            )
+            continue
+        if df.empty or "marketId" not in df.columns:
+            continue
+        hit = df[df["marketId"].map(_decimal_key).isin(market_keys)]
+        if len(hit):
+            hits.append(hit)
+    return hits
+
+
+def select_azure_rows_from_canonical(
+    df_canonical: Optional[pd.DataFrame],
+    df_window: pd.DataFrame,
+    *,
+    results_csv_dir: Optional[Path] = None,
+    archive_months: int = 12,
+) -> pd.DataFrame:
+    """
+    Return every known bet for the marketIds the window touched.
+
+    A market can settle across two download windows (a partial cash-out
+    today, the remainder tomorrow). Aggregating the window frame alone
+    would overwrite that market's Azure profit with only the latest
+    window's bets, so the aggregation gathers, without double-counting:
+
+    - the canonical rows for the touched markets (normalized market
+      keys: historical rows can hold float-damaged spellings of the
+      same market, see :func:`_decimal_key`);
+    - window rows the canonical does not hold (a backfill can download
+      rows old enough that write_csv_outputs archives them straight
+      back out);
+    - rows already sitting in the yearly archives for those markets,
+      when ``results_csv_dir`` is given AND the window contains bets
+      old enough to plausibly be archived (bets archived by an EARLIER
+      run are in neither the canonical nor the window; scheduled runs
+      settle today and skip the archive read entirely).
+
+    Falls back to the window frame when the canonical is unavailable,
+    which preserves the old behaviour rather than skipping the publish.
+    """
+    if df_window is None or df_window.empty or "marketId" not in df_window.columns:
+        return df_window
+    window_ids = set(df_window["marketId"].map(_decimal_key))
+    if (
+        df_canonical is None
+        or df_canonical.empty
+        or "marketId" not in df_canonical.columns
+    ):
+        selected = df_window
+    else:
+        canonical_ids = df_canonical["marketId"].map(_decimal_key)
+        selected = df_canonical[canonical_ids.isin(window_ids)]
+        extra = _rows_not_already_held(selected, df_window)
+        if len(extra):
+            selected = pd.concat([selected, extra], ignore_index=True)
+    if results_csv_dir is not None and _window_may_touch_archives(
+        df_window, archive_months
+    ):
+        for archived in _archived_rows_for_markets(results_csv_dir, window_ids):
+            extra = _rows_not_already_held(selected, archived)
+            if len(extra):
+                selected = pd.concat([selected, extra], ignore_index=True)
+    return selected.copy()
 
 
 def _money2(x: Any) -> Decimal:
@@ -966,6 +1164,32 @@ def prepare_azure_dataset(
     df_azure_upload = df_stage[
         df_stage["eventTypeId"].isin(list(allowed_event_type_ids))
     ].copy()
+    # The canonical is read with dtype=str; summing string profits would
+    # concatenate them. Coerce here so both sources aggregate identically
+    # -- but a value that FAILS to coerce must abort preparation, exactly
+    # as it aborted _money2 before: pandas would otherwise skip the NaN
+    # and publish an understated market total as a success. Validated
+    # after the sport filter, so a malformed profit in a sport Azure
+    # never publishes cannot block the racing markets that do.
+    original_profit = df_azure_upload["profit"]
+    df_azure_upload["profit"] = pd.to_numeric(original_profit, errors="coerce")
+    # Null AND unparseable both abort: a publishable racing row with no
+    # usable profit means the sum would silently understate the market.
+    bad_profit = df_azure_upload["profit"].isna()
+    if bool(bad_profit.any()):
+        example = original_profit[bad_profit].iloc[0]
+        return AzurePrepResult(
+            False,
+            0,
+            0,
+            f"Azure prep failed: {int(bad_profit.sum())} missing or "
+            f"unparseable profit value(s), e.g. {example!r}.",
+        )
+    # Group on losslessly normalized market keys: 8.6% of historical rows
+    # carry float-damaged spellings (1.2515001 for 1.251500100), and both
+    # spellings are the same Decimal MarketID in Azure. Grouping raw
+    # strings would split one market into two rows_to_write.
+    df_azure_upload["marketId"] = df_azure_upload["marketId"].map(_decimal_key)
     if df_azure_upload.empty:
         return AzurePrepResult(
             attempted=True,
@@ -976,11 +1200,13 @@ def prepare_azure_dataset(
             rows_to_write=None,
         )
 
+    # No placedDate min/max aggregates: nothing downstream reads them,
+    # and the mixed frame (canonical rows carry string dates, freshly
+    # downloaded rows carry Timestamps) would make min/max raise
+    # TypeError on incomparable values.
     df_market_results = df_azure_upload.groupby("marketId", as_index=False).agg(
         Profit=("profit", "sum"),
         Bets=("betId", "count"),
-        FirstPlaced=("placedDate", "min"),
-        LastPlaced=("placedDate", "max"),
     )
 
     rows_to_write: list[tuple[Decimal, Decimal, str]] = []
