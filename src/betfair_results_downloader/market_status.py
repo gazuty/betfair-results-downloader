@@ -369,7 +369,8 @@ def merge_statuses(
       response; a non-CLOSED observation after CLOSED is recorded honestly
       (status updated, closed timestamp cleared) rather than argued with.
     - Markets are matched on the numeric key, so a damaged spelling in the
-      file and a clean one from the API update the same row.
+      file and a clean one from the API update the same row -- and the row
+      keeps the longest spelling seen.
     """
     now_str = _fmt_utc(_now_utc(now))
     base = df_status if df_status is not None else empty_status_frame()
@@ -386,7 +387,10 @@ def merge_statuses(
             continue
         key = decimal_key(mid)
         row = rows.get(key) or {c: "" for c in STATUS_COLUMNS}
-        if not row["marketId"]:
+        if len(mid) > len(row["marketId"]):
+            # A damaged spelling in the file is upgraded the moment the full
+            # one is observed; the file's id is what later runs send, and
+            # Betfair cannot resolve the truncated form.
             row["marketId"] = mid
         row["status"] = obs.status
         row["activeRunners"] = str(obs.active_runners)

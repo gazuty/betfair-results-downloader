@@ -65,7 +65,9 @@ cleared order, absence is recorded as CLOSED too. That recording is
 provisional: a market closed by absence is asked about again on each run
 for the next 48 hours, so a single dropped row in a response cannot
 permanently mark a live outright as fully settled. Because retention cannot
-be relied on, the check runs in every pipeline run.
+be relied on, the check runs in every pipeline run — including a run whose
+download returned no rows, which is usually the run that finally sees a
+long-open outright CLOSED.
 
 This is essentially a non-racing phenomenon: no horse or greyhound market
 has been observed to settle over more than a day, while most soccer,

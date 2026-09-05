@@ -286,8 +286,21 @@ class TestMerge:
             existing, {"1.2515001": ms.BookStatus("CLOSED", 0, ms.SOURCE_BOOK)}, now=NOW
         )
         assert len(merged) == 1
-        assert merged.iloc[0]["marketId"] == "1.251500100", "file spelling kept"
+        assert merged.iloc[0]["marketId"] == "1.251500100", "longest spelling kept"
         assert merged.iloc[0]["status"] == "CLOSED"
+
+    def test_damaged_spelling_in_file_is_upgraded_when_full_id_observed(self) -> None:
+        """
+        The file's id is what later runs send to Betfair, and a truncated id
+        is unresolvable there -- indistinguishable from a closed market. A
+        full spelling must therefore replace a damaged one, never the reverse.
+        """
+        existing = _frame(_status_row("1.2515001", "OPEN", firstPendingUtc="x"))
+        merged = ms.merge_statuses(
+            existing, {"1.251500100": ms.BookStatus("OPEN", 3, ms.SOURCE_BOOK)}, now=NOW
+        )
+        assert list(merged["marketId"]) == ["1.251500100"]
+        assert merged.iloc[0]["firstPendingUtc"] == "x", "same row, not a new one"
 
     def test_blank_market_ids_are_dropped_not_merged(self) -> None:
         existing = _frame(_status_row("", "OPEN"), _status_row("1.1", "OPEN"))

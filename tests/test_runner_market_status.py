@@ -164,7 +164,90 @@ def test_status_step_runs_after_csv_write_and_before_azure() -> None:
     """
     source = inspect.getsource(runner._run_pipeline_inner)
     csv_at = source.index("write_csv_outputs(")
-    status_at = source.index("update_market_status(")
+    status_at = source.index("_refresh_market_status(", csv_at)
     azure_at = source.index("prepare_azure_dataset(")
     assert csv_at < status_at < azure_at
-    assert "df_canonical=csvr.df_canonical" in source
+    assert "csvr.df_canonical" in source[status_at:azure_at]
+
+
+def _pending_status_file(tmp_path: Path) -> Path:
+    from betfair_results_downloader.market_status import save_market_status
+
+    path = tmp_path / ".cache" / STATUS_FILENAME
+    save_market_status(
+        pd.DataFrame(
+            [
+                {
+                    "marketId": "1.247612197",
+                    "status": "OPEN",
+                    "activeRunners": "22",
+                    "source": "book",
+                    "checkedUtc": "2026-06-05T18:00:00Z",
+                    "firstPendingUtc": "2026-06-05T18:00:00Z",
+                    "closedObservedUtc": "",
+                }
+            ]
+        ),
+        path,
+    )
+    return path
+
+
+def test_empty_download_still_rechecks_pending_markets(tmp_path: Path) -> None:
+    """
+    The run that finally sees an outright CLOSED is usually a quiet one: the
+    user's bets all settled days earlier, so there is nothing to download.
+    Returning early there would leave the market pending forever.
+    """
+    path = _pending_status_file(tmp_path)
+    client = MagicMock()
+    client.betting.list_market_book.return_value = []  # absent: closed
+    empty = DownloadResult(
+        attempted=True, rows_downloaded=0, message="none", df_co=pd.DataFrame()
+    )
+
+    with (
+        patch(
+            "betfair_results_downloader.scheduler.runner.build_api_client",
+            return_value=client,
+        ),
+        patch(
+            "betfair_results_downloader.downloader_core.fetch_cleared_orders_df_range",
+            return_value=empty,
+        ),
+    ):
+        result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
+
+    assert result.ok is True and result.status == "success"
+    assert result.last_confirmed_settled_at_utc is None, "empty run confirms nothing"
+    requested = client.betting.list_market_book.call_args.kwargs["market_ids"]
+    assert requested == ["1.247612197"]
+    row = load_market_status(path).set_index("marketId").loc["1.247612197"]
+    assert row["status"] == "CLOSED"
+    assert row["source"] == "absent"
+    assert row["closedObservedUtc"] != ""
+
+
+def test_empty_download_status_failure_is_announced(tmp_path: Path) -> None:
+    _pending_status_file(tmp_path)
+    client = MagicMock()
+    client.betting.list_market_book.side_effect = RuntimeError("book unavailable")
+    empty = DownloadResult(
+        attempted=True, rows_downloaded=0, message="none", df_co=pd.DataFrame()
+    )
+
+    with (
+        patch(
+            "betfair_results_downloader.scheduler.runner.build_api_client",
+            return_value=client,
+        ),
+        patch(
+            "betfair_results_downloader.downloader_core.fetch_cleared_orders_df_range",
+            return_value=empty,
+        ),
+    ):
+        result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
+
+    assert result.ok is True and result.status == "success"
+    assert "⚠️ Market settlement status check failed" in result.message
+    assert "book unavailable" in result.message
