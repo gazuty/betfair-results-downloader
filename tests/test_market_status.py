@@ -200,6 +200,41 @@ class TestSelect:
 
         assert chosen == ["1.fresh"]
 
+    def test_later_canonical_spelling_upgrades_a_chosen_damaged_one(self) -> None:
+        """
+        Newest-first ordering can put a damaged spelling ahead of the full
+        one for the same market; the full one must still win.
+        """
+        canonical = pd.DataFrame(
+            {
+                "marketId": ["1.2515001", "1.251500100"],
+                "settledDate": ["2026-09-05T00:00:00Z", "2026-09-04T00:00:00Z"],
+            }
+        )
+
+        chosen = ms.select_markets_to_check(
+            [], ms.empty_status_frame(), canonical, now=NOW, max_recent_unknown=1
+        )
+
+        assert chosen == ["1.251500100"]
+
+    def test_pending_damaged_spelling_in_file_is_upgraded_from_the_canonical(
+        self,
+    ) -> None:
+        """
+        A pending row stored with a damaged id would be sent to Betfair as
+        is and come back absent; a full spelling in the recent canonical
+        must replace it in the request.
+        """
+        status = _frame(_status_row("1.2515001", "OPEN", firstPendingUtc="x"))
+        canonical = pd.DataFrame(
+            {"marketId": ["1.251500100"], "settledDate": ["2026-09-05T00:00:00Z"]}
+        )
+
+        chosen = ms.select_markets_to_check([], status, canonical, now=NOW)
+
+        assert chosen == ["1.251500100"]
+
     def test_unknown_seed_is_capped_newest_first(self) -> None:
         canonical = pd.DataFrame(
             {

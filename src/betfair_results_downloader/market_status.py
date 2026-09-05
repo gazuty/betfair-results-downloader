@@ -329,13 +329,18 @@ def select_markets_to_check(
         )
         added = 0
         for mid in recent["marketId"].drop_duplicates():
-            if added >= max_recent_unknown:
-                break
             cleaned = _clean_id(mid)
             if not cleaned:
                 continue
             key = decimal_key(cleaned)
-            if key in known_keys or key in chosen:
+            if key in chosen:
+                # Already going to be asked about (window, pending, or an
+                # earlier canonical row): this spelling may still be the
+                # longer one, so let ``add`` upgrade it. Not a new market,
+                # so it does not count against the seed cap.
+                add(cleaned)
+                continue
+            if key in known_keys or added >= max_recent_unknown:
                 continue
             add(cleaned)
             added += 1
