@@ -15,12 +15,21 @@ never see a rate-limit response however its message is matched.
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterable, TypeVar
 
 import requests
 from betfairlightweight.exceptions import APIError, StatusCodeError
 
 T = TypeVar("T")
+
+
+def chunked(seq: Iterable[T], n: int) -> Iterable[list[T]]:
+    """Yield ``seq`` in lists of at most ``n``; Betfair caps ids per request."""
+    items = list(seq)
+    step = max(1, n)
+    for i in range(0, len(items), step):
+        yield items[i : i + step]
+
 
 # Betfair's own transient markers, plus the requests-level failures that
 # betfairlightweight wraps into APIError text.

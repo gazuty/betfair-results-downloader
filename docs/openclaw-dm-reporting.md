@@ -37,12 +37,72 @@ For a report run at a given Sydney-local timestamp:
 
 Both windows end at the report timestamp.
 
-Only the following sports are included:
+All sports are included. Each breakdown always shows **Horses** and
+**Greyhounds** (even at `$0.00`), followed by one line per other sport that
+had a settlement in the window, ordered by absolute profit with ties broken
+alphabetically. Sport names come from the expanded Betfair event-type map in
+`reporting/schema.py`; an id not in that map renders as `Other (<id>)`.
 
-- Horses (`eventTypeId=7`)
-- Greyhounds (`eventTypeId=4339`)
+## Settlement status gating
 
-Other sports are excluded from the DM summary.
+Betfair settles the losing runners of an outright or tournament market as
+they are eliminated, so `listClearedOrders` can deliver "settled" bets for a
+market whose outcome is still open — a tournament-winner market can settle
+lay bets over several timestamps spanning weeks while most of its runners
+are still active. Cleared orders carry no market status, so those rows are
+indistinguishable from a finished market on their own.
+
+The pipeline (`market_status.py`, run after the CSV write and before Azure
+publishing, in both `run` and `backfill`) asks Betfair's `listMarketBook`
+about every market it has reason to care about and records what it hears in
+`<results_csv_dir>/.cache/market_settlement_status.csv`: a `status` of OPEN
+or SUSPENDED means the market is still only partially settled; CLOSED means
+it is fully settled. A CLOSED market stays in `listMarketBook` for a
+variable period (most racing markets were still returned two weeks after
+settlement, a minority were gone within a day), after which it is simply
+absent — open markets are always returned, so for an id that came from a
+cleared order, absence is recorded as CLOSED too. That recording is
+provisional: a market closed by absence is asked about again on each run
+for the next 48 hours, so a single dropped row in a response cannot
+permanently mark a live outright as fully settled. Because retention cannot
+be relied on, the check runs in every pipeline run.
+
+This is essentially a non-racing phenomenon: no horse or greyhound market
+has been observed to settle over more than a day, while most soccer,
+tennis, golf, AFL, cycling, GAA, and politics outright markets do.
+
+`dm-report` uses that file to hold every non-CLOSED market's rows out of
+every total in Week to date and Today, and summarises them in a final
+"Pending" section instead:
+
+```text
+Pending (partially settled, not counted above)
+• 2 markets, $17.40 settled so far — each counts in full on the day it closes
+```
+
+or `• None` when nothing is pending. The pending amount is deliberately not
+bounded by the week: it is everything Betfair has settled on those markets
+since they opened, and the whole amount lands in Today on the day the
+market closes.
+
+A market that was seen pending and is later observed CLOSED has all of its
+bets counted on the day the pipeline first observed it CLOSED (Sydney
+time) — not scattered across the days on which Betfair actually settled
+each leg — so early-settled legs of an outright are not lost in reports
+that already went out for those weeks. A market that was CLOSED the first
+time the pipeline ever looked at it (racing, match-odds markets) keeps its
+original `settledDate`, so racing reporting is unchanged.
+
+A market with no row in the status file at all — the file is missing,
+unreadable, or the status step hasn't reached it yet — counts as final,
+exactly as it did before this feature existed. A status-step outage
+therefore degrades the report to its old (pre-gating) behaviour rather than
+reporting `$0.00` for the affected markets.
+
+`dm-report --csv PATH` looks for the status file at `<directory of
+PATH>/.cache/market_settlement_status.csv`. If that file exists but can't be
+read, the report logs a warning and treats it as absent (same
+degrade-to-old-behaviour rule).
 
 ## CLI
 
@@ -79,11 +139,16 @@ Week to date (since Sunday 12:00 AM)
 • Total profit: $412.35
 • Horses: $355.10
 • Greyhounds: $57.25
+• Tennis: $12.25
+• Soccer: -$12.25
 
 Today (since 12:00 AM)
 • Total profit: $48.90
 • Horses: $36.40
 • Greyhounds: $12.50
+
+Pending (partially settled, not counted above)
+• 2 markets, $17.40 settled so far — each counts in full on the day it closes
 ```
 
 ## Recommended operational model
@@ -123,6 +188,7 @@ That preserves a clean separation of concerns:
 
 - The `06:00` report is primarily valuable for the *week-to-date* section.
 - The `06:00` *today* section may legitimately be `$0.00` if no horse or greyhound settlements exist by that point.
+- The `06:00` *today* section may also legitimately show an outright market sitting in the Pending section instead of a total — Betfair settling early legs of a still-open tournament is expected, not a bug.
 - The `19:35` report is expected to be the more meaningful day-level operational summary.
 
 ### Why this design is preferred
@@ -138,13 +204,17 @@ The implementation is covered by unit tests in:
 
 - `tests/test_daily_dm_report.py`
 - `tests/test_cli_dm_report.py`
+- `tests/test_report_settlement_gating.py` — pending-market gating, close-date attribution, degrade-to-old-behaviour on a missing/unreadable status file
+- `tests/test_market_status.py` — `market_status.py`: `listMarketBook` batching/absence handling, market selection, merge/prune of the status file
+- `tests/test_runner_market_status.py` — the pipeline step's wiring into `run`/`backfill`, including its non-fatal failure handling
 
 Those tests verify:
 
 - Sunday-start week logic
 - same-day totals
 - Sydney timezone handling
-- exclusion of non-horse/greyhound rows
+- all-sports coverage, ordered by absolute profit
+- partially-settled markets held out of totals and summarised in the Pending section
 - CLI rendering behavior
 - exact canonical CSV preference when present
 

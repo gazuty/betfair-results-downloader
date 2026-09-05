@@ -37,7 +37,7 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
                 "betId": "4",
                 "eventTypeId": 1,
                 "profit": 999.0,
-                "settledDate": "2026-06-06T01:00:00Z",  # other sport, excluded
+                "settledDate": "2026-06-06T01:00:00Z",  # Sat 11:00 local, soccer
             },
         ]
     )
@@ -47,11 +47,11 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
         report_dt=datetime(2026, 6, 6, 21, 0, tzinfo=SYDNEY_TZ),
     )
 
-    assert report.week_to_date.total_profit == 80.0
+    assert report.week_to_date.total_profit == 1079.0
     assert report.week_to_date.horses_profit == 100.0
     assert report.week_to_date.greyhounds_profit == -20.0
 
-    assert report.day_to_date.total_profit == 100.0
+    assert report.day_to_date.total_profit == 1099.0
     assert report.day_to_date.horses_profit == 100.0
     assert report.day_to_date.greyhounds_profit == 0.0
 
@@ -59,9 +59,10 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
     assert "Friday 6 June, 9:00 PM" not in report.text
     assert "Saturday 6 June, 9:00 PM" in report.text
     assert "Week to date (since Sunday 12:00 AM)" in report.text
-    assert "• Total profit: $80.00" in report.text
+    assert "• Total profit: $1,079.00" in report.text
     assert "• Horses: $100.00" in report.text
     assert "• Greyhounds: -$20.00" in report.text
+    assert "• Soccer: $999.00" in report.text
     assert "Today (since 12:00 AM)" in report.text
 
 
@@ -88,28 +89,32 @@ def test_daily_dm_report_treats_naive_datetime_as_sydney_time() -> None:
     assert report.day_to_date.total_profit == 25.0
 
 
-def test_daily_dm_report_returns_zeroes_when_no_horse_or_greyhound_rows_in_window() -> (
-    None
-):
+def test_daily_dm_report_counts_other_sports_and_keeps_racing_lines() -> None:
+    """Every sport counts; Horses and Greyhounds keep their lines on a quiet day."""
     df = pd.DataFrame(
         [
             {
                 "betId": "1",
                 "eventTypeId": 1,
                 "profit": 75.0,
-                "settledDate": "2026-06-06T00:30:00Z",
+                "settledDate": "2026-06-05T20:30:00Z",  # Sat 6:30 AM local
             }
         ]
     )
 
     report = build_daily_dm_report_from_dataframe(
         df,
-        report_dt=datetime(2026, 6, 6, 6, 0, tzinfo=SYDNEY_TZ),
+        report_dt=datetime(2026, 6, 6, 21, 0, tzinfo=SYDNEY_TZ),
     )
 
-    assert report.week_to_date.total_profit == 0.0
-    assert report.day_to_date.total_profit == 0.0
-    assert "• Total profit: $0.00" in report.text
+    assert report.week_to_date.total_profit == 75.0
+    assert report.day_to_date.total_profit == 75.0
+    assert report.day_to_date.horses_profit == 0.0
+    assert report.day_to_date.greyhounds_profit == 0.0
+    assert "• Total profit: $75.00" in report.text
+    assert "• Horses: $0.00" in report.text
+    assert "• Greyhounds: $0.00" in report.text
+    assert "• Soccer: $75.00" in report.text
 
 
 def test_daily_dm_report_heading_is_portable_and_unpadded() -> None:

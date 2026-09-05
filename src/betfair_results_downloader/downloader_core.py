@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import gzip
 import json
@@ -20,11 +20,12 @@ import betfairlightweight
 from betfairlightweight import filters
 from betfairlightweight.exceptions import APIError  # noqa: F401 (kept for callers/tests)
 
-from .betfair_net import retry_betfair_call
+from .betfair_net import chunked as _chunked, retry_betfair_call
 from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
 from .csv_utils import (
     betid_keys,
     clean_and_remove_duplicates,
+    decimal_key,
     update_csv_with_new_data,
 )
 from .scheduler.date_windows import chunk_date_range
@@ -442,12 +443,6 @@ def fetch_cleared_orders_df_range(
 # -----------------------------
 # Enrichment: market catalogue
 # -----------------------------
-
-
-def _chunked(seq: Iterable[str], n: int) -> Iterable[list[str]]:
-    seq = list(seq)
-    for i in range(0, len(seq), n):
-        yield seq[i : i + n]
 
 
 def _call_list_market_catalogue(
@@ -945,30 +940,10 @@ def write_csv_outputs(
 # -----------------------------
 
 
-def _decimal_key(value: Any) -> str:
-    """
-    A lossless numeric comparison key, falling back to the stripped
-    string for anything non-numeric.
-
-    Used for marketIds -- historical rows hold float-damaged spellings
-    (``1.2515001`` for ``1.251500100``) that are one market numerically
-    and one Decimal MarketID in Azure -- and for betIds, where the
-    canonical dedupe already treats legacy ``123.0`` and fresh ``123``
-    as one bet (matching ``betid_keys``' numeric semantics).
-    """
-    raw = str(value).strip()
-    try:
-        d = Decimal(raw)
-    except InvalidOperation:
-        return raw
-    if d.is_nan():
-        return raw
-    d = d.normalize()
-    if d.as_tuple().exponent > 0:
-        # normalize() turns 100 into 1E+2; never return scientific
-        # notation for anything.
-        d = d.quantize(Decimal(1))
-    return str(d)
+# Kept under its historical name: the Azure selection and aggregation code
+# (and its tests) refer to it, and the reporting layer now shares the same
+# key via csv_utils.
+_decimal_key = decimal_key
 
 
 def _rows_not_already_held(base: pd.DataFrame, candidate: pd.DataFrame) -> pd.DataFrame:

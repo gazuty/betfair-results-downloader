@@ -331,7 +331,36 @@ def _run_pipeline_inner(
             )
             if backup_warning:
                 logger.warning(backup_warning)
-        warn_suffix = f" {backup_warning}" if backup_warning else ""
+        # Settlement status for every market this window touched, recorded
+        # while Betfair still answers for them (CLOSED markets leave the
+        # book after a variable period). This is what lets the daily
+        # report hold back partially settled outrights; see market_status.
+        # Supplementary like enrichment: a failure must not fail the run,
+        # but it is announced -- until the next run re-checks, the report
+        # counts this window's markets as final.
+        status_warning: Optional[str] = None
+        try:
+            from ..downloader_core import resolve_enrichment_cache_dir  # noqa: PLC0415
+            from ..market_status import update_market_status  # noqa: PLC0415
+
+            ms = update_market_status(
+                client=client,
+                cache_dir=resolve_enrichment_cache_dir(results_dir),
+                df_window=df_co,
+                df_canonical=csvr.df_canonical,
+                status_cb=_say,
+            )
+            logger.info("Market status result: %s", ms.message)
+        except Exception as exc:
+            status_warning = (
+                f"⚠️ Market settlement status check failed "
+                f"({type(exc).__name__}: {exc}); the report will treat this "
+                f"window's markets as fully settled until the next run."
+            )
+            logger.warning(status_warning)
+
+        run_warnings = [w for w in (backup_warning, status_warning) if w]
+        warn_suffix = (" " + " ".join(run_warnings)) if run_warnings else ""
 
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)
 

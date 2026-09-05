@@ -1,12 +1,39 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def decimal_key(value: Any) -> str:
+    """
+    A lossless numeric comparison key, falling back to the stripped
+    string for anything non-numeric.
+
+    Used for marketIds -- historical rows hold float-damaged spellings
+    (``1.2515001`` for ``1.251500100``) that are one market numerically
+    and one Decimal MarketID in Azure -- and for betIds, where the
+    canonical dedupe already treats legacy ``123.0`` and fresh ``123``
+    as one bet (matching :func:`betid_keys`' numeric semantics).
+    """
+    raw = str(value).strip()
+    try:
+        d = Decimal(raw)
+    except InvalidOperation:
+        return raw
+    if d.is_nan():
+        return raw
+    d = d.normalize()
+    if d.as_tuple().exponent > 0:
+        # normalize() turns 100 into 1E+2; never return scientific
+        # notation for anything.
+        d = d.quantize(Decimal(1))
+    return str(d)
 
 
 def betid_keys(df: pd.DataFrame) -> set[float]:
