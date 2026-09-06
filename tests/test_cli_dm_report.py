@@ -54,3 +54,37 @@ def test_resolve_default_results_csv_prefers_exact_canonical_filename(tmp_path) 
     chosen = resolve_default_results_csv(str(results_dir))
 
     assert chosen == canonical
+
+
+def test_cli_dm_report_reads_the_status_file_beside_the_csv(tmp_path, capsys) -> None:
+    """
+    The pipeline writes market_settlement_status.csv under .cache next to the
+    canonical; dm-report must pick it up from --csv's directory so a pending
+    outright is held back exactly as it is for the default results dir.
+    """
+    results_dir = tmp_path / "results"
+    (results_dir / ".cache").mkdir(parents=True)
+    csv_path = results_dir / "cleared_orders_cleaned.csv"
+    csv_path.write_text(
+        "betId,marketId,eventTypeId,profit,settledDate\n"
+        "1,1.100,7,12.5,2026-06-06T00:30:00Z\n"
+        "2,1.200,2,7.25,2026-06-06T01:33:27Z\n",
+        encoding="utf-8",
+    )
+    (results_dir / ".cache" / "market_settlement_status.csv").write_text(
+        "marketId,status,activeRunners,source,checkedUtc,firstPendingUtc,closedObservedUtc\n"
+        "1.100,CLOSED,0,book,2026-06-06T05:00:00Z,,2026-06-06T05:00:00Z\n"
+        "1.200,OPEN,22,book,2026-06-06T05:00:00Z,2026-06-06T05:00:00Z,\n",
+        encoding="utf-8",
+    )
+
+    # --csv is self-sufficient: no credentials are read on this path.
+    exit_code = main(
+        ["dm-report", "--csv", str(csv_path), "--at", "2026-06-06T21:00:00+10:00"]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "• Total profit: $12.50" in out
+    assert "• Tennis" not in out
+    assert "• 1 market, $7.25 settled so far" in out

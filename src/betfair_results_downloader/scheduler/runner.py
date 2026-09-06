@@ -181,6 +181,60 @@ def _extract_max_settled_at_utc(df: pd.DataFrame) -> Optional[datetime]:
     return max_ts.astimezone(timezone.utc)
 
 
+def _refresh_market_status(
+    client: Any,
+    results_dir: Path,
+    df_window: Optional[pd.DataFrame],
+    df_canonical: Optional[pd.DataFrame],
+    status_cb: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Record settlement status for this run's markets (see market_status).
+
+    Runs on every pipeline run, including one whose download returned no
+    rows: a pending outright must keep being asked about until Betfair says
+    CLOSED, and the run that finally sees the close is typically a quiet one
+    -- all of the user's bets settled long before the market itself did.
+    ``df_canonical`` may be None on that path; the seed then reads what it
+    needs from the canonical on disk.
+
+    Supplementary like enrichment: never raises. Returns a ⚠️ warning string
+    on failure so the caller can carry it on the run message, where _cmd_run
+    posts it to Slack as "succeeded with a warning". Until the next run
+    re-checks, the report counts this window's markets as final.
+    """
+    try:
+        from ..downloader_core import resolve_enrichment_cache_dir  # noqa: PLC0415
+        from ..market_status import (  # noqa: PLC0415
+            load_canonical_market_dates,
+            update_market_status,
+        )
+
+        if df_canonical is None:
+            # No canonical in hand (nothing was downloaded, so nothing was
+            # written): read the two columns the seed needs from disk, so the
+            # first run after deploy and the self-heal after a failed step
+            # both work on a quiet window too.
+            df_canonical = load_canonical_market_dates(results_dir)
+        ms = update_market_status(
+            client=client,
+            cache_dir=resolve_enrichment_cache_dir(results_dir),
+            df_window=df_window,
+            df_canonical=df_canonical,
+            status_cb=status_cb,
+        )
+        logger.info("Market status result: %s", ms.message)
+        return None
+    except Exception as exc:
+        warning = (
+            f"⚠️ Market settlement status check failed "
+            f"({type(exc).__name__}: {exc}); the report will treat this "
+            f"window's markets as fully settled until the next run."
+        )
+        logger.warning(warning)
+        return warning
+
+
 def _run_pipeline(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
@@ -259,6 +313,10 @@ def _run_pipeline_inner(
             # Nothing was observed, so nothing new is confirmed: leave the
             # checkpoint alone (None means "keep the previous value" in
             # upsert_schedule_state) instead of asserting coverage to now.
+            # Pending markets are still re-checked: the run that sees an
+            # outright finally CLOSED is usually one with nothing to download.
+            status_warning = _refresh_market_status(client, results_dir, None, None)
+            warn_suffix = f" {status_warning}" if status_warning else ""
             return RunResult(
                 ok=True,
                 status="success",
@@ -268,7 +326,7 @@ def _run_pipeline_inner(
                 last_confirmed_settled_at_utc=None,
                 download_started_utc=run_started,
                 download_finished_utc=datetime.now(timezone.utc),
-                message=f"Download returned no rows. {dl.message}",
+                message=f"Download returned no rows. {dl.message}{warn_suffix}",
             )
 
         df_co = dl.df_co
@@ -331,7 +389,15 @@ def _run_pipeline_inner(
             )
             if backup_warning:
                 logger.warning(backup_warning)
-        warn_suffix = f" {backup_warning}" if backup_warning else ""
+        # Settlement status for every market this window touched, recorded
+        # while Betfair still answers for them. This is what lets the daily
+        # report hold back partially settled outrights; see market_status.
+        status_warning = _refresh_market_status(
+            client, results_dir, df_co, csvr.df_canonical, _say
+        )
+
+        run_warnings = [w for w in (backup_warning, status_warning) if w]
+        warn_suffix = (" " + " ".join(run_warnings)) if run_warnings else ""
 
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)
 

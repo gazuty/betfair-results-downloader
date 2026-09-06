@@ -33,7 +33,7 @@ Then:
 
 1. Create your credentials file (see [Credentials file](#credentials-file)) — copy `secrets/credentials.template.json` as a starting point.
 2. Enroll a Betfair client certificate (see [Betfair Certificate Enrollment](#betfair-certificate-enrollment)) and verify with `betfair-results auth-test`.
-3. Run a one-off download: `betfair-results run` — four phases: download → enrich → CSV → Azure (if enabled).
+3. Run a one-off download: `betfair-results run` — five phases: download → enrich → CSV → market status → Azure (if enabled).
 4. *(Optional)* Install the daily scheduled job: `betfair-results schedule install`.
 
 ### Lookback (auto)
@@ -332,8 +332,9 @@ python -m betfair_results_downloader run
 4. Downloads cleared orders using cert-based auth (chunked by `schedule.chunk_days`; chunk windows are half-open and contiguous so no instant falls between chunks).
 5. Enriches with market catalogue (uses cache, timeout retry; enrichment failure is non-fatal — CSVs are still written).
 6. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
-7. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
-8. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
+7. Checks per-market settlement status via `listMarketBook` and updates `<results_csv_dir>/.cache/market_settlement_status.csv` — this is what lets `dm-report` hold back partially settled outrights (see [Enrichment cache](#enrichment-cache-results_csv_dircache) and `docs/openclaw-dm-reporting.md`). Non-fatal: a failure is announced as a warning and the run continues, with the report treating that window's markets as fully settled until the next run re-checks them.
+8. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
+9. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
 
 Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
 
@@ -405,8 +406,10 @@ Behavior:
 
 - computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
 - computes **Today** from the current day `12:00 AM` Australia/Sydney time
-- includes only **Horses** and **Greyhounds** in the summary
+- covers **all sports** — Horses and Greyhounds are always shown (even at `$0.00`), followed by one line per other sport with a settlement in the window, ordered by absolute profit
+- holds markets that Betfair has only partially settled out of every total, and summarizes them in a final "Pending (partially settled, not counted above)" section instead — see [Settlement status gating](docs/openclaw-dm-reporting.md#settlement-status-gating)
 - prefers the exact canonical CSV `cleared_orders_cleaned.csv` when present
+- with `--csv PATH`, looks for the settlement status file at `<directory of PATH>/.cache/market_settlement_status.csv`; an unreadable status file is logged and treated as absent
 - prints the exact report body intended for user-facing delivery
 
 See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the 6:00 am versus 7:35 pm report.
@@ -700,8 +703,9 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 
 - `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
 - `market_catalogue_event_latest.csv` — latest snapshot
+- `market_settlement_status.csv` — per-market settlement status observed via `listMarketBook`, columns `marketId`, `status`, `activeRunners`, `source` (`book` or `absent`), `checkedUtc`, `firstPendingUtc`, `closedObservedUtc`; used by `dm-report` to hold back partially settled markets (see `docs/openclaw-dm-reporting.md`)
 
-Both are git-ignored.
+All three are git-ignored.
 
 **Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
 
@@ -746,6 +750,7 @@ src/betfair_results_downloader/
   azure_publish.py        # Azure SQL incremental sync plan + apply
   azure_common.py         # Shared Azure ODBC connection-string builder
   csv_utils.py            # Canonical CSV dedupe + atomic write
+  market_status.py        # Per-market settlement status (partial vs fully settled) via listMarketBook
   audit.py                # Settled-date gap analysis (backs the `audit` command)
   secrets.py              # Credentials resolver + validator
   config.py               # ScheduleConfig dataclass + event type constants
