@@ -477,3 +477,24 @@ def test_archived_legs_count_in_full_on_the_day_the_market_closes(tmp_path) -> N
     assert report.day_to_date.total_profit == 117.25
     assert ("Tennis", 107.25) in report.day_to_date.by_sport
     assert report.pending.markets == 0
+
+
+def test_pending_market_is_held_out_of_yesterday_too() -> None:
+    df = pd.DataFrame(
+        [
+            _row("1", "1.100", 7, 10.0, "2026-06-05T02:00:00Z"),  # Fri, race
+            _row("2", "1.200", 2, 7.25, "2026-06-05T03:00:00Z"),  # Fri, outright leg
+        ]
+    )
+    status = _status_frame(
+        _status("1.100", "CLOSED", closed_observed="2026-06-05T09:00:00Z"),
+        _status("1.200", "OPEN", first_pending="2026-06-05T09:00:00Z"),
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=REPORT_AT, market_status=status
+    )
+
+    assert report.yesterday is not None
+    assert report.yesterday.total_profit == 10.0
+    assert report.pending.profit == 7.25
