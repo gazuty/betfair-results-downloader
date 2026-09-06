@@ -57,6 +57,10 @@ class DailyDmReport:
     text: str
     hours_stale: float | None = None
     pending: PendingSummary = PendingSummary(markets=0, profit=0.0)
+    # The full calendar day before day_start, [yesterday_start, day_start).
+    # Independent of the week: on a Sunday it is last week's Saturday.
+    yesterday_start: datetime | None = None
+    yesterday: ProfitBreakdown | None = None
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -95,12 +99,19 @@ def _format_breakdown_lines(breakdown: ProfitBreakdown) -> list[str]:
     return lines
 
 
+def _format_day_name(dt: datetime) -> str:
+    """e.g. ``Friday 5 June`` -- portable, unpadded (see _format_heading)."""
+    return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}"
+
+
 def _format_report(
     report_dt: datetime,
     week_to_date: ProfitBreakdown,
     day_to_date: ProfitBreakdown,
     hours_stale: float | None = None,
     pending: PendingSummary | None = None,
+    yesterday: ProfitBreakdown | None = None,
+    yesterday_start: datetime | None = None,
 ) -> str:
     heading = _format_heading(report_dt)
     lines = [
@@ -123,6 +134,11 @@ def _format_report(
         )
     lines += ["", "Week to date (since Sunday 12:00 AM)"]
     lines += _format_breakdown_lines(week_to_date)
+    if yesterday is not None and yesterday_start is not None:
+        # The 6:00 AM report is the first full picture of the previous day;
+        # the 7:35 PM one repeats it so the two reports agree.
+        lines += ["", f"Yesterday ({_format_day_name(yesterday_start)})"]
+        lines += _format_breakdown_lines(yesterday)
     lines += ["", "Today (since 12:00 AM)"]
     lines += _format_breakdown_lines(day_to_date)
 
@@ -303,11 +319,18 @@ def build_daily_dm_report_from_dataframe(
     final = final.loc[final["settled_dt_local"] <= report_dt_local]
     pending_rows = pending_rows.loc[pending_rows["settled_dt_local"] <= report_dt_local]
 
+    yesterday_start = day_start - timedelta(days=1)
+
     week_df = final.loc[final["settled_dt_local"] >= week_start]
     day_df = final.loc[final["settled_dt_local"] >= day_start]
+    yesterday_df = final.loc[
+        (final["settled_dt_local"] >= yesterday_start)
+        & (final["settled_dt_local"] < day_start)
+    ]
 
     week_to_date = _profit_breakdown(week_df)
     day_to_date = _profit_breakdown(day_df)
+    yesterday = _profit_breakdown(yesterday_df)
     pending = PendingSummary(
         markets=int(pending_rows["marketId"].map(decimal_key).nunique())
         if not pending_rows.empty
@@ -316,7 +339,13 @@ def build_daily_dm_report_from_dataframe(
     )
 
     text = _format_report(
-        report_dt_local, week_to_date, day_to_date, hours_stale, pending
+        report_dt_local,
+        week_to_date,
+        day_to_date,
+        hours_stale,
+        pending,
+        yesterday,
+        yesterday_start,
     )
 
     return DailyDmReport(
@@ -329,6 +358,8 @@ def build_daily_dm_report_from_dataframe(
         text=text,
         hours_stale=hours_stale,
         pending=pending,
+        yesterday_start=yesterday_start,
+        yesterday=yesterday,
     )
 
 

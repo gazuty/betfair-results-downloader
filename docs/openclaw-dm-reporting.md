@@ -33,9 +33,12 @@ and reached only via the `--post-slack` flag described below.
 For a report run at a given Sydney-local timestamp:
 
 - **Week to date** starts at the most recent Sunday at `12:00 AM`
+- **Yesterday** is the full previous calendar day, `12:00 AM` to `12:00 AM`
 - **Today** starts at the current day at `12:00 AM`
 
-Both windows end at the report timestamp.
+Week to date and Today end at the report timestamp. Yesterday is a closed
+day, so the 6:00 AM and 7:35 PM reports show the same figures for it, and it
+ignores the week boundary: on a Sunday it is the previous week's Saturday.
 
 All sports are included. Each breakdown always shows **Horses** and
 **Greyhounds** (even at `$0.00`), followed by one line per other sport that
@@ -148,6 +151,12 @@ Week to date (since Sunday 12:00 AM)
 • Tennis: $12.25
 • Soccer: -$12.25
 
+Yesterday (Friday 5 June)
+• Total profit: $121.80
+• Horses: $97.30
+• Greyhounds: $12.25
+• Tennis: $12.25
+
 Today (since 12:00 AM)
 • Total profit: $48.90
 • Horses: $36.40
@@ -192,7 +201,7 @@ That preserves a clean separation of concerns:
 
 ### Expected semantics
 
-- The `06:00` report is primarily valuable for the *week-to-date* section.
+- The `06:00` report is primarily valuable for the *week-to-date* and *yesterday* sections: it is the first full picture of the previous day.
 - The `06:00` *today* section may legitimately be `$0.00` if no horse or greyhound settlements exist by that point.
 - The `06:00` *today* section may also legitimately show an outright market sitting in the Pending section instead of a total — Betfair settling early legs of a still-open tournament is expected, not a bug.
 - The `19:35` report is expected to be the more meaningful day-level operational summary.
@@ -218,6 +227,7 @@ Those tests verify:
 
 - Sunday-start week logic
 - same-day totals
+- the full-previous-day Yesterday window, including across the week boundary
 - Sydney timezone handling
 - all-sports coverage, ordered by absolute profit
 - partially-settled markets held out of totals and summarised in the Pending section

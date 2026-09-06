@@ -405,6 +405,7 @@ scheduled run is announced rather than failing silently. See
 Behavior:
 
 - computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
+- computes **Yesterday** as the full previous calendar day in Australia/Sydney time
 - computes **Today** from the current day `12:00 AM` Australia/Sydney time
 - covers **all sports** — Horses and Greyhounds are always shown (even at `$0.00`), followed by one line per other sport with a settlement in the window, ordered by absolute profit
 - holds markets that Betfair has only partially settled out of every total, and summarizes them in a final "Pending (partially settled, not counted above)" section instead — see [Settlement status gating](docs/openclaw-dm-reporting.md#settlement-status-gating)

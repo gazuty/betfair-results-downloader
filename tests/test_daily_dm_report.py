@@ -155,3 +155,84 @@ def test_daily_dm_report_heading_noon_and_midnight() -> None:
     )
     assert "12:00 PM" in noon.text
     assert "12:00 AM" in midnight.text
+
+
+def test_daily_dm_report_yesterday_is_the_full_previous_local_day() -> None:
+    """
+    Yesterday is [00:00 yesterday, 00:00 today) in Sydney time: the first
+    minute of yesterday is in, the first minute of today is out, and the day
+    before yesterday is out. Report at Saturday 6 June 9:00 PM.
+    """
+    df = pd.DataFrame(
+        [
+            {  # Fri 5 June 00:00:30 local (Thu 14:00:30Z) -- first minute, in
+                "betId": "1",
+                "eventTypeId": 7,
+                "profit": 10.0,
+                "settledDate": "2026-06-04T14:00:30Z",
+            },
+            {  # Fri 5 June 23:59:00 local -- last minute, in
+                "betId": "2",
+                "eventTypeId": 4339,
+                "profit": 5.0,
+                "settledDate": "2026-06-05T13:59:00Z",
+            },
+            {  # Sat 6 June 00:00:00 local -- today, out of yesterday
+                "betId": "3",
+                "eventTypeId": 7,
+                "profit": 100.0,
+                "settledDate": "2026-06-05T14:00:00Z",
+            },
+            {  # Thu 4 June local -- day before yesterday, out
+                "betId": "4",
+                "eventTypeId": 1,
+                "profit": 1000.0,
+                "settledDate": "2026-06-04T02:00:00Z",
+            },
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=datetime(2026, 6, 6, 21, 0, tzinfo=SYDNEY_TZ)
+    )
+
+    assert report.yesterday_start == datetime(2026, 6, 5, 0, 0, tzinfo=SYDNEY_TZ)
+    assert report.yesterday is not None
+    assert report.yesterday.total_profit == 15.0
+    assert report.yesterday.horses_profit == 10.0
+    assert report.yesterday.greyhounds_profit == 5.0
+    assert report.day_to_date.total_profit == 100.0
+    assert report.week_to_date.total_profit == 1115.0
+
+    text = report.text
+    assert "Yesterday (Friday 5 June)" in text
+    assert text.index("Week to date") < text.index("Yesterday") < text.index("Today")
+    yesterday_block = text[text.index("Yesterday") : text.index("Today")]
+    assert "• Total profit: $15.00" in yesterday_block
+    assert "• Horses: $10.00" in yesterday_block
+    assert "• Greyhounds: $5.00" in yesterday_block
+
+
+def test_daily_dm_report_yesterday_ignores_the_week_boundary() -> None:
+    """On a Sunday, Yesterday is last week's Saturday; Week to date is not."""
+    df = pd.DataFrame(
+        [
+            {  # Sat 6 June 15:00 local
+                "betId": "1",
+                "eventTypeId": 7,
+                "profit": 40.0,
+                "settledDate": "2026-06-06T05:00:00Z",
+            }
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 7, 6, 0, tzinfo=SYDNEY_TZ),  # Sunday
+    )
+
+    assert report.yesterday is not None
+    assert report.yesterday.total_profit == 40.0
+    assert report.week_to_date.total_profit == 0.0
+    assert report.day_to_date.total_profit == 0.0
+    assert "Yesterday (Saturday 6 June)" in report.text
