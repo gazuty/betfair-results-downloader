@@ -195,6 +195,8 @@ def _refresh_market_status(
     rows: a pending outright must keep being asked about until Betfair says
     CLOSED, and the run that finally sees the close is typically a quiet one
     -- all of the user's bets settled long before the market itself did.
+    ``df_canonical`` may be None on that path; the seed then reads what it
+    needs from the canonical on disk.
 
     Supplementary like enrichment: never raises. Returns a ⚠️ warning string
     on failure so the caller can carry it on the run message, where _cmd_run
@@ -203,8 +205,17 @@ def _refresh_market_status(
     """
     try:
         from ..downloader_core import resolve_enrichment_cache_dir  # noqa: PLC0415
-        from ..market_status import update_market_status  # noqa: PLC0415
+        from ..market_status import (  # noqa: PLC0415
+            load_canonical_market_dates,
+            update_market_status,
+        )
 
+        if df_canonical is None:
+            # No canonical in hand (nothing was downloaded, so nothing was
+            # written): read the two columns the seed needs from disk, so the
+            # first run after deploy and the self-heal after a failed step
+            # both work on a quiet window too.
+            df_canonical = load_canonical_market_dates(results_dir)
         ms = update_market_status(
             client=client,
             cache_dir=resolve_enrichment_cache_dir(results_dir),

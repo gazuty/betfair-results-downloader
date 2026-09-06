@@ -375,6 +375,50 @@ def load_market_status_for_report(csv_path: Path) -> pd.DataFrame | None:
         return None
 
 
+def supplement_with_archived_legs(
+    df_raw: pd.DataFrame,
+    market_status: pd.DataFrame | None,
+    results_dir: Path,
+) -> pd.DataFrame:
+    """
+    Add archived legs of every market that was ever seen pending.
+
+    A market can stay partially settled for longer than
+    ``user.canonical_archive_months``; its early legs are then moved into
+    the yearly archives while the report reads only the rolling canonical.
+    The Pending amount would understate, and the day the market closed would
+    count only the legs still in the canonical instead of the whole market.
+    Only markets with a ``firstPendingUtc`` are looked up, and only rows the
+    canonical does not already hold are added. With no archives on disk
+    this is a directory glob and nothing more.
+    """
+    if market_status is None or market_status.empty:
+        return df_raw
+    if "marketId" not in market_status.columns or "betId" not in df_raw.columns:
+        return df_raw
+    ids = market_status["marketId"].fillna("").astype(str).str.strip()
+    was_pending = market_status["firstPendingUtc"].fillna("").astype(str).str.len() > 0
+    interest = ids[was_pending & (ids != "")]
+    if interest.empty:
+        return df_raw
+
+    from ..downloader_core import (  # noqa: PLC0415
+        _archived_rows_for_markets,
+        _rows_not_already_held,
+    )
+
+    keys = set(interest.map(decimal_key))
+    extras = [
+        extra
+        for archived in _archived_rows_for_markets(results_dir, keys)
+        for extra in [_rows_not_already_held(df_raw, archived)]
+        if len(extra)
+    ]
+    if not extras:
+        return df_raw
+    return pd.concat([df_raw, *extras], ignore_index=True)
+
+
 def build_daily_dm_report_from_results_dir(
     results_dir: str,
     *,
@@ -387,9 +431,11 @@ def build_daily_dm_report_from_results_dir(
         else resolve_default_results_csv(results_dir)
     )
     df_raw = load_csv(str(chosen))
+    market_status = load_market_status_for_report(chosen)
+    df_raw = supplement_with_archived_legs(df_raw, market_status, chosen.parent)
     return build_daily_dm_report_from_dataframe(
         df_raw,
         report_dt=report_dt,
         source_csv=str(chosen),
-        market_status=load_market_status_for_report(chosen),
+        market_status=market_status,
     )

@@ -93,7 +93,11 @@ time) — not scattered across the days on which Betfair actually settled
 each leg — so early-settled legs of an outright are not lost in reports
 that already went out for those weeks. A market that was CLOSED the first
 time the pipeline ever looked at it (racing, match-odds markets) keeps its
-original `settledDate`, so racing reporting is unchanged.
+original `settledDate`, so racing reporting is unchanged. If a market stays
+partially settled for longer than `user.canonical_archive_months`, its early
+legs sit in the yearly archives rather than the canonical; the report reads
+them back for every market that was ever seen pending, so both the Pending
+amount and the close-day total cover the whole market.
 
 A market with no row in the status file at all — the file is missing,
 unreadable, or the status step hasn't reached it yet — counts as final,

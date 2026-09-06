@@ -9,7 +9,7 @@ a failure must be announced rather than swallowed.
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -251,3 +251,44 @@ def test_empty_download_status_failure_is_announced(tmp_path: Path) -> None:
     assert result.ok is True and result.status == "success"
     assert "⚠️ Market settlement status check failed" in result.message
     assert "book unavailable" in result.message
+
+
+def test_empty_download_still_seeds_unrecorded_recent_markets(tmp_path: Path) -> None:
+    """
+    First run after deploy, or the run after a failed status step, can be a
+    quiet one. The seed must not wait for a non-empty download: the two
+    columns it needs are read from the canonical on disk.
+    """
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+    old = "2020-01-01T00:00:00.000Z"
+    (tmp_path / "cleared_orders_cleaned.csv").write_text(
+        "betId,marketId,eventTypeId,profit,settledDate\n"
+        f"1,1.111,2,1.0,{recent}\n"
+        f"2,1.999,7,1.0,{old}\n",
+        encoding="utf-8",
+    )
+    client = MagicMock()
+    client.betting.list_market_book.return_value = [_book("1.111", "OPEN", 5)]
+    empty = DownloadResult(
+        attempted=True, rows_downloaded=0, message="none", df_co=pd.DataFrame()
+    )
+
+    with (
+        patch(
+            "betfair_results_downloader.scheduler.runner.build_api_client",
+            return_value=client,
+        ),
+        patch(
+            "betfair_results_downloader.downloader_core.fetch_cleared_orders_df_range",
+            return_value=empty,
+        ),
+    ):
+        result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
+
+    assert result.ok is True and result.status == "success"
+    requested = client.betting.list_market_book.call_args.kwargs["market_ids"]
+    assert requested == ["1.111"], "recent unknown seeded; old one ignored"
+    row = load_market_status(tmp_path / ".cache" / STATUS_FILENAME).iloc[0]
+    assert row["marketId"] == "1.111" and row["status"] == "OPEN"

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from betfair_results_downloader.market_status import STATUS_COLUMNS
+from betfair_results_downloader.market_status import STATUS_COLUMNS, STATUS_FILENAME
 from betfair_results_downloader.reporting.daily_dm_report import (
     apply_settlement_status,
     build_daily_dm_report_from_dataframe,
@@ -410,3 +410,70 @@ def test_redated_rows_keep_settled_date_local_consistent() -> None:
     row = final.iloc[0]
     assert row["settled_dt_local"].date() == row["settled_date_local"]
     assert str(row["settled_date_local"]) == "2026-06-06"
+
+
+def _write_results_dir(tmp_path, *, status_rows: list[dict]) -> None:
+    (tmp_path / ".cache").mkdir(parents=True)
+    (tmp_path / "cleared_orders_cleaned.csv").write_text(
+        "betId,marketId,eventTypeId,profit,settledDate\n"
+        "1,1.100,7,10.0,2026-06-06T02:00:00Z\n"  # today's race
+        "2,1.200,2,7.25,2026-06-06T01:33:27Z\n",  # outright, recent leg
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            _row("3", "1.200", 2, 100.0, "2025-04-01T10:00:00Z"),  # archived leg
+            _row("4", "1.900", 1, 999.0, "2025-04-01T10:00:00Z"),  # unrelated
+            _row("2", "1.200", 2, 7.25, "2026-06-06T01:33:27Z"),  # already held
+        ],
+        dtype=str,
+    ).to_csv(tmp_path / "cleared_orders_archive_2025.csv.gz", index=False)
+    _status_frame(*status_rows).to_csv(
+        tmp_path / ".cache" / STATUS_FILENAME, index=False
+    )
+
+
+def test_archived_legs_of_a_pending_market_count_towards_pending(tmp_path) -> None:
+    """
+    A market partially settled for longer than the archive window has its
+    early legs in the yearly archives, not the canonical. The pending amount
+    must still be the whole market.
+    """
+    from betfair_results_downloader.reporting.daily_dm_report import (
+        build_daily_dm_report_from_results_dir,
+    )
+
+    _write_results_dir(
+        tmp_path,
+        status_rows=[_status("1.200", "OPEN", first_pending="2025-04-02T00:00:00Z")],
+    )
+
+    report = build_daily_dm_report_from_results_dir(str(tmp_path), report_dt=REPORT_AT)
+
+    assert report.pending.markets == 1
+    assert report.pending.profit == 107.25, "archived leg included once"
+    assert report.day_to_date.total_profit == 10.0, "unrelated archived row ignored"
+
+
+def test_archived_legs_count_in_full_on_the_day_the_market_closes(tmp_path) -> None:
+    from betfair_results_downloader.reporting.daily_dm_report import (
+        build_daily_dm_report_from_results_dir,
+    )
+
+    _write_results_dir(
+        tmp_path,
+        status_rows=[
+            _status(
+                "1.200",
+                "CLOSED",
+                first_pending="2025-04-02T00:00:00Z",
+                closed_observed="2026-06-06T05:00:00Z",
+            )
+        ],
+    )
+
+    report = build_daily_dm_report_from_results_dir(str(tmp_path), report_dt=REPORT_AT)
+
+    assert report.day_to_date.total_profit == 117.25
+    assert ("Tennis", 107.25) in report.day_to_date.by_sport
+    assert report.pending.markets == 0

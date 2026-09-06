@@ -189,6 +189,37 @@ def save_market_status(df: pd.DataFrame, path: Path) -> None:
             tmp_path.unlink()
 
 
+CANONICAL_FILENAME = "cleared_orders_cleaned.csv"
+
+
+def load_canonical_market_dates(results_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    ``marketId`` and ``settledDate`` of the canonical on disk -- all the
+    recent-unknown seed needs -- for runs that have no in-memory canonical
+    because the download returned nothing. ``None`` when the file is absent
+    or unreadable (logged); the seed then simply waits for the next run.
+    """
+    path = Path(results_dir) / CANONICAL_FILENAME
+    if not path.exists():
+        return None
+    try:
+        return pd.read_csv(
+            path,
+            dtype=str,
+            keep_default_na=False,
+            usecols=["marketId", "settledDate"],
+        )
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Could not read %s for the market status seed (%s: %s); "
+            "unrecorded markets will be picked up on the next run.",
+            path.name,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 # -----------------------------
 # Betfair: listMarketBook
 # -----------------------------
