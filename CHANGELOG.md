@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.8.0] - 2026-09-06
+
+Per-market settlement status and an all-sports daily report (PRs #31, #32, #33).
+
 ### Added
 
 - **Per-market settlement status.** Betfair settles the losing runners of an outright/tournament market as they are eliminated, so `listClearedOrders` delivers "settled" bets for a market whose outcome is still open (the Men's US Open 2026 Winner market settled 14 lay bets over six timestamps while 22 runners were still active), and cleared orders carry no market status to tell the two cases apart. A new pipeline step (`market_status.py`, after the CSV write and before Azure publishing, in both `run` and `backfill`) asks `listMarketBook` about every market the download window touched, every market still recorded as pending, and every canonical market settled in the last 14 days with no record yet, and persists the observations to `<results_csv_dir>/.cache/market_settlement_status.csv`. Absent markets are recorded as CLOSED (open markets are always returned; closed ones age out of the book after a variable period), provisionally: they are re-checked for 48 hours so one dropped response row cannot permanently mark a live outright final. The first-run seed is capped at 2,000 markets per run. The step never fails a run; on error the run carries a ⚠️ warning and the report treats that window's markets as final until the next run re-checks.

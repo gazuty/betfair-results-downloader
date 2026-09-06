@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "betfair-results-downloader"
-version = "0.7.0"
+version = "0.8.0"
 description = "Download Betfair cleared orders, write canonical + snapshots, and optionally publish market-level results to Azure SQL."
 readme = "README.md"
 license = { text = "MIT" }
