@@ -1,5 +1,14 @@
 # Full Code Review — Betfair Results Downloader
 
+> **Status (2026-09-06).** Historical document, kept for the reasoning behind
+> the changes. Phases 1–5 of the remediation plan shipped in 0.7.0 (PR #13);
+> the follow-up PRs #14–#32 covered network robustness, disk preflight, Slack
+> retry, the local working set with a one-way backup, split-settlement Azure
+> aggregation, ODBC escaping, per-market settlement status and the all-sports
+> report. E1 (`ruff format --check`) and E6 (3.13 in the matrix, coverage) are
+> in CI. Still open: broadening the pinned ruff rule set (E0).
+
+
 **Date:** 2026-08-23
 **Scope:** Entire repository at `883edb1` — all source modules, scheduler package, installers, reporting, tests, CI, scripts, notebook, and documentation.
 **Baseline:** `ruff check .` clean · `pytest -q` 160/160 passing.
