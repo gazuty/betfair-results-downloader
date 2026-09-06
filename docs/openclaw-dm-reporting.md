@@ -202,7 +202,7 @@ That preserves a clean separation of concerns:
 ### Expected semantics
 
 - The `06:00` report is primarily valuable for the *week-to-date* and *yesterday* sections: it is the first full picture of the previous day.
-- The `06:00` *today* section may legitimately be `$0.00` if no horse or greyhound settlements exist by that point.
+- The `06:00` *today* section may legitimately be `$0.00` if nothing has settled since midnight Sydney time.
 - The `06:00` *today* section may also legitimately show an outright market sitting in the Pending section instead of a total — Betfair settling early legs of a still-open tournament is expected, not a bug.
 - The `19:35` report is expected to be the more meaningful day-level operational summary.
 

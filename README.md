@@ -11,7 +11,8 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **DM reporting** — repo-native week-to-date and day-to-date summary generation, printed for an external messenger or posted straight to Slack with `--post-slack`
+- **DM reporting** — week-to-date, yesterday and today profit across every sport, printed for an external messenger or posted straight to Slack with `--post-slack`
+- **Settlement status gating** — per-market `listMarketBook` status recorded on every run; partially settled outrights are held out of the report until Betfair closes the market
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
@@ -718,9 +719,9 @@ The canonical CSV is the source of truth. The optional Azure SQL channel consume
 
 ---
 
-## Roadmap: Scheduled Automatic Downloads
+## Scheduled Automatic Downloads — rollout history
 
-Automated daily downloads with gap detection, multi-window retry, and cross-platform installers. Rolling out across phased PRs. Each phase ships independently and documents its own additions here.
+Automated daily downloads with gap detection, multi-window retry, and a macOS installer shipped across the phased PRs below; the rollout is complete. The table is kept as a map from feature to commit.
 
 | Phase | PR | Status | Delivers |
 |---|---|---|---|
@@ -747,36 +748,48 @@ Full design document (architecture, config schema, safety gates, state model, er
 
 ```
 src/betfair_results_downloader/
-  downloader_core.py      # Betfair API calls, enrichment, chunked range download
+  __main__.py             # CLI entry point (auth-test, run, backfill, audit, schedule, dm-report)
+  downloader_core.py      # Betfair cleared-orders download, catalogue enrichment, CSV outputs, Azure prep
+  market_status.py        # Per-market settlement status (partial vs fully settled) via listMarketBook
+  betfair_net.py          # Transient-failure retry policy and request batching for Betfair calls
+  csv_utils.py            # Canonical CSV dedupe, numeric market/bet keys, atomic write
   azure_publish.py        # Azure SQL incremental sync plan + apply
   azure_common.py         # Shared Azure ODBC connection-string builder
-  csv_utils.py            # Canonical CSV dedupe + atomic write
-  market_status.py        # Per-market settlement status (partial vs fully settled) via listMarketBook
+  slack_notify.py         # Slack delivery with retry (dm-report --post-slack, run failure alerts)
+  backup.py               # One-way compressed backup to paths.backup_dir
   audit.py                # Settled-date gap analysis (backs the `audit` command)
   secrets.py              # Credentials resolver + validator
   config.py               # ScheduleConfig dataclass + event type constants
   paths.py                # Results/backup dir resolution (fail-loud, no guessing)
-  backup.py               # One-way compressed backup to paths.backup_dir
-  __main__.py             # CLI entry point (auth-test, run, backfill, audit, schedule, dm-report)
   scheduler/              # Scheduled-downloads package
     auth.py               # build_api_client() — cert-based login
     date_windows.py       # chunk_date_range() — safe API windowing
     gap_detector.py       # compute_backfill_window() — Azure/CSV/cold-start
     runner.py             # run_scheduled() / run_backfill() — headless pipeline
     state.py              # ScheduleState read/upsert, JSONL history, markers
+    time_semantics.py     # Scheduler-local vs UTC "today" resolution
     installers/           # Platform-specific scheduler installers
       launchd.py          # macOS LaunchAgent plist
-  reporting/              # DM report generation (IO, schema, daily report)
+  reporting/              # dm-report generation
+    daily_dm_report.py    # Windows, per-sport breakdown, settlement gating, text rendering
+    schema.py             # Cleared-orders normalisation + Betfair event-type → sport labels
+    io.py                 # Results CSV discovery and loading
 
+tests/                    # Pytest suite (see CONTRIBUTING.md)
+docs/
+  openclaw-dm-reporting.md          # dm-report design, windows, settlement gating, delivery
+  reviews/2026-08-23-full-code-review.md  # Historical full review and remediation plan
+scripts/                  # ScheduleState DDL scripts + dm-report shell wrapper
+notebooks/                # Original exploratory notebook (not used by the pipeline)
 secrets/
   credentials.template.json   # committed seed template
   credentials.json            # git-ignored; copy from the template
-  credentials.location.json   # optional pointer to an external credentials file
-
-tests/                    # Pytest suite
-scripts/                  # ScheduleState DDL scripts + DM report renderer
-outputs/                  # Enrichment cache + scheduler artifacts (git-ignored)
+  credentials.location.json   # git-ignored; optional pointer to an external credentials file
+outputs/                  # Scheduler artifacts: run_history.jsonl, success markers, launchd logs (git-ignored)
 ```
+
+Data files (canonical CSV, snapshots, archives, and the `.cache/` enrichment and
+settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 
 ---
 
@@ -787,6 +800,13 @@ outputs/                  # Enrichment cache + scheduler artifacts (git-ignored)
 - **Credentials not found** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
 - **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
 - **Azure publish silently skipped** — verify all four safety gates are open (see [Azure SQL Publishing](#azure-sql-publishing)).
+- **"⚠️ Market settlement status check failed" on a run** — `listMarketBook` was unreachable; the run still succeeded and the next run re-checks. Until then `dm-report` counts that window's markets as final (its pre-gating behaviour).
+
+### Reports
+
+- **A market sits in "Pending" for weeks** — expected for outrights (tournament winners, season markets): Betfair settles losers early and the market only closes at the final. Inspect `<results_csv_dir>/.cache/market_settlement_status.csv`; `status` OPEN with `activeRunners > 0` confirms it. The run log's "Oldest pending market first seen N day(s) ago" line tracks it.
+- **A sport line appears one day and not the next** — only sports with a settlement in the window get a line; Horses and Greyhounds are always shown.
+- **Yesterday differs between the 6:00 AM and 7:35 PM reports** — it should not; both cover the same closed day. A difference means a market closed in between and was counted on its close day, or a late download filled in yesterday's rows.
 
 ### Cert authentication
 
