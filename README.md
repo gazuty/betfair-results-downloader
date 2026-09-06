@@ -11,8 +11,8 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **DM reporting** — week-to-date, yesterday and today profit across every sport, printed for an external messenger or posted straight to Slack with `--post-slack`
-- **Settlement status gating** — per-market `listMarketBook` status recorded on every run; partially settled outrights are held out of the report until Betfair closes the market
+- **DM reporting** — week-to-date, yesterday and today profit across every sport, printed for an external messenger or posted straight to Slack with `--post-slack` *(all sports and Yesterday new in 0.8.0)*
+- **Settlement status gating** — per-market `listMarketBook` status recorded on every run; partially settled outrights are held out of the report until Betfair closes the market *(new in 0.8.0)*
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
