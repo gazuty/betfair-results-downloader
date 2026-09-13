@@ -464,17 +464,32 @@ def test_recent_seed_asks_for_the_full_spelling_of_a_damaged_id() -> None:
     assert got == ["1.251500100", "1.300"]
 
 
+def test_placeholder_rule_ignores_wins_too_small_to_be_charged() -> None:
+    """9 cents at 5.4% rounds to a 0.00 charge; that zero is final."""
+    assert cm.is_placeholder_commission("412.00", "0.00")
+    assert cm.is_placeholder_commission(0.11, 0)
+    assert not cm.is_placeholder_commission("0.09", "0.00")
+    assert not cm.is_placeholder_commission("0.10", "0.00")
+    assert not cm.is_placeholder_commission("-6.50", "0.00")
+    assert not cm.is_placeholder_commission("412.00", "22.00")
+    assert not cm.is_placeholder_commission("", "0.00")
+    assert not cm.is_placeholder_commission("412.00", "")
+    assert not cm.is_placeholder_commission(None, None)
+
+
 def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> None:
     """
     The status step failed while 1.100 was partially settled, so its 0.00
     placeholder was stored with no pending record; it closed before the
     next run and was CLOSED at first sight. Betfair charges on every win,
     so the zero is not final and the market is read again. A losing market
-    with zero commission is final.
+    with zero commission is final, and so is a win too small to be
+    charged (1.300).
     """
     canonical = _canonical(
         ("1.100", "2026-09-12T10:00:00Z"),
         ("1.200", "2026-09-12T10:00:00Z"),
+        ("1.300", "2026-09-12T10:00:00Z"),
     )
     store = _commission_frame(
         {
@@ -486,6 +501,12 @@ def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> N
         {
             "marketId": "1.200",
             "grossProfit": "-6.50",
+            "commission": "0.00",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+        {
+            "marketId": "1.300",
+            "grossProfit": "0.09",
             "commission": "0.00",
             "fetchedUtc": "2026-09-12T12:00:00Z",
         },

@@ -193,11 +193,14 @@ def test_zero_commission_on_a_winning_market_is_a_placeholder() -> None:
         [
             _row("1", "1.100", 7, 412.0, "2026-06-06T02:00:00Z"),
             _row("2", "1.200", 7, -6.5, "2026-06-06T02:00:00Z"),
+            _row("3", "1.300", 7, 0.09, "2026-06-06T02:00:00Z"),
         ]
     )
     store = _commission_frame(
         _commission("1.100", "0.00", gross="412.00"),
         _commission("1.200", "0.00", gross="-6.50"),
+        # A 9-cent win: 5.4% of it rounds to 0.00, so that zero is final.
+        _commission("1.300", "0.00", gross="0.09"),
     )
 
     report = build_daily_dm_report_from_dataframe(

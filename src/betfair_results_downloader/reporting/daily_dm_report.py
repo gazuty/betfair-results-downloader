@@ -9,7 +9,11 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from ..commission import COMMISSION_FILENAME, load_market_commission
+from ..commission import (
+    COMMISSION_FILENAME,
+    is_placeholder_commission,
+    load_market_commission,
+)
 from ..csv_utils import decimal_key
 from ..market_status import (
     STATUS_FILENAME,
@@ -328,8 +332,9 @@ def market_commission_frame(
     (see :func:`apply_settlement_status`), so its commission follows them.
 
     A market is ``unknown`` when the store has no row for it, the amount
-    is unparseable, or the row shows zero commission against a positive
-    gross (a row with no marketId at all is always in this case); when it was ever seen pending and the row was read
+    is unparseable, or the row shows zero commission against a win large
+    enough to be charged (a row with no marketId at all is always in this
+    case); when it was ever seen pending and the row was read
     before the close was observed (a partially settled market reports 0.0
     until it closes); when the store row predates a leg the canonical
     already holds (a stale read); or when the store row's settlement is
@@ -375,12 +380,11 @@ def market_commission_frame(
         for key, amount, won, ts, settled in zip(
             store["_key"], amounts, gross, read_at, settled_at
         ):
-            # Betfair charges on every winning market, so a zero against a
-            # positive gross is the pre-close placeholder of a market the
-            # status step never saw pending (see commission); the seed
-            # re-reads it, and until then it is not a figure.
-            placeholder = amount == 0 and pd.notna(won) and won > 0
-            if pd.notna(amount) and not placeholder:
+            # A zero against a win Betfair must charge on is the pre-close
+            # placeholder of a market the status step never saw pending
+            # (see commission); the seed re-reads it, and until then it is
+            # not a figure. Wins too small to be charged keep their zero.
+            if pd.notna(amount) and not is_placeholder_commission(won, amount):
                 commission[key] = float(amount)
             if pd.notna(ts):
                 fetched[key] = ts
