@@ -59,10 +59,20 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
     assert "Friday 6 June, 9:00 PM" not in report.text
     assert "Saturday 6 June, 9:00 PM" in report.text
     assert "Week to date (since Sunday 12:00 AM)" in report.text
-    assert "• Total profit: $1,079.00" in report.text
-    assert "• Horses: $100.00" in report.text
-    assert "• Greyhounds: -$20.00" in report.text
-    assert "• Soccer: $999.00" in report.text
+    assert (
+        "• Total: gross $1,079.00, commission $0.00 (0.0%), net $1,079.00"
+        in report.text
+    )
+    assert (
+        "• Horses: gross $100.00, commission $0.00 (0.0%), net $100.00" in report.text
+    )
+    assert (
+        "• Greyhounds: gross -$20.00, commission $0.00 (n/a), net -$20.00"
+        in report.text
+    )
+    assert (
+        "• Soccer: gross $999.00, commission $0.00 (0.0%), net $999.00" in report.text
+    )
     assert "Today (since 12:00 AM)" in report.text
 
 
@@ -111,10 +121,10 @@ def test_daily_dm_report_counts_other_sports_and_keeps_racing_lines() -> None:
     assert report.day_to_date.total_profit == 75.0
     assert report.day_to_date.horses_profit == 0.0
     assert report.day_to_date.greyhounds_profit == 0.0
-    assert "• Total profit: $75.00" in report.text
-    assert "• Horses: $0.00" in report.text
-    assert "• Greyhounds: $0.00" in report.text
-    assert "• Soccer: $75.00" in report.text
+    assert "• Total: gross $75.00, commission $0.00 (0.0%), net $75.00" in report.text
+    assert "• Horses: gross $0.00, commission $0.00 (n/a), net $0.00" in report.text
+    assert "• Greyhounds: gross $0.00, commission $0.00 (n/a), net $0.00" in report.text
+    assert "• Soccer: gross $75.00, commission $0.00 (0.0%), net $75.00" in report.text
 
 
 def test_daily_dm_report_heading_is_portable_and_unpadded() -> None:
@@ -208,9 +218,16 @@ def test_daily_dm_report_yesterday_is_the_full_previous_local_day() -> None:
     assert "Yesterday (Friday 5 June)" in text
     assert text.index("Week to date") < text.index("Yesterday") < text.index("Today")
     yesterday_block = text[text.index("Yesterday") : text.index("Today")]
-    assert "• Total profit: $15.00" in yesterday_block
-    assert "• Horses: $10.00" in yesterday_block
-    assert "• Greyhounds: $5.00" in yesterday_block
+    assert (
+        "• Total: gross $15.00, commission $0.00 (0.0%), net $15.00" in yesterday_block
+    )
+    assert (
+        "• Horses: gross $10.00, commission $0.00 (0.0%), net $10.00" in yesterday_block
+    )
+    assert (
+        "• Greyhounds: gross $5.00, commission $0.00 (0.0%), net $5.00"
+        in yesterday_block
+    )
 
 
 def test_daily_dm_report_yesterday_ignores_the_week_boundary() -> None:

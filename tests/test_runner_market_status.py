@@ -108,6 +108,12 @@ def test_status_file_is_written_from_the_same_logged_in_client(tmp_path: Path) -
         _book("1.234", "CLOSED", 0),
         _book("1.247612197", "OPEN", 22),
     ]
+    # The commission step shares the client; an empty grouped response keeps
+    # this test about the status file alone.
+    client.betting.list_cleared_orders.return_value = {
+        "clearedOrders": [],
+        "moreAvailable": False,
+    }
     df = _window()
     p1, p2, p3, p4 = _pipeline_patches(tmp_path, df, client)
 

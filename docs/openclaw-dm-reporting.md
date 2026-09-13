@@ -35,10 +35,18 @@ For a report run at a given Sydney-local timestamp:
 - **Week to date** starts at the most recent Sunday at `12:00 AM`
 - **Yesterday** is the full previous calendar day, `12:00 AM` to `12:00 AM`
 - **Today** starts at the current day at `12:00 AM`
+- **Month to date** starts at `12:00 AM` on the 1st of the current month
+- **Year to date** starts at `12:00 AM` on 1 January
 
-Week to date and Today end at the report timestamp. Yesterday is a closed
-day, so the 6:00 AM and 7:35 PM reports show the same figures for it, and it
-ignores the week boundary: on a Sunday it is the previous week's Saturday.
+Week to date, Today, Month to date and Year to date end at the report
+timestamp. Year to date also reads the yearly archives
+(`cleared_orders_archive_YYYY.csv.gz`) for rows settled since 1 January
+that `user.canonical_archive_months` has already moved out of the rolling
+canonical, so a short archive window does not understate it. Yesterday is a closed day, so the 6:00 AM and 7:35 PM reports show
+the same figures for it, and it ignores the week boundary: on a Sunday it is
+the previous week's Saturday. Month to date and Year to date exist because
+commission is only meaningful summed over a period, not per bet — see
+[Commission](#commission) below.
 
 All sports are included. Each breakdown always shows **Horses** and
 **Greyhounds** (even at `$0.00`), followed by one line per other sport that
@@ -113,6 +121,78 @@ PATH>/.cache/market_settlement_status.csv`. If that file exists but can't be
 read, the report logs a warning and treats it as absent (same
 degrade-to-old-behaviour rule).
 
+## Commission
+
+The per-bet rows the downloader stores carry no commission at all — Betfair
+charges it per market, on the net winnings of the whole market, so there is
+no per-bet figure to show. `commission.py` reads `listClearedOrders` with
+`groupBy=MARKET` instead, which returns one row per market with the gross
+profit (equal to the sum of the per-bet profits) and the commission charged
+on that market (`0.0` on a losing or still-pending market). The pipeline
+step (run after the settlement-status step and before Azure publishing, in
+both `run` and `backfill`, on every run including an empty download) reads
+that grouped endpoint for the run's window and persists the observations to
+`<results_csv_dir>/.cache/market_commission.csv`.
+
+The grouped row sits at the market's *latest settled leg*, so `dm-report`
+attributes a market's whole commission to the window containing that leg,
+using the `settledDateUtc` the store recorded rather than the latest
+canonical row: a report rendered for an earlier time (`--at`) has dropped
+the rows after its cutoff, and a figure read after the cutoff is reported
+as unknown for that time instead of landing on an earlier leg.
+Gross stays per bet row, exactly as before: a racing market whose legs
+straddle midnight has yesterday's gross in Yesterday and today's in Today,
+with the commission in Today. A market
+that is still only partially settled reports commission `0.0` until it
+closes — that reading is a placeholder, not the answer — so every market the
+status file has ever seen pending is asked about again by explicit id until
+a read is taken after the observed close. Grouped rows are available for
+about a year back, the same depth as the per-bet rows, so
+`backfill-commission` can fill the whole canonical after an upgrade.
+
+Commission rates vary by market and are not recoverable once a market has
+left the catalogue, so the store only ever holds amounts; `dm-report`
+derives the effective percentage at the sport-and-period level, never per
+market. A window's commission percentage is commission divided by gross
+profit for that sport and period, shown as `n/a` when gross is zero or a
+loss — Betfair charges commission on winning markets only, so the ratio has
+no meaning for a losing period — and also when any market in that line is
+commission unknown, since a rate over a partly missing numerator would read
+as real. Over a single day the ratio is also distorted by markets whose legs
+straddle midnight (gross is per leg, commission lands with the latest leg);
+Month to date and Year to date are where it settles to the effective rate.
+
+A window the step missed (Betfair unreachable at 06:00, say) heals itself:
+on every run the step also reads, by explicit id, every canonical market
+settled in the last fortnight that has no usable row in the store, newest
+first and capped at 2,000 per run. A stored row that predates a leg the
+canonical holds counts as unread for that purpose (the step failed when
+that leg settled), and so does a row that shows a winning market with zero
+commission: Betfair charges on
+every winning market, so that reading is the pre-close placeholder of a
+market the status step had not yet recorded as pending (it had failed that
+run), and it is read again until the final figure appears.
+`backfill-commission` does the same for any range at once.
+
+A market counts as **commission unknown** when the store has no row for it;
+when — for a market the status file ever saw pending — its row was read
+before the close was observed (a stale `0.0` placeholder); when the store
+row predates a leg the canonical already holds; when the row shows zero
+commission against a positive gross (Betfair charges on every winning
+market, so that is a pre-close placeholder); or when the store row's
+settlement is after the report's `--at` cutoff. Unknown markets
+contribute `$0.00` to their section's commission and net, and the section
+adds a line saying how many markets are unknown:
+
+```text
+• ⚠️ Commission unknown for 2 markets (counted as $0.00)
+```
+
+`dm-report --csv PATH` looks for the commission store at `<directory of
+PATH>/.cache/market_commission.csv`. If that file is missing or can't be
+read, every market is reported commission unknown rather than
+commission-free.
+
 ## CLI
 
 Render the report body from the configured results directory:
@@ -137,6 +217,13 @@ If `--at` is provided without a timezone offset, it is interpreted as `Australia
 
 When `--csv` is not provided, `dm-report` prefers the exact canonical filename `cleared_orders_cleaned.csv` when present. If that file is absent, it falls back to the best discovered cleared-orders CSV in the results directory.
 
+To backfill the commission store itself (e.g. after upgrading, or to fill a
+gap) without touching bets or the canonical:
+
+```bash
+python -m betfair_results_downloader backfill-commission --from YYYY-MM-DD --to YYYY-MM-DD
+```
+
 ## Example output
 
 ```text
@@ -145,22 +232,36 @@ Betfair results update
 Saturday 6 June, 6:00 AM
 
 Week to date (since Sunday 12:00 AM)
-• Total profit: $412.35
-• Horses: $355.10
-• Greyhounds: $57.25
-• Tennis: $12.25
-• Soccer: -$12.25
+• Total: gross $412.35, commission $32.51 (7.9%), net $379.84
+• Horses: gross $355.10, commission $28.41 (8.0%), net $326.69
+• Greyhounds: gross $57.25, commission $3.44 (6.0%), net $53.81
+• Tennis: gross $12.25, commission $0.66 (5.4%), net $11.59
+• Soccer: gross -$12.25, commission $0.00 (n/a), net -$12.25
 
 Yesterday (Friday 5 June)
-• Total profit: $121.80
-• Horses: $97.30
-• Greyhounds: $12.25
-• Tennis: $12.25
+• Total: gross $121.80, commission $9.18 (7.5%), net $112.62
+• Horses: gross $97.30, commission $7.78 (8.0%), net $89.52
+• Greyhounds: gross $12.25, commission $0.74 (6.0%), net $11.51
+• Tennis: gross $12.25, commission $0.66 (5.4%), net $11.59
 
 Today (since 12:00 AM)
-• Total profit: $48.90
-• Horses: $36.40
-• Greyhounds: $12.50
+• Total: gross $48.90, commission $3.66 (7.5%), net $45.24
+• Horses: gross $36.40, commission $2.91 (8.0%), net $33.49
+• Greyhounds: gross $12.50, commission $0.75 (6.0%), net $11.75
+
+Month to date (since Monday 1 June)
+• Total: gross $1,845.60, commission $138.79 (n/a), net $1,706.81
+• Horses: gross $1,502.20, commission $120.18 (8.0%), net $1,382.02
+• Greyhounds: gross $310.15, commission $18.61 (6.0%), net $291.54
+• Golf: gross $33.25, commission $0.00 (n/a), net $33.25
+• ⚠️ Commission unknown for 1 market (counted as $0.00)
+
+Year to date (since Thursday 1 January)
+• Total: gross $21,960.85, commission $1,701.49 (7.7%), net $20,259.36
+• Horses: gross $18,960.40, commission $1,516.83 (8.0%), net $17,443.57
+• Greyhounds: gross $2,910.70, commission $174.64 (6.0%), net $2,736.06
+• Tennis: gross $185.50, commission $10.02 (5.4%), net $175.48
+• Soccer: gross -$95.75, commission $0.00 (n/a), net -$95.75
 
 Pending (partially settled, not counted above)
 • 2 markets, $17.40 settled so far — each counts in full on the day it closes

@@ -94,11 +94,14 @@ DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 # response comes back OPEN and the merge records it honestly.
 DEFAULT_ABSENT_RECHECK_HOURS = 48
 
-# CLOSED observations older than this are pruned. Nothing reads them: the
-# report looks back one week, and a market cannot un-close. Pending rows
-# are never pruned -- dropping one would silently count a live outright as
-# final -- but the run message names the oldest so a stuck row is visible.
-DEFAULT_KEEP_CLOSED_DAYS = 90
+# CLOSED observations older than this are pruned. The report's Year to date
+# section reads a full year back, and it needs a closed outright's
+# firstPendingUtc/closedObservedUtc for that long: to keep the market's
+# legs on its close day, and to tell a commission figure read before the
+# close from one read after it (see commission). Pending rows are never
+# pruned -- dropping one would silently count a live outright as final --
+# but the run message names the oldest so a stuck row is visible.
+DEFAULT_KEEP_CLOSED_DAYS = 400
 
 _ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
 
