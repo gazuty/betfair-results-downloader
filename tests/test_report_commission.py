@@ -151,6 +151,36 @@ def test_markets_without_a_commission_row_are_counted_and_announced() -> None:
     assert "• Total: gross $35.00, commission $0.70 (n/a), net $34.30" in report.text
 
 
+def test_rows_without_a_market_id_are_commission_unknown() -> None:
+    """
+    A row with a blank marketId counts in gross but can never match the
+    store, so it must show as unknown rather than as a commission-free win.
+    """
+    df = pd.DataFrame(
+        [
+            _row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),
+            _row("2", "", 7, 100.0, "2026-06-06T02:00:00Z"),
+            _row("3", None, 2, 5.0, "2026-06-06T02:00:00Z"),
+        ]
+    )
+    store = _commission_frame(_commission("1.100", "0.70"))
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=REPORT_AT, market_commission=store
+    )
+
+    today = report.day_to_date
+    assert today.total.gross == 115.0
+    assert today.total.commission == 0.7
+    assert today.total.unknown_markets == 2
+    assert today.total.commission_pct is None
+    sports = _by_label(today.by_sport)
+    assert (
+        sports["Horses"].unknown_markets == 1 and sports["Tennis"].unknown_markets == 1
+    )
+    assert "• ⚠️ Commission unknown for 2 markets (counted as $0.00)" in report.text
+
+
 def test_no_store_at_all_marks_every_market_unknown() -> None:
     df = pd.DataFrame([_row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z")])
 

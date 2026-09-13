@@ -328,7 +328,7 @@ def market_commission_frame(
     (see :func:`apply_settlement_status`), so its commission follows them.
 
     A market is ``unknown`` when the store has no row for it or the amount
-    is unparseable; when it was ever seen pending and the row was read
+    is unparseable (a row with no marketId at all is always in this case); when it was ever seen pending and the row was read
     before the close was observed (a partially settled market reports 0.0
     until it closes); when the store row predates a leg the canonical
     already holds (a stale read); or when the store row's settlement is
@@ -339,10 +339,15 @@ def market_commission_frame(
     columns = ["_key", "sport", "last_settled_local", "commission", "unknown"]
     if final.empty or "marketId" not in final.columns:
         return pd.DataFrame(columns=columns)
-    rows = final.loc[final["marketId"].fillna("").astype(str).str.strip() != ""]
-    if rows.empty:
-        return pd.DataFrame(columns=columns)
-    keyed = rows.assign(_key=rows["marketId"].map(decimal_key))
+    # A row with no marketId still counts in gross but can never match a
+    # store row; each such row stands as its own market so it is reported
+    # commission unknown rather than silently commission-free.
+    ids = final["marketId"].fillna("").astype(str).str.strip()
+    keys = [
+        decimal_key(mid) if mid else f"blank:{pos}"
+        for pos, mid in enumerate(ids.tolist())
+    ]
+    keyed = final.assign(_key=keys)
     markets = (
         keyed.groupby("_key", sort=False)
         .agg(sport=("sport", "first"), rows_latest=("settled_dt_local", "max"))
