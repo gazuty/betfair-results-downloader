@@ -93,12 +93,36 @@ DEFAULT_RECENT_DAYS = 14
 # picked up on later runs, or all at once by ``backfill-commission``.
 DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 
+# A winning market whose stored commission is zero is a pre-close
+# placeholder (Betfair charges on every win), unless the win is so small
+# that the charge rounds to nothing: 9 cents at 5.4% is 0.0049, reported
+# as 0.00. Above this gross a zero cannot be a genuine charge. Verified on
+# the live store on 2026-09-13: of 217 winning markets with zero
+# commission, 212 had gross at or below 9 cents and the other 5 were the
+# open outrights.
+PLACEHOLDER_MIN_GROSS = 0.10
+
 # The store is never pruned: the report's Year to date section reads a
 # full year of it, and a year of markets is a few megabytes of CSV.
 
 # Ids per explicit re-query call. Only ever-pending markets are re-queried
 # (a handful at a time), so this is a ceiling, not a tuning knob.
 DEFAULT_REQUERY_BATCH = 50
+
+
+def is_placeholder_commission(gross: Any, commission: Any) -> bool:
+    """
+    True when a stored zero commission cannot be the final figure: the
+    market won more than :data:`PLACEHOLDER_MIN_GROSS`, so Betfair must
+    charge on it. Non-numeric inputs are never a placeholder; a missing
+    amount is reported as unknown by other means.
+    """
+    try:
+        if pd.isna(gross) or pd.isna(commission):
+            return False
+        return float(commission) == 0.0 and float(gross) > PLACEHOLDER_MIN_GROSS
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -389,8 +413,9 @@ def select_recent_unknown_markets(
 
     A row that predates a leg the canonical holds is not usable: the step
     failed when that leg settled, and the report treats the row as stale.
-    Nor is a row showing a winning market with zero commission. Betfair charges on every winning market, so that reading is its
-    pre-close placeholder -- stored when the status step had failed and so
+    Nor is a row showing a win above :data:`PLACEHOLDER_MIN_GROSS` with
+    zero commission. Betfair charges on every such win, so that reading is
+    its pre-close placeholder -- stored when the status step had failed and so
     had not yet recorded the market as pending. If the market then closed
     before the next run, the status file only ever saw it CLOSED and the
     ever-pending rule never fires; re-reading such rows for a fortnight
@@ -417,7 +442,7 @@ def select_recent_unknown_markets(
         ):
             if pd.isna(amount):
                 continue
-            if amount == 0 and pd.notna(won) and won > 0:
+            if is_placeholder_commission(won, amount):
                 continue  # placeholder on a winning market: read it again
             known[decimal_key(_cell(mid))] = upto
 
