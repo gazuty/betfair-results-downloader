@@ -429,24 +429,26 @@ def select_recent_unknown_markets(
     recent = recent[recent["marketId"] != ""]
     if recent.empty:
         return []
+    # One market per numeric key, keeping the longest spelling: the
+    # canonical can hold a float-damaged id next to the full one, and
+    # Betfair cannot resolve the damaged form in an explicit query.
+    recent["_key"] = recent["marketId"].map(decimal_key)
+    recent["_len"] = recent["marketId"].str.len()
+    spelling = recent.sort_values("_len").groupby("_key", sort=False)["marketId"].last()
     latest = (
-        recent.groupby("marketId", sort=False)["_settled"]
+        recent.groupby("_key", sort=False)["_settled"]
         .max()
         .sort_values(ascending=False)
     )
     result: list[str] = []
-    seen: set[str] = set()
-    for mid, newest_leg in latest.items():
-        key = decimal_key(mid)
-        if key in seen:
-            continue
+    for key, newest_leg in latest.items():
+        mid = spelling[key]
         if key in known:
             upto = known[key]
             # A row without a settlement cannot be judged; treating it as
             # stale would re-read it on every run for good.
             if pd.isna(upto) or upto >= newest_leg:
                 continue  # the row covers every leg the canonical holds
-        seen.add(key)
         result.append(mid)
         if len(result) >= max_markets:
             break

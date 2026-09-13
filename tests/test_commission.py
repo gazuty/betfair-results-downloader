@@ -445,6 +445,25 @@ def test_update_reads_the_window_and_requeries_pending_markets(tmp_path: Path) -
     assert [("market_ids" in c) for c in client.betting.calls] == [False, True]
 
 
+def test_recent_seed_asks_for_the_full_spelling_of_a_damaged_id() -> None:
+    """
+    The canonical holds a float-damaged id beside the full one, the damaged
+    row being the newer leg. Betfair cannot resolve the damaged form, so
+    the seed must send the full spelling, once, at the newer leg's rank.
+    """
+    canonical = _canonical(
+        ("1.2515001", "2026-09-12T10:00:00Z"),
+        ("1.251500100", "2026-09-11T10:00:00Z"),
+        ("1.300", "2026-09-11T20:00:00Z"),
+    )
+
+    got = cm.select_recent_unknown_markets(
+        canonical, cm.empty_commission_frame(), now=NOW
+    )
+
+    assert got == ["1.251500100", "1.300"]
+
+
 def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> None:
     """
     The status step failed while 1.100 was partially settled, so its 0.00
