@@ -250,6 +250,99 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_backfill_commission(args: argparse.Namespace) -> int:
+    """
+    One-off read of per-market commission for an explicit settled-date range.
+
+    Reads grouped-by-market cleared orders for [--from, --to] and upserts
+    them into ``<results_csv_dir>/.cache/market_commission.csv``. Touches
+    nothing else: no bets are downloaded, the canonical is not rewritten,
+    and Azure is not involved.
+
+    Exit codes: 0=success, 1=failure, 2=bad arguments or configuration.
+    """
+    import logging
+    from datetime import date, datetime, timedelta, timezone
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    if not args.from_date or not args.to_date:
+        print("FAIL: --from and --to are required for backfill-commission.")
+        return 2
+    try:
+        from_date = date.fromisoformat(args.from_date)
+        to_date = date.fromisoformat(args.to_date)
+    except ValueError as e:
+        print(f"FAIL: invalid date format (expected YYYY-MM-DD): {e}")
+        return 2
+    if from_date > to_date:
+        print(f"FAIL: --from ({from_date}) is after --to ({to_date}).")
+        return 2
+
+    creds, schedule_cfg = _load_creds_and_schedule(validate=True)
+
+    from .commission import (
+        DEFAULT_REQUERY_LOOKBACK_DAYS,
+        update_market_commission,
+    )
+    from .downloader_core import resolve_enrichment_cache_dir
+    from .market_status import (
+        load_canonical_market_dates,
+        load_market_status,
+        resolve_status_path,
+    )
+    from .paths import resolve_results_dir
+    from .scheduler.auth import build_api_client
+
+    if from_date < date.today() - timedelta(days=DEFAULT_REQUERY_LOOKBACK_DAYS):
+        # Betfair serves grouped rows for about a year; an older range comes
+        # back empty and would otherwise look like a bet-free period.
+        print(
+            f"WARNING: --from {from_date} is more than "
+            f"{DEFAULT_REQUERY_LOOKBACK_DAYS} days ago; Betfair does not serve "
+            f"grouped cleared orders that far back, so those days will read as empty."
+        )
+
+    from_dt = datetime(
+        from_date.year, from_date.month, from_date.day, tzinfo=timezone.utc
+    )
+    end_day = to_date + timedelta(days=1)
+    to_dt = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
+    results_dir = resolve_results_dir(creds)
+    cache_dir = resolve_enrichment_cache_dir(results_dir)
+
+    try:
+        client = build_api_client(creds.get("betfair") or {})
+    except Exception as exc:
+        print(f"FAIL: Betfair authentication failed: {exc}")
+        return 1
+    try:
+        result = update_market_commission(
+            client=client,
+            cache_dir=cache_dir,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            df_status=load_market_status(resolve_status_path(cache_dir)),
+            df_canonical=load_canonical_market_dates(results_dir),
+            chunk_days=schedule_cfg.chunk_days,
+            status_cb=print,
+        )
+    except Exception as exc:
+        print(f"FAIL: commission backfill raised {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+    print(f"OK: {result.message}")
+    return 0
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     """
     Report missing settled-date gaps in the canonical CSV.
@@ -634,6 +727,22 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         help="Inclusive end date (required)",
     )
+    bc = sub.add_parser(
+        "backfill-commission",
+        help="Read per-market commission for an explicit settled-date range into the commission store.",
+    )
+    bc.add_argument(
+        "--from",
+        dest="from_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive start date (required)",
+    )
+    bc.add_argument(
+        "--to",
+        dest="to_date",
+        metavar="YYYY-MM-DD",
+        help="Inclusive end date (required)",
+    )
     au = sub.add_parser(
         "audit",
         help="Report missing settled-date gaps in the canonical CSV.",
@@ -704,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_run(args)
     if args.command == "backfill":
         return _cmd_backfill(args)
+    if args.command == "backfill-commission":
+        return _cmd_backfill_commission(args)
     if args.command == "audit":
         return _cmd_audit(args)
     if args.command == "dm-report":

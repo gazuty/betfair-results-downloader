@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from ..commission import COMMISSION_FILENAME, load_market_commission
 from ..csv_utils import decimal_key
 from ..market_status import (
     STATUS_FILENAME,
@@ -29,13 +30,63 @@ ALWAYS_SHOWN_SPORTS: tuple[str, ...] = (HORSES_LABEL, GREYHOUNDS_LABEL)
 
 
 @dataclass(frozen=True)
+class SportFigures:
+    """Gross, commission and net for one sport (or the total) in a window."""
+
+    label: str
+    gross: float
+    commission: float
+    # Markets in the window with no trustworthy commission figure: no row in
+    # the commission store, or a row read before the market closed. Their
+    # commission counts as $0.00 and the section says so.
+    unknown_markets: int = 0
+
+    @property
+    def net(self) -> float:
+        return self.gross - self.commission
+
+    @property
+    def commission_pct(self) -> float | None:
+        """
+        Commission as a percentage of gross profit for the window. ``None``
+        when gross is zero or a loss (Betfair charges on winning markets
+        only, so the ratio has no meaning for a losing period) and when any
+        market's commission is unknown (a ratio over a partly missing
+        numerator would read as a real rate). Over a day the ratio is also
+        distorted by markets whose legs straddle midnight, since gross is
+        per leg and commission lands with the latest leg; the month and
+        year sections are where it settles to the effective rate.
+        """
+        if self.gross <= 0 or self.unknown_markets:
+            return None
+        return 100.0 * self.commission / self.gross
+
+
+@dataclass(frozen=True)
 class ProfitBreakdown:
-    total_profit: float
-    horses_profit: float
-    greyhounds_profit: float
-    # (sport label, profit) in display order: the always-shown sports first,
-    # then every other sport with rows in the window by absolute profit.
-    by_sport: tuple[tuple[str, float], ...] = ()
+    total: SportFigures
+    # Display order: the always-shown sports first, then every other sport
+    # with rows in the window by absolute gross profit.
+    by_sport: tuple[SportFigures, ...] = ()
+
+    @property
+    def total_profit(self) -> float:
+        """Gross profit before commission, as the report showed until 0.8.0."""
+        return self.total.gross
+
+    @property
+    def horses_profit(self) -> float:
+        return self._gross_for(HORSES_LABEL)
+
+    @property
+    def greyhounds_profit(self) -> float:
+        return self._gross_for(GREYHOUNDS_LABEL)
+
+    def _gross_for(self, label: str) -> float:
+        for figures in self.by_sport:
+            if figures.label == label:
+                return figures.gross
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +112,12 @@ class DailyDmReport:
     # Independent of the week: on a Sunday it is last week's Saturday.
     yesterday_start: datetime | None = None
     yesterday: ProfitBreakdown | None = None
+    # Commission is only meaningful over a period, so the report also shows
+    # the calendar month and year to date (Sydney time).
+    month_start: datetime | None = None
+    month_to_date: ProfitBreakdown | None = None
+    year_start: datetime | None = None
+    year_to_date: ProfitBreakdown | None = None
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -93,9 +150,27 @@ def _format_age(hours: float) -> str:
     return f"{int(hours // 24)} days"
 
 
+def _format_pct(pct: float | None) -> str:
+    return "n/a" if pct is None else f"{pct:.1f}%"
+
+
+def _format_figures_line(figures: SportFigures) -> str:
+    return (
+        f"• {figures.label}: gross {_money(figures.gross)}, "
+        f"commission {_money(figures.commission)} "
+        f"({_format_pct(figures.commission_pct)}), net {_money(figures.net)}"
+    )
+
+
 def _format_breakdown_lines(breakdown: ProfitBreakdown) -> list[str]:
-    lines = [f"• Total profit: {_money(breakdown.total_profit)}"]
-    lines.extend(f"• {label}: {_money(profit)}" for label, profit in breakdown.by_sport)
+    lines = [_format_figures_line(breakdown.total)]
+    lines.extend(_format_figures_line(figures) for figures in breakdown.by_sport)
+    unknown = breakdown.total.unknown_markets
+    if unknown:
+        noun = "market" if unknown == 1 else "markets"
+        # Said out loud rather than folded into the total: a missing store
+        # or a pre-close placeholder would otherwise read as commission-free.
+        lines.append(f"• ⚠️ Commission unknown for {unknown} {noun} (counted as $0.00)")
     return lines
 
 
@@ -112,6 +187,10 @@ def _format_report(
     pending: PendingSummary | None = None,
     yesterday: ProfitBreakdown | None = None,
     yesterday_start: datetime | None = None,
+    month_to_date: ProfitBreakdown | None = None,
+    month_start: datetime | None = None,
+    year_to_date: ProfitBreakdown | None = None,
+    year_start: datetime | None = None,
 ) -> str:
     heading = _format_heading(report_dt)
     lines = [
@@ -141,6 +220,12 @@ def _format_report(
         lines += _format_breakdown_lines(yesterday)
     lines += ["", "Today (since 12:00 AM)"]
     lines += _format_breakdown_lines(day_to_date)
+    if month_to_date is not None and month_start is not None:
+        lines += ["", f"Month to date (since {_format_day_name(month_start)})"]
+        lines += _format_breakdown_lines(month_to_date)
+    if year_to_date is not None and year_start is not None:
+        lines += ["", f"Year to date (since {_format_day_name(year_start)})"]
+        lines += _format_breakdown_lines(year_to_date)
 
     pending = pending or PendingSummary(markets=0, profit=0.0)
     lines += ["", "Pending (partially settled, not counted above)"]
@@ -172,37 +257,131 @@ def _most_recent_sunday_start(report_dt: datetime) -> datetime:
     return day_start - timedelta(days=days_since_sunday)
 
 
-def _profit_breakdown(df: pd.DataFrame) -> ProfitBreakdown:
+def _empty_breakdown() -> ProfitBreakdown:
+    return ProfitBreakdown(
+        total=SportFigures("Total", 0.0, 0.0),
+        by_sport=tuple(SportFigures(label, 0.0, 0.0) for label in ALWAYS_SHOWN_SPORTS),
+    )
+
+
+def _profit_breakdown(df: pd.DataFrame, markets: pd.DataFrame) -> ProfitBreakdown:
+    """
+    Gross from the bet rows in the window, commission from the markets whose
+    latest leg falls in it (see :func:`market_commission_frame`).
+    """
     if df.empty:
-        return ProfitBreakdown(
-            total_profit=0.0,
-            horses_profit=0.0,
-            greyhounds_profit=0.0,
-            by_sport=tuple((label, 0.0) for label in ALWAYS_SHOWN_SPORTS),
+        return _empty_breakdown()
+
+    gross_by_sport = df.groupby("sport", sort=False)["profit"].sum()
+    if markets.empty:
+        commission_by_sport = pd.Series(dtype=float)
+        unknown_by_sport = pd.Series(dtype=int)
+    else:
+        commission_by_sport = markets.groupby("sport", sort=False)["commission"].sum()
+        unknown_by_sport = markets.groupby("sport", sort=False)["unknown"].sum()
+
+    def figures(label: str) -> SportFigures:
+        return SportFigures(
+            label=label,
+            gross=float(gross_by_sport.get(label, 0.0)),
+            commission=float(commission_by_sport.get(label, 0.0)),
+            unknown_markets=int(unknown_by_sport.get(label, 0)),
         )
 
-    total_profit = float(df["profit"].sum())
-    per_sport = df.groupby("sport", sort=False)["profit"].sum()
-    horses_profit = float(per_sport.get(HORSES_LABEL, 0.0))
-    greyhounds_profit = float(per_sport.get(GREYHOUNDS_LABEL, 0.0))
-
-    by_sport: list[tuple[str, float]] = [
-        (label, float(per_sport.get(label, 0.0))) for label in ALWAYS_SHOWN_SPORTS
-    ]
+    by_sport: list[SportFigures] = [figures(label) for label in ALWAYS_SHOWN_SPORTS]
     others = [
-        (str(label), float(profit))
-        for label, profit in per_sport.items()
+        figures(str(label))
+        for label in gross_by_sport.index
         if label not in ALWAYS_SHOWN_SPORTS
     ]
-    others.sort(key=lambda item: (-abs(item[1]), item[0]))
+    others.sort(key=lambda item: (-abs(item.gross), item.label))
     by_sport.extend(others)
 
-    return ProfitBreakdown(
-        total_profit=total_profit,
-        horses_profit=horses_profit,
-        greyhounds_profit=greyhounds_profit,
-        by_sport=tuple(by_sport),
+    total = SportFigures(
+        label="Total",
+        gross=float(df["profit"].sum()),
+        commission=float(markets["commission"].sum()) if not markets.empty else 0.0,
+        unknown_markets=int(markets["unknown"].sum()) if not markets.empty else 0,
     )
+    return ProfitBreakdown(total=total, by_sport=tuple(by_sport))
+
+
+def market_commission_frame(
+    final: pd.DataFrame,
+    market_commission: pd.DataFrame | None,
+    market_status: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """
+    One row per market in ``final``: its sport, the local time of its latest
+    leg (which decides the window it belongs to, matching how Betfair places
+    the grouped row), the commission read for it, and whether that figure is
+    trustworthy.
+
+    A market is ``unknown`` when the store has no row for it, the row's
+    amount is unparseable, or -- for a market the status file ever saw
+    pending -- the row was read before the close was observed, because a
+    partially settled market reports 0.0 until it closes. Unknown markets
+    contribute $0.00 and are counted so the report can say so.
+    """
+    columns = ["_key", "sport", "last_settled_local", "commission", "unknown"]
+    if final.empty or "marketId" not in final.columns:
+        return pd.DataFrame(columns=columns)
+    rows = final.loc[final["marketId"].fillna("").astype(str).str.strip() != ""]
+    if rows.empty:
+        return pd.DataFrame(columns=columns)
+    keyed = rows.assign(_key=rows["marketId"].map(decimal_key))
+    markets = (
+        keyed.groupby("_key", sort=False)
+        .agg(sport=("sport", "first"), last_settled_local=("settled_dt_local", "max"))
+        .reset_index()
+    )
+
+    # Plain dicts rather than Series lookups: mapping onto an empty
+    # datetime Series raises in pandas, and a dict is indifferent to dtype.
+    commission: dict[str, float] = {}
+    fetched: dict[str, pd.Timestamp] = {}
+    if market_commission is not None and not market_commission.empty:
+        store = market_commission.copy()
+        store["_key"] = store["marketId"].fillna("").astype(str).map(decimal_key)
+        store = store[store["_key"] != ""].drop_duplicates(subset=["_key"], keep="last")
+        amounts = pd.to_numeric(store["commission"], errors="coerce")
+        read_at = pd.to_datetime(
+            store["fetchedUtc"], utc=True, errors="coerce", format="ISO8601"
+        )
+        for key, amount, ts in zip(store["_key"], amounts, read_at):
+            if pd.notna(amount):
+                commission[key] = float(amount)
+            if pd.notna(ts):
+                fetched[key] = ts
+
+    markets["commission"] = markets["_key"].map(commission)
+    markets["unknown"] = markets["commission"].isna()
+
+    if market_status is not None and not market_status.empty:
+        status = market_status.copy()
+        status["_key"] = status["marketId"].fillna("").astype(str).map(decimal_key)
+        status = status[status["_key"] != ""].drop_duplicates(
+            subset=["_key"], keep="last"
+        )
+        was_pending = status["firstPendingUtc"].fillna("").astype(str).str.len() > 0
+        closed_at = pd.to_datetime(
+            status["closedObservedUtc"], utc=True, errors="coerce", format="ISO8601"
+        )
+        closed_for: dict[str, pd.Timestamp] = {
+            key: ts
+            for key, ts, pending in zip(status["_key"], closed_at, was_pending)
+            if pending and pd.notna(ts)
+        }
+        # Ever-pending markets whose commission was read before the close
+        # (or never read after it) still hold Betfair's 0.0 placeholder.
+        stale = [
+            key in closed_for and (key not in fetched or fetched[key] < closed_for[key])
+            for key in markets["_key"]
+        ]
+        markets.loc[stale, "unknown"] = True
+
+    markets["commission"] = markets["commission"].where(~markets["unknown"], 0.0)
+    return markets[columns]
 
 
 def apply_settlement_status(
@@ -285,6 +464,7 @@ def build_daily_dm_report_from_dataframe(
     report_dt: datetime | None = None,
     source_csv: str = "<dataframe>",
     market_status: pd.DataFrame | None = None,
+    market_commission: pd.DataFrame | None = None,
 ) -> DailyDmReport:
     report_dt_local = _coerce_report_dt(report_dt)
     normalized = normalize_cleared_orders_schema(df_raw)
@@ -320,17 +500,29 @@ def build_daily_dm_report_from_dataframe(
     pending_rows = pending_rows.loc[pending_rows["settled_dt_local"] <= report_dt_local]
 
     yesterday_start = day_start - timedelta(days=1)
+    month_start = day_start.replace(day=1)
+    year_start = day_start.replace(month=1, day=1)
 
-    week_df = final.loc[final["settled_dt_local"] >= week_start]
-    day_df = final.loc[final["settled_dt_local"] >= day_start]
-    yesterday_df = final.loc[
-        (final["settled_dt_local"] >= yesterday_start)
-        & (final["settled_dt_local"] < day_start)
-    ]
+    markets = market_commission_frame(final, market_commission, market_status)
 
-    week_to_date = _profit_breakdown(week_df)
-    day_to_date = _profit_breakdown(day_df)
-    yesterday = _profit_breakdown(yesterday_df)
+    def breakdown(start: datetime, end: datetime | None = None) -> ProfitBreakdown:
+        rows = final.loc[final["settled_dt_local"] >= start]
+        mk = (
+            markets.loc[markets["last_settled_local"] >= start]
+            if not markets.empty
+            else markets
+        )
+        if end is not None:
+            rows = rows.loc[rows["settled_dt_local"] < end]
+            if not mk.empty:
+                mk = mk.loc[mk["last_settled_local"] < end]
+        return _profit_breakdown(rows, mk)
+
+    week_to_date = breakdown(week_start)
+    day_to_date = breakdown(day_start)
+    yesterday = breakdown(yesterday_start, day_start)
+    month_to_date = breakdown(month_start)
+    year_to_date = breakdown(year_start)
     pending = PendingSummary(
         markets=int(pending_rows["marketId"].map(decimal_key).nunique())
         if not pending_rows.empty
@@ -346,6 +538,10 @@ def build_daily_dm_report_from_dataframe(
         pending,
         yesterday,
         yesterday_start,
+        month_to_date,
+        month_start,
+        year_to_date,
+        year_start,
     )
 
     return DailyDmReport(
@@ -360,6 +556,10 @@ def build_daily_dm_report_from_dataframe(
         pending=pending,
         yesterday_start=yesterday_start,
         yesterday=yesterday,
+        month_start=month_start,
+        month_to_date=month_to_date,
+        year_start=year_start,
+        year_to_date=year_to_date,
     )
 
 
@@ -399,6 +599,34 @@ def load_market_status_for_report(csv_path: Path) -> pd.DataFrame | None:
         logger.warning(
             "Could not read market status file %s (%s: %s); reporting every "
             "market as fully settled.",
+            path,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def resolve_market_commission_path(csv_path: Path) -> Path:
+    """The commission store the pipeline writes next to the canonical it read."""
+    return Path(csv_path).parent / ".cache" / COMMISSION_FILENAME
+
+
+def load_market_commission_for_report(csv_path: Path) -> pd.DataFrame | None:
+    """
+    Load the commission store beside ``csv_path``; ``None`` when there is
+    none. An unreadable file is logged and treated as absent: every market
+    is then commission-unknown, which the report says out loud, rather than
+    silently commission-free.
+    """
+    path = resolve_market_commission_path(csv_path)
+    if not path.exists():
+        return None
+    try:
+        return load_market_commission(path)
+    except Exception as exc:
+        logger.warning(
+            "Could not read market commission file %s (%s: %s); reporting "
+            "every market as commission unknown.",
             path,
             type(exc).__name__,
             exc,
@@ -463,10 +691,12 @@ def build_daily_dm_report_from_results_dir(
     )
     df_raw = load_csv(str(chosen))
     market_status = load_market_status_for_report(chosen)
+    market_commission = load_market_commission_for_report(chosen)
     df_raw = supplement_with_archived_legs(df_raw, market_status, chosen.parent)
     return build_daily_dm_report_from_dataframe(
         df_raw,
         report_dt=report_dt,
         source_csv=str(chosen),
         market_status=market_status,
+        market_commission=market_commission,
     )

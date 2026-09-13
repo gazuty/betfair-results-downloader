@@ -116,7 +116,7 @@ def test_market_that_closed_after_being_pending_counts_on_its_close_day() -> Non
 
     assert report.day_to_date.total_profit == 45.33
     assert report.week_to_date.total_profit == 45.33
-    assert ("Tennis", 45.33) in report.day_to_date.by_sport
+    assert {f.label: f.gross for f in report.day_to_date.by_sport}["Tennis"] == 45.33
     assert report.pending.markets == 0
     assert "• None" in report.text
 
@@ -156,7 +156,7 @@ def test_markets_without_a_status_record_count_as_final() -> None:
     )
 
     assert report.day_to_date.total_profit == 75.0
-    assert ("Soccer", 75.0) in report.day_to_date.by_sport
+    assert {f.label: f.gross for f in report.day_to_date.by_sport}["Soccer"] == 75.0
     assert report.pending.markets == 0
 
 
@@ -245,12 +245,18 @@ def test_sport_lines_keep_horses_and_greyhounds_first_then_by_magnitude() -> Non
 
     report = build_daily_dm_report_from_dataframe(df, report_dt=REPORT_AT)
 
-    labels = [label for label, _ in report.day_to_date.by_sport]
+    labels = [f.label for f in report.day_to_date.by_sport]
     assert labels == ["Horses", "Greyhounds", "Soccer", "Tennis", "Australian Rules"]
     text = report.text
-    assert text.index("• Horses: $0.00") < text.index("• Greyhounds: $0.00")
-    assert text.index("• Soccer: -$50.00") < text.index("• Tennis: $12.00")
-    assert text.index("• Tennis: $12.00") < text.index("• Australian Rules: $3.00")
+    assert text.index(
+        "• Horses: gross $0.00, commission $0.00 (n/a), net $0.00"
+    ) < text.index("• Greyhounds: gross $0.00, commission $0.00 (n/a), net $0.00")
+    assert text.index(
+        "• Soccer: gross -$50.00, commission $0.00 (n/a), net -$50.00"
+    ) < text.index("• Tennis: gross $12.00, commission $0.00 (n/a), net $12.00")
+    assert text.index(
+        "• Tennis: gross $12.00, commission $0.00 (n/a), net $12.00"
+    ) < text.index("• Australian Rules: gross $3.00, commission $0.00 (n/a), net $3.00")
     assert report.day_to_date.total_profit == -35.0
 
 
@@ -475,7 +481,7 @@ def test_archived_legs_count_in_full_on_the_day_the_market_closes(tmp_path) -> N
     report = build_daily_dm_report_from_results_dir(str(tmp_path), report_dt=REPORT_AT)
 
     assert report.day_to_date.total_profit == 117.25
-    assert ("Tennis", 107.25) in report.day_to_date.by_sport
+    assert {f.label: f.gross for f in report.day_to_date.by_sport}["Tennis"] == 107.25
     assert report.pending.markets == 0
 
 

@@ -259,7 +259,7 @@ def test_explicit_csv_does_not_require_credentials(
     exit_code = main(["dm-report", "--csv", str(csv_path)])
 
     assert exit_code == 0
-    assert "Total profit" in capsys.readouterr().out
+    assert "• Total: gross" in capsys.readouterr().out
 
 
 def test_explicit_csv_leaves_creds_unresolved_for_the_notifier(

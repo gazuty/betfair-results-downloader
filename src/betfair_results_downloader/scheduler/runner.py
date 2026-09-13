@@ -235,6 +235,77 @@ def _refresh_market_status(
         return warning
 
 
+def _refresh_market_commission(
+    client: Any,
+    results_dir: Path,
+    from_dt_utc: Optional[datetime],
+    to_dt_utc: Optional[datetime],
+    chunk_days: int,
+    df_canonical: Optional[pd.DataFrame],
+    status_cb: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Record what Betfair charged on this run's markets (see commission).
+
+    Runs after the status step on every pipeline run, including a quiet
+    one: the read that finally sees a long-open outright's commission is
+    the run after the status step saw it CLOSED, and that run usually has
+    nothing to download. Reads the status file the step before just wrote,
+    so the pre-close placeholders it re-queries are chosen on fresh data.
+    ``df_canonical`` feeds the recent-market seed that re-reads whatever an
+    earlier failed step missed; None on a quiet run, when the two columns
+    the seed needs are read from disk instead.
+
+    Supplementary like the status step: never raises. Returns a ⚠️ warning
+    string on failure so the run message carries it to Slack; until a later
+    run re-reads them, the report shows those markets as commission unknown.
+    """
+    try:
+        from ..commission import update_market_commission  # noqa: PLC0415
+        from ..downloader_core import resolve_enrichment_cache_dir  # noqa: PLC0415
+        from ..market_status import (  # noqa: PLC0415
+            load_canonical_market_dates,
+            load_market_status,
+            resolve_status_path,
+        )
+
+        cache_dir = resolve_enrichment_cache_dir(results_dir)
+        if df_canonical is None:
+            df_canonical = load_canonical_market_dates(results_dir)
+        try:
+            df_status = load_market_status(resolve_status_path(cache_dir))
+        except Exception as exc:
+            # The status step already warned about its file; without it the
+            # window read still happens, only the pending re-queries wait.
+            logger.warning(
+                "Commission step could not read the status file (%s: %s); "
+                "skipping pending re-queries this run.",
+                type(exc).__name__,
+                exc,
+            )
+            df_status = None
+        cr = update_market_commission(
+            client=client,
+            cache_dir=cache_dir,
+            from_dt=from_dt_utc,
+            to_dt=to_dt_utc,
+            df_status=df_status,
+            df_canonical=df_canonical,
+            chunk_days=chunk_days,
+            status_cb=status_cb,
+        )
+        logger.info("Commission result: %s", cr.message)
+        return None
+    except Exception as exc:
+        warning = (
+            f"⚠️ Commission read failed ({type(exc).__name__}: {exc}); the "
+            f"report will show this window's markets as commission unknown "
+            f"until a later run re-reads them."
+        )
+        logger.warning(warning)
+        return warning
+
+
 def _run_pipeline(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
@@ -316,7 +387,16 @@ def _run_pipeline_inner(
             # Pending markets are still re-checked: the run that sees an
             # outright finally CLOSED is usually one with nothing to download.
             status_warning = _refresh_market_status(client, results_dir, None, None)
-            warn_suffix = f" {status_warning}" if status_warning else ""
+            commission_warning = _refresh_market_commission(
+                client,
+                results_dir,
+                from_dt_utc,
+                to_dt_utc,
+                schedule_cfg.chunk_days,
+                None,
+            )
+            empty_warnings = [w for w in (status_warning, commission_warning) if w]
+            warn_suffix = (" " + " ".join(empty_warnings)) if empty_warnings else ""
             return RunResult(
                 ok=True,
                 status="success",
@@ -396,7 +476,21 @@ def _run_pipeline_inner(
             client, results_dir, df_co, csvr.df_canonical, _say
         )
 
-        run_warnings = [w for w in (backup_warning, status_warning) if w]
+        # What Betfair charged on those markets, read after the status step so
+        # the pre-close placeholders it re-queries are chosen on fresh data.
+        commission_warning = _refresh_market_commission(
+            client,
+            results_dir,
+            from_dt_utc,
+            to_dt_utc,
+            schedule_cfg.chunk_days,
+            csvr.df_canonical,
+            _say,
+        )
+
+        run_warnings = [
+            w for w in (backup_warning, status_warning, commission_warning) if w
+        ]
         warn_suffix = (" " + " ".join(run_warnings)) if run_warnings else ""
 
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)

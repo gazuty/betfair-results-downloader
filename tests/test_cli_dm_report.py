@@ -40,7 +40,7 @@ def test_cli_dm_report_renders_from_discovered_results_csv(
     assert exit_code == 0
     assert "Betfair results update" in out
     assert "Saturday 6 June, 9:00 PM" in out
-    assert "• Total profit: $10.50" in out
+    assert "• Total: gross $10.50, commission $0.00 (0.0%), net $10.50" in out
 
 
 def test_resolve_default_results_csv_prefers_exact_canonical_filename(tmp_path) -> None:
@@ -85,6 +85,6 @@ def test_cli_dm_report_reads_the_status_file_beside_the_csv(tmp_path, capsys) ->
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "• Total profit: $12.50" in out
+    assert "• Total: gross $12.50, commission $0.00 (n/a), net $12.50" in out
     assert "• Tennis" not in out
     assert "• 1 market, $7.25 settled so far" in out

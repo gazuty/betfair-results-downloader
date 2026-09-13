@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Per-market commission tracking.** The per-bet rows the downloader stores carry no commission — Betfair charges it per market, on the net winnings of the whole market — so a new `commission.py` reads `listClearedOrders` with `groupBy=MARKET`, which returns one row per market with the gross profit (equal to the sum of the per-bet profits) and the whole-market commission charged (0.0 on a losing or still-pending market). A new pipeline step (after the settlement-status step and before Azure publishing, in both `run` and `backfill`, on every run including an empty download) reads the window's grouped rows plus an explicit re-query of every market ever seen pending whose figure is not yet final, and persists them to `<results_csv_dir>/.cache/market_commission.csv`, upserting by market with the latest read winning. A new `backfill-commission --from YYYY-MM-DD --to YYYY-MM-DD` CLI subcommand (also `python -m betfair_results_downloader backfill-commission`) reads grouped rows for an explicit range with no bet download and no canonical rewrite, for backfilling the commission store after upgrading. On every run the step also re-reads, by explicit id, every canonical market settled in the last fortnight that the store has no usable row for (capped at 2,000 per run), so a window missed by a failed step heals on later runs. The step never fails a run; on error the run carries a ⚠️ warning and the report shows the affected markets as commission unknown until a later run re-reads them. CLOSED rows in `market_settlement_status.csv` are now kept for 400 days instead of 90, because the Year to date section needs a closed outright's pending/close timestamps for that long.
+
+### Changed
+
+- **`dm-report` shows commission and net alongside gross, and gains Month to date and Year to date sections.** Every breakdown line now reads `Total: gross $1,234.56, commission $98.76 (8.0%), net $1,135.80`, with the percentage being commission divided by gross profit for that sport and period, shown as `n/a` when gross is zero or a loss (Betfair charges on winning markets only, so the ratio has no meaning there) or when any market in the line is commission unknown. Commission is attributed to the window containing the market's latest leg, matching where Betfair places the grouped row, while gross stays per bet row as before. A window with markets that have no trustworthy commission figure — no row in the store, or a row read before the market closed — adds a line saying how many markets and that they are counted as $0.00. Two new sections, Month to date (since the 1st of the current month) and Year to date (since 1 January), sit after Today and before Pending, both Sydney time. The Pending section and Azure publishing (gross only, horses + greyhounds) are unchanged.
 
 ## [0.8.0] - 2026-09-06
 

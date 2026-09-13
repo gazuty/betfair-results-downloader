@@ -11,8 +11,9 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **DM reporting** — week-to-date, yesterday and today profit across every sport, printed for an external messenger or posted straight to Slack with `--post-slack` *(all sports and Yesterday new in 0.8.0)*
+- **DM reporting** — gross, commission and net profit across every sport for week-to-date, yesterday, today, month-to-date and year-to-date, printed for an external messenger or posted straight to Slack with `--post-slack` *(commission, month-to-date and year-to-date new in this release)*
 - **Settlement status gating** — per-market `listMarketBook` status recorded on every run; partially settled outrights are held out of the report until Betfair closes the market *(new in 0.8.0)*
+- **Per-market commission tracking** — `listClearedOrders` grouped by market read on every run and backfillable with `backfill-commission`; commission is charged per market, not per bet, so this is the only source for the net figures in the report *(new in this release)*
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
 - **CLI entry point** — `python -m betfair_results_downloader` with `auth-test` subcommand *(new in 0.5.0)*
 - **Chunked date-range download** — automatic splitting into safe Betfair settledDateRange windows *(new in 0.5.0)*
@@ -334,8 +335,9 @@ python -m betfair_results_downloader run
 5. Enriches with market catalogue (uses cache, timeout retry; enrichment failure is non-fatal — CSVs are still written).
 6. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
 7. Checks per-market settlement status via `listMarketBook` and updates `<results_csv_dir>/.cache/market_settlement_status.csv` — this is what lets `dm-report` hold back partially settled outrights (see [Enrichment cache](#enrichment-cache-results_csv_dircache) and `docs/openclaw-dm-reporting.md`). Non-fatal: a failure is announced as a warning and the run continues, with the report treating that window's markets as fully settled until the next run re-checks them.
-8. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
-9. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
+8. Reads per-market commission via `listClearedOrders` (grouped by market) for the run's window, plus a re-query of every market ever seen pending whose figure is not yet final, and updates `<results_csv_dir>/.cache/market_commission.csv` — this is what lets `dm-report` show commission and net alongside gross (see [Enrichment cache](#enrichment-cache-results_csv_dircache) and `docs/openclaw-dm-reporting.md`). Non-fatal: a failure is announced as a warning and the run continues, with the report showing that window's markets as commission unknown until a later run re-reads them (recent markets missing from the store are re-read by id on every run).
+9. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
+10. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
 
 Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
 
@@ -353,6 +355,20 @@ python -m betfair_results_downloader backfill --from YYYY-MM-DD --to YYYY-MM-DD
 
 Both `--from` and `--to` are required and inclusive (the final day is covered
 through to midnight). Azure publish gates apply.
+
+Exit codes: `0` = success · `1` = failure · `2` = bad arguments or configuration.
+
+### `backfill-commission`
+
+**Status:** ✅ Implemented
+
+One-off read of per-market commission for an explicit settled-date range. Reads `listClearedOrders` grouped by market for `[--from, --to]` and upserts the results into `<results_csv_dir>/.cache/market_commission.csv`. Downloads no bets, rewrites nothing else, and does not touch Azure.
+
+```bash
+python -m betfair_results_downloader backfill-commission --from YYYY-MM-DD --to YYYY-MM-DD
+```
+
+Both `--from` and `--to` are required and inclusive. Grouped rows are available for about a year back, so a fresh install can backfill the whole canonical — see [Troubleshooting](#troubleshooting) for the recommended one-off command after upgrading.
 
 Exit codes: `0` = success · `1` = failure · `2` = bad arguments or configuration.
 
@@ -408,10 +424,14 @@ Behavior:
 - computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
 - computes **Yesterday** as the full previous calendar day in Australia/Sydney time
 - computes **Today** from the current day `12:00 AM` Australia/Sydney time
+- computes **Month to date** from the 1st of the current month `12:00 AM` Australia/Sydney time
+- computes **Year to date** from 1 January `12:00 AM` Australia/Sydney time
 - covers **all sports** — Horses and Greyhounds are always shown (even at `$0.00`), followed by one line per other sport with a settlement in the window, ordered by absolute profit
+- every line shows **gross, commission and net** — `commission` is what Betfair actually charged the market (read via `listClearedOrders` grouped by market, since commission is a whole-market charge with no per-bet figure to show); the percentage is commission divided by gross profit for that sport and period, shown as `n/a` when gross is zero or a loss, or when any market in that line is commission unknown
 - holds markets that Betfair has only partially settled out of every total, and summarizes them in a final "Pending (partially settled, not counted above)" section instead — see [Settlement status gating](docs/openclaw-dm-reporting.md#settlement-status-gating)
+- when a window has markets with no trustworthy commission figure yet, adds a line saying how many and that they are counted as $0.00 — see [Commission](docs/openclaw-dm-reporting.md#commission)
 - prefers the exact canonical CSV `cleared_orders_cleaned.csv` when present
-- with `--csv PATH`, looks for the settlement status file at `<directory of PATH>/.cache/market_settlement_status.csv`; an unreadable status file is logged and treated as absent
+- with `--csv PATH`, looks for the settlement status file at `<directory of PATH>/.cache/market_settlement_status.csv` and the commission store at `<directory of PATH>/.cache/market_commission.csv`; either being unreadable is logged and treated as absent
 - prints the exact report body intended for user-facing delivery
 
 See `docs/openclaw-dm-reporting.md` for the design rationale, the recommended split between launchd downloader cadence and OpenClaw report cadence, and the expected semantics of the 6:00 am versus 7:35 pm report.
@@ -706,8 +726,9 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
 - `market_catalogue_event_latest.csv` — latest snapshot
 - `market_settlement_status.csv` — per-market settlement status observed via `listMarketBook`, columns `marketId`, `status`, `activeRunners`, `source` (`book` or `absent`), `checkedUtc`, `firstPendingUtc`, `closedObservedUtc`; used by `dm-report` to hold back partially settled markets (see `docs/openclaw-dm-reporting.md`)
+- `market_commission.csv` — per-market commission observed via `listClearedOrders` grouped by market, columns `marketId`, `eventTypeId`, `settledDateUtc`, `betCount`, `grossProfit`, `commission`, `fetchedUtc`; used by `dm-report` to show commission and net alongside gross (see `docs/openclaw-dm-reporting.md`)
 
-All three are git-ignored.
+All four are git-ignored.
 
 **Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
 
@@ -748,9 +769,10 @@ Full design document (architecture, config schema, safety gates, state model, er
 
 ```
 src/betfair_results_downloader/
-  __main__.py             # CLI entry point (auth-test, run, backfill, audit, schedule, dm-report)
+  __main__.py             # CLI entry point (auth-test, run, backfill, backfill-commission, audit, schedule, dm-report)
   downloader_core.py      # Betfair cleared-orders download, catalogue enrichment, CSV outputs, Azure prep
   market_status.py        # Per-market settlement status (partial vs fully settled) via listMarketBook
+  commission.py           # Per-market commission (gross, commission, net) via listClearedOrders grouped by market
   betfair_net.py          # Transient-failure retry policy and request batching for Betfair calls
   csv_utils.py            # Canonical CSV dedupe, numeric market/bet keys, atomic write
   azure_publish.py        # Azure SQL incremental sync plan + apply
@@ -771,7 +793,7 @@ src/betfair_results_downloader/
     installers/           # Platform-specific scheduler installers
       launchd.py          # macOS LaunchAgent plist
   reporting/              # dm-report generation
-    daily_dm_report.py    # Windows, per-sport breakdown, settlement gating, text rendering
+    daily_dm_report.py    # Windows, per-sport breakdown, settlement gating, commission/net, text rendering
     schema.py             # Cleared-orders normalisation + Betfair event-type → sport labels
     io.py                 # Results CSV discovery and loading
 
@@ -801,12 +823,15 @@ settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 - **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
 - **Azure publish silently skipped** — verify all four safety gates are open (see [Azure SQL Publishing](#azure-sql-publishing)).
 - **"⚠️ Market settlement status check failed" on a run** — `listMarketBook` was unreachable; the run still succeeded and the next run re-checks. Until then `dm-report` counts that window's markets as final (its pre-gating behaviour).
+- **"⚠️ Commission read failed" on a run** — `listClearedOrders` (grouped by market) was unreachable or raised; the run still succeeded, and later runs re-read the missed markets by id (every market settled in the last fortnight with no row in the store, up to 2,000 per run). Until then `dm-report` shows that window's markets as commission unknown rather than guessing a figure.
+- **After upgrading, run `backfill-commission --from 2025-12-11 --to <today>` once** (or from the start of the canonical) — the commission store starts empty, so every historical section would otherwise read "Commission unknown" until each market's window happens to be re-read naturally.
 
 ### Reports
 
 - **A market sits in "Pending" for weeks** — expected for outrights (tournament winners, season markets): Betfair settles losers early and the market only closes at the final. Inspect `<results_csv_dir>/.cache/market_settlement_status.csv`; `status` OPEN with `activeRunners > 0` confirms it. The run log's "Oldest pending market first seen N day(s) ago" line tracks it.
 - **A sport line appears one day and not the next** — only sports with a settlement in the window get a line; Horses and Greyhounds are always shown.
 - **Yesterday differs between the 6:00 AM and 7:35 PM reports** — it should not; both cover the same closed day. A difference means a market closed in between and was counted on its close day, or a late download filled in yesterday's rows.
+- **"Commission unknown for N markets" in a section** — those markets have no trustworthy row yet in `<results_csv_dir>/.cache/market_commission.csv`: either nothing has been read for them, or they were only read before they closed (a partially settled market reports commission `0.0` until it closes). They are counted as $0.00 commission until the next run re-reads them; run `backfill-commission` to fill the gap immediately instead of waiting.
 
 ### Cert authentication
 
