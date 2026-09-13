@@ -162,8 +162,10 @@ Month to date and Year to date are where it settles to the effective rate.
 A window the step missed (Betfair unreachable at 06:00, say) heals itself:
 on every run the step also reads, by explicit id, every canonical market
 settled in the last fortnight that has no usable row in the store, newest
-first and capped at 2,000 per run. A stored row that shows a winning market
-with zero commission counts as unread for that purpose: Betfair charges on
+first and capped at 2,000 per run. A stored row that predates a leg the
+canonical holds counts as unread for that purpose (the step failed when
+that leg settled), and so does a row that shows a winning market with zero
+commission: Betfair charges on
 every winning market, so that reading is the pre-close placeholder of a
 market the status step had not yet recorded as pending (it had failed that
 run), and it is read again until the final figure appears.

@@ -475,6 +475,47 @@ def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> N
     assert cm.select_recent_unknown_markets(canonical, store, now=NOW) == ["1.100"]
 
 
+def test_recent_seed_rereads_a_row_older_than_the_canonical_latest_leg() -> None:
+    """
+    The commission step failed on the run that downloaded 1.100's later
+    leg, so the store row still covers only the earlier one. The report
+    treats that row as stale, so the seed must read it again; a row whose
+    settlement matches the newest leg (1.200), or has no settlement at all
+    (1.300, an older store), is left alone.
+    """
+    canonical = _canonical(
+        ("1.100", "2026-09-11T10:00:00Z"),
+        ("1.100", "2026-09-12T10:00:00Z"),
+        ("1.200", "2026-09-12T10:00:00Z"),
+        ("1.300", "2026-09-12T10:00:00Z"),
+    )
+    store = _commission_frame(
+        {
+            "marketId": "1.100",
+            "grossProfit": "5.00",
+            "commission": "0.35",
+            "settledDateUtc": "2026-09-11T10:00:00.000Z",
+            "fetchedUtc": "2026-09-11T12:00:00Z",
+        },
+        {
+            "marketId": "1.200",
+            "grossProfit": "5.00",
+            "commission": "0.35",
+            "settledDateUtc": "2026-09-12T10:00:00.000Z",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+        {
+            "marketId": "1.300",
+            "grossProfit": "5.00",
+            "commission": "0.35",
+            "settledDateUtc": "",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+    )
+
+    assert cm.select_recent_unknown_markets(canonical, store, now=NOW) == ["1.100"]
+
+
 def test_update_seeds_recent_canonical_markets_missing_from_the_store(
     tmp_path: Path,
 ) -> None:

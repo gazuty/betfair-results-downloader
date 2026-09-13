@@ -387,8 +387,9 @@ def select_recent_unknown_markets(
     row in the store, newest first, capped at ``max_markets``. This is the
     self-heal for a window the step missed and the seed on a first run.
 
-    A row showing a winning market with zero commission is not usable
-    either. Betfair charges on every winning market, so that reading is its
+    A row that predates a leg the canonical holds is not usable: the step
+    failed when that leg settled, and the report treats the row as stale.
+    Nor is a row showing a winning market with zero commission. Betfair charges on every winning market, so that reading is its
     pre-close placeholder -- stored when the status step had failed and so
     had not yet recorded the market as pending. If the market then closed
     before the next run, the status file only ever saw it CLOSED and the
@@ -402,16 +403,23 @@ def select_recent_unknown_markets(
         or "settledDate" not in df_canonical.columns
     ):
         return []
-    known: set[str] = set()
+    # Usable rows, keyed by market, with the latest leg the row covered. A
+    # row whose settlement predates a leg the canonical holds is a stale
+    # read (the step failed when the later leg settled); the report already
+    # refuses to trust it, so it must be read again or it stays unknown.
+    known: dict[str, pd.Timestamp] = {}
     if df_commission is not None and not df_commission.empty:
         amounts = pd.to_numeric(df_commission["commission"], errors="coerce")
         gross = pd.to_numeric(df_commission["grossProfit"], errors="coerce")
-        for mid, amount, won in zip(df_commission["marketId"], amounts, gross):
+        covered = _parse_utc(df_commission["settledDateUtc"])
+        for mid, amount, won, upto in zip(
+            df_commission["marketId"], amounts, gross, covered
+        ):
             if pd.isna(amount):
                 continue
             if amount == 0 and pd.notna(won) and won > 0:
                 continue  # placeholder on a winning market: read it again
-            known.add(decimal_key(_cell(mid)))
+            known[decimal_key(_cell(mid))] = upto
 
     settled = _parse_utc(df_canonical["settledDate"])
     cutoff = pd.Timestamp(_now_utc(now)) - timedelta(days=recent_days)
@@ -428,10 +436,16 @@ def select_recent_unknown_markets(
     )
     result: list[str] = []
     seen: set[str] = set()
-    for mid in latest.index:
+    for mid, newest_leg in latest.items():
         key = decimal_key(mid)
-        if key in known or key in seen:
+        if key in seen:
             continue
+        if key in known:
+            upto = known[key]
+            # A row without a settlement cannot be judged; treating it as
+            # stale would re-read it on every run for good.
+            if pd.isna(upto) or upto >= newest_leg:
+                continue  # the row covers every leg the canonical holds
         seen.add(key)
         result.append(mid)
         if len(result) >= max_markets:
