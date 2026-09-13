@@ -732,6 +732,67 @@ def supplement_with_archived_legs(
     return pd.concat([df_raw, *extras], ignore_index=True)
 
 
+def supplement_with_archived_year(
+    df_raw: pd.DataFrame,
+    results_dir: Path,
+    year_start: datetime,
+) -> pd.DataFrame:
+    """
+    Add every archived row settled on or after ``year_start``.
+
+    The canonical is rolling (``user.canonical_archive_months``); with a
+    window shorter than the months elapsed this year, ordinary markets from
+    earlier in the year sit only in the yearly archives, and Year to date
+    would silently understate. Only archives for years the window touches
+    are read, and only rows the canonical does not already hold are added.
+    With no archives on disk this is a directory glob and nothing more. An
+    unreadable archive is logged and skipped, matching the pending-leg
+    supplement.
+    """
+    if "betId" not in df_raw.columns:
+        return df_raw
+    try:
+        paths = sorted(Path(results_dir).glob("cleared_orders_archive_*.csv.gz"))
+    except OSError:
+        return df_raw
+    since = pd.Timestamp(year_start.astimezone(SYDNEY_TZ)).tz_convert("UTC")
+    extras: list[pd.DataFrame] = []
+    from ..downloader_core import _rows_not_already_held  # noqa: PLC0415
+
+    for path in paths:
+        try:
+            year = int(path.stem.rsplit("_", 1)[-1].split(".")[0])
+        except ValueError:
+            year = since.year
+        if year < since.year:
+            continue
+        try:
+            archived = pd.read_csv(path, dtype=str, keep_default_na=False)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Could not read archive %s for Year to date (%s: %s); its rows "
+                "are missing from that section.",
+                path.name,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        if archived.empty or "settledDate" not in archived.columns:
+            continue
+        settled = pd.to_datetime(
+            archived["settledDate"], utc=True, errors="coerce", format="ISO8601"
+        )
+        in_year = archived.loc[settled >= since]
+        if in_year.empty:
+            continue
+        extra = _rows_not_already_held(df_raw, in_year)
+        if len(extra):
+            extras.append(extra)
+    if not extras:
+        return df_raw
+    return pd.concat([df_raw, *extras], ignore_index=True)
+
+
 def build_daily_dm_report_from_results_dir(
     results_dir: str,
     *,
@@ -747,6 +808,11 @@ def build_daily_dm_report_from_results_dir(
     market_status = load_market_status_for_report(chosen)
     market_commission = load_market_commission_for_report(chosen)
     df_raw = supplement_with_archived_legs(df_raw, market_status, chosen.parent)
+    report_dt_local = _coerce_report_dt(report_dt)
+    year_start = report_dt_local.replace(
+        month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    df_raw = supplement_with_archived_year(df_raw, chosen.parent, year_start)
     return build_daily_dm_report_from_dataframe(
         df_raw,
         report_dt=report_dt,

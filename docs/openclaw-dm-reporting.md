@@ -39,7 +39,10 @@ For a report run at a given Sydney-local timestamp:
 - **Year to date** starts at `12:00 AM` on 1 January
 
 Week to date, Today, Month to date and Year to date end at the report
-timestamp. Yesterday is a closed day, so the 6:00 AM and 7:35 PM reports show
+timestamp. Year to date also reads the yearly archives
+(`cleared_orders_archive_YYYY.csv.gz`) for rows settled since 1 January
+that `user.canonical_archive_months` has already moved out of the rolling
+canonical, so a short archive window does not understate it. Yesterday is a closed day, so the 6:00 AM and 7:35 PM reports show
 the same figures for it, and it ignores the week boundary: on a Sunday it is
 the previous week's Saturday. Month to date and Year to date exist because
 commission is only meaningful summed over a period, not per bet — see

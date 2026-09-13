@@ -464,6 +464,66 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     assert "• Total: gross $150.00, commission $10.50 (7.0%), net $139.50" in year_block
 
 
+def test_year_to_date_includes_rows_already_moved_to_the_archives(tmp_path) -> None:
+    """
+    With a canonical archive window shorter than the months elapsed this
+    year, ordinary markets from earlier in the year live only in the yearly
+    archive. Year to date must read them; last year's rows and rows the
+    canonical already holds are left out.
+    """
+    (tmp_path / ".cache").mkdir()
+    (tmp_path / "cleared_orders_cleaned.csv").write_text(
+        "betId,marketId,eventTypeId,profit,settledDate\n"
+        "1,1.100,7,10.0,2026-06-06T02:00:00Z\n",
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            _row("2", "1.200", 7, 200.0, "2026-02-01T02:00:00Z"),  # this year
+            _row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),  # already held
+            _row("3", "1.300", 7, 3000.0, "2025-12-31T12:00:00Z"),  # last year
+        ],
+        dtype=str,
+    ).to_csv(tmp_path / "cleared_orders_archive_2026.csv.gz", index=False)
+    pd.DataFrame(
+        [_row("4", "1.400", 7, 40000.0, "2025-06-01T02:00:00Z")], dtype=str
+    ).to_csv(tmp_path / "cleared_orders_archive_2025.csv.gz", index=False)
+    _commission_frame(
+        _commission("1.100", "0.70", settled="2026-06-06T02:00:00Z"),
+        _commission("1.200", "14.00", settled="2026-02-01T02:00:00Z"),
+    ).to_csv(tmp_path / ".cache" / COMMISSION_FILENAME, index=False)
+
+    report = build_daily_dm_report_from_results_dir(str(tmp_path), report_dt=REPORT_AT)
+
+    assert report.day_to_date.total.gross == 10.0
+    assert report.year_to_date is not None
+    assert report.year_to_date.total.gross == 210.0
+    assert report.year_to_date.total.commission == 14.7
+    assert report.year_to_date.total.commission_pct == 7.0
+    assert report.year_to_date.total.unknown_markets == 0
+
+
+def test_unreadable_archive_is_logged_and_skipped_for_year_to_date(
+    tmp_path, caplog
+) -> None:
+    (tmp_path / ".cache").mkdir()
+    (tmp_path / "cleared_orders_cleaned.csv").write_text(
+        "betId,marketId,eventTypeId,profit,settledDate\n"
+        "1,1.100,7,10.0,2026-06-06T02:00:00Z\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "cleared_orders_archive_2026.csv.gz").write_bytes(b"not gzip")
+
+    with caplog.at_level("WARNING"):
+        report = build_daily_dm_report_from_results_dir(
+            str(tmp_path), report_dt=REPORT_AT
+        )
+
+    assert report.year_to_date is not None
+    assert report.year_to_date.total.gross == 10.0
+    assert "Could not read archive cleared_orders_archive_2026.csv.gz" in caplog.text
+
+
 def test_report_reads_the_commission_store_beside_the_csv(tmp_path) -> None:
     (tmp_path / ".cache").mkdir()
     (tmp_path / "cleared_orders_cleaned.csv").write_text(
