@@ -386,6 +386,14 @@ def select_recent_unknown_markets(
     Canonical markets settled in the last ``recent_days`` with no usable
     row in the store, newest first, capped at ``max_markets``. This is the
     self-heal for a window the step missed and the seed on a first run.
+
+    A row showing a winning market with zero commission is not usable
+    either. Betfair charges on every winning market, so that reading is its
+    pre-close placeholder -- stored when the status step had failed and so
+    had not yet recorded the market as pending. If the market then closed
+    before the next run, the status file only ever saw it CLOSED and the
+    ever-pending rule never fires; re-reading such rows for a fortnight
+    catches the final figure once the market closes.
     """
     if (
         df_canonical is None
@@ -397,9 +405,13 @@ def select_recent_unknown_markets(
     known: set[str] = set()
     if df_commission is not None and not df_commission.empty:
         amounts = pd.to_numeric(df_commission["commission"], errors="coerce")
-        for mid, amount in zip(df_commission["marketId"], amounts):
-            if pd.notna(amount):
-                known.add(decimal_key(_cell(mid)))
+        gross = pd.to_numeric(df_commission["grossProfit"], errors="coerce")
+        for mid, amount, won in zip(df_commission["marketId"], amounts, gross):
+            if pd.isna(amount):
+                continue
+            if amount == 0 and pd.notna(won) and won > 0:
+                continue  # placeholder on a winning market: read it again
+            known.add(decimal_key(_cell(mid)))
 
     settled = _parse_utc(df_canonical["settledDate"])
     cutoff = pd.Timestamp(_now_utc(now)) - timedelta(days=recent_days)

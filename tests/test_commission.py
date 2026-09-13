@@ -445,6 +445,36 @@ def test_update_reads_the_window_and_requeries_pending_markets(tmp_path: Path) -
     assert [("market_ids" in c) for c in client.betting.calls] == [False, True]
 
 
+def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> None:
+    """
+    The status step failed while 1.100 was partially settled, so its 0.00
+    placeholder was stored with no pending record; it closed before the
+    next run and was CLOSED at first sight. Betfair charges on every win,
+    so the zero is not final and the market is read again. A losing market
+    with zero commission is final.
+    """
+    canonical = _canonical(
+        ("1.100", "2026-09-12T10:00:00Z"),
+        ("1.200", "2026-09-12T10:00:00Z"),
+    )
+    store = _commission_frame(
+        {
+            "marketId": "1.100",
+            "grossProfit": "412.00",
+            "commission": "0.00",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+        {
+            "marketId": "1.200",
+            "grossProfit": "-6.50",
+            "commission": "0.00",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+    )
+
+    assert cm.select_recent_unknown_markets(canonical, store, now=NOW) == ["1.100"]
+
+
 def test_update_seeds_recent_canonical_markets_missing_from_the_store(
     tmp_path: Path,
 ) -> None:

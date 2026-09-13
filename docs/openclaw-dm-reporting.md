@@ -162,8 +162,12 @@ Month to date and Year to date are where it settles to the effective rate.
 A window the step missed (Betfair unreachable at 06:00, say) heals itself:
 on every run the step also reads, by explicit id, every canonical market
 settled in the last fortnight that has no usable row in the store, newest
-first and capped at 2,000 per run. `backfill-commission` does the same for
-any range at once.
+first and capped at 2,000 per run. A stored row that shows a winning market
+with zero commission counts as unread for that purpose: Betfair charges on
+every winning market, so that reading is the pre-close placeholder of a
+market the status step had not yet recorded as pending (it had failed that
+run), and it is read again until the final figure appears.
+`backfill-commission` does the same for any range at once.
 
 A market counts as **commission unknown** when the store has no row for it;
 when — for a market the status file ever saw pending — its row was read
