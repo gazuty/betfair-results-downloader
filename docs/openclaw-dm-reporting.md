@@ -174,7 +174,9 @@ run), and it is read again until the final figure appears.
 A market counts as **commission unknown** when the store has no row for it;
 when — for a market the status file ever saw pending — its row was read
 before the close was observed (a stale `0.0` placeholder); when the store
-row predates a leg the canonical already holds; or when the store row's
+row predates a leg the canonical already holds; when the row shows zero
+commission against a positive gross (Betfair charges on every winning
+market, so that is a pre-close placeholder); or when the store row's
 settlement is after the report's `--at` cutoff. Unknown markets
 contribute `$0.00` to their section's commission and net, and the section
 adds a line saying how many markets are unknown:

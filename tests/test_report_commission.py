@@ -46,13 +46,14 @@ def _commission(
     amount: str,
     fetched="2026-06-06T10:00:00Z",
     settled="2026-06-06T02:00:00Z",
+    gross="0.00",
 ) -> dict:
     return {
         "marketId": market_id,
         "eventTypeId": "7",
         "settledDateUtc": settled,
         "betCount": "1",
-        "grossProfit": "0.00",
+        "grossProfit": gross,
         "commission": amount,
         "fetchedUtc": fetched,
     }
@@ -179,6 +180,34 @@ def test_rows_without_a_market_id_are_commission_unknown() -> None:
         sports["Horses"].unknown_markets == 1 and sports["Tennis"].unknown_markets == 1
     )
     assert "• ⚠️ Commission unknown for 2 markets (counted as $0.00)" in report.text
+
+
+def test_zero_commission_on_a_winning_market_is_a_placeholder() -> None:
+    """
+    Stored while the status step was down and the market still partially
+    settled, a 0.00 against a positive gross is Betfair's pre-close reading,
+    not a charge. It is unknown until the seed re-reads it; a 0.00 against
+    a loss is final.
+    """
+    df = pd.DataFrame(
+        [
+            _row("1", "1.100", 7, 412.0, "2026-06-06T02:00:00Z"),
+            _row("2", "1.200", 7, -6.5, "2026-06-06T02:00:00Z"),
+        ]
+    )
+    store = _commission_frame(
+        _commission("1.100", "0.00", gross="412.00"),
+        _commission("1.200", "0.00", gross="-6.50"),
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=REPORT_AT, market_commission=store
+    )
+
+    today = report.day_to_date
+    assert today.total.unknown_markets == 1
+    assert today.total.commission_pct is None
+    assert "• ⚠️ Commission unknown for 1 market (counted as $0.00)" in report.text
 
 
 def test_no_store_at_all_marks_every_market_unknown() -> None:
