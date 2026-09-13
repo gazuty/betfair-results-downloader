@@ -310,18 +310,31 @@ def market_commission_frame(
     final: pd.DataFrame,
     market_commission: pd.DataFrame | None,
     market_status: pd.DataFrame | None,
+    *,
+    as_of: datetime | None = None,
 ) -> pd.DataFrame:
     """
-    One row per market in ``final``: its sport, the local time of its latest
-    leg (which decides the window it belongs to, matching how Betfair places
-    the grouped row), the commission read for it, and whether that figure is
-    trustworthy.
+    One row per market in ``final``: its sport, the local time that decides
+    which window its commission belongs to, the commission read for it, and
+    whether that figure is trustworthy.
 
-    A market is ``unknown`` when the store has no row for it, the row's
-    amount is unparseable, or -- for a market the status file ever saw
-    pending -- the row was read before the close was observed, because a
-    partially settled market reports 0.0 until it closes. Unknown markets
-    contribute $0.00 and are counted so the report can say so.
+    Commission is placed on the store row's own ``settledDateUtc`` -- the
+    latest leg Betfair had seen when the row was read -- not on the latest
+    canonical row. The two differ exactly when the report is rendered for
+    an earlier time (``--at``): the canonical rows after the cutoff are
+    gone, so the latest remaining leg is an earlier one, and the store's
+    final figure would otherwise land on it. A market that was seen pending
+    and later CLOSED is the exception: its rows were re-dated to the close
+    (see :func:`apply_settlement_status`), so its commission follows them.
+
+    A market is ``unknown`` when the store has no row for it or the amount
+    is unparseable; when it was ever seen pending and the row was read
+    before the close was observed (a partially settled market reports 0.0
+    until it closes); when the store row predates a leg the canonical
+    already holds (a stale read); or when the store row's settlement is
+    after ``as_of``, because the figure did not exist at that time. Unknown
+    markets contribute $0.00, sit in the window of their gross, and are
+    counted so the report can say so.
     """
     columns = ["_key", "sport", "last_settled_local", "commission", "unknown"]
     if final.empty or "marketId" not in final.columns:
@@ -332,7 +345,7 @@ def market_commission_frame(
     keyed = rows.assign(_key=rows["marketId"].map(decimal_key))
     markets = (
         keyed.groupby("_key", sort=False)
-        .agg(sport=("sport", "first"), last_settled_local=("settled_dt_local", "max"))
+        .agg(sport=("sport", "first"), rows_latest=("settled_dt_local", "max"))
         .reset_index()
     )
 
@@ -340,6 +353,7 @@ def market_commission_frame(
     # datetime Series raises in pandas, and a dict is indifferent to dtype.
     commission: dict[str, float] = {}
     fetched: dict[str, pd.Timestamp] = {}
+    store_settled: dict[str, pd.Timestamp] = {}
     if market_commission is not None and not market_commission.empty:
         store = market_commission.copy()
         store["_key"] = store["marketId"].fillna("").astype(str).map(decimal_key)
@@ -348,15 +362,20 @@ def market_commission_frame(
         read_at = pd.to_datetime(
             store["fetchedUtc"], utc=True, errors="coerce", format="ISO8601"
         )
-        for key, amount, ts in zip(store["_key"], amounts, read_at):
+        settled_at = pd.to_datetime(
+            store["settledDateUtc"], utc=True, errors="coerce", format="ISO8601"
+        )
+        for key, amount, ts, settled in zip(
+            store["_key"], amounts, read_at, settled_at
+        ):
             if pd.notna(amount):
                 commission[key] = float(amount)
             if pd.notna(ts):
                 fetched[key] = ts
+            if pd.notna(settled):
+                store_settled[key] = settled.tz_convert(SYDNEY_TZ)
 
-    markets["commission"] = markets["_key"].map(commission)
-    markets["unknown"] = markets["commission"].isna()
-
+    closed_for: dict[str, pd.Timestamp] = {}
     if market_status is not None and not market_status.empty:
         status = market_status.copy()
         status["_key"] = status["marketId"].fillna("").astype(str).map(decimal_key)
@@ -367,20 +386,41 @@ def market_commission_frame(
         closed_at = pd.to_datetime(
             status["closedObservedUtc"], utc=True, errors="coerce", format="ISO8601"
         )
-        closed_for: dict[str, pd.Timestamp] = {
+        closed_for = {
             key: ts
             for key, ts, pending in zip(status["_key"], closed_at, was_pending)
             if pending and pd.notna(ts)
         }
-        # Ever-pending markets whose commission was read before the close
-        # (or never read after it) still hold Betfair's 0.0 placeholder.
-        stale = [
-            key in closed_for and (key not in fetched or fetched[key] < closed_for[key])
-            for key in markets["_key"]
-        ]
-        markets.loc[stale, "unknown"] = True
 
-    markets["commission"] = markets["commission"].where(~markets["unknown"], 0.0)
+    placements: list[pd.Timestamp] = []
+    amounts_out: list[float] = []
+    unknown_out: list[bool] = []
+    for key, rows_latest in zip(markets["_key"], markets["rows_latest"]):
+        amount = commission.get(key)
+        placement = rows_latest
+        unknown = amount is None
+        if key in closed_for:
+            # Re-dated to the close by apply_settlement_status; a read taken
+            # before the close still holds Betfair's 0.0 placeholder.
+            if key not in fetched or fetched[key] < closed_for[key]:
+                unknown = True
+        elif key in store_settled:
+            settled = store_settled[key]
+            if settled < rows_latest:
+                # The canonical holds a leg the store row never saw.
+                unknown = True
+            elif as_of is not None and settled > as_of:
+                # The figure belongs after this report's cutoff.
+                unknown = True
+            else:
+                placement = settled
+        placements.append(placement)
+        amounts_out.append(0.0 if unknown else float(amount))
+        unknown_out.append(unknown)
+
+    markets["last_settled_local"] = placements
+    markets["commission"] = amounts_out
+    markets["unknown"] = unknown_out
     return markets[columns]
 
 
@@ -503,7 +543,9 @@ def build_daily_dm_report_from_dataframe(
     month_start = day_start.replace(day=1)
     year_start = day_start.replace(month=1, day=1)
 
-    markets = market_commission_frame(final, market_commission, market_status)
+    markets = market_commission_frame(
+        final, market_commission, market_status, as_of=report_dt_local
+    )
 
     def breakdown(start: datetime, end: datetime | None = None) -> ProfitBreakdown:
         rows = final.loc[final["settled_dt_local"] >= start]

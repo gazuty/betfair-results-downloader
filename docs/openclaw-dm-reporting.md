@@ -132,7 +132,11 @@ that grouped endpoint for the run's window and persists the observations to
 `<results_csv_dir>/.cache/market_commission.csv`.
 
 The grouped row sits at the market's *latest settled leg*, so `dm-report`
-attributes a market's whole commission to the window containing that leg.
+attributes a market's whole commission to the window containing that leg,
+using the `settledDateUtc` the store recorded rather than the latest
+canonical row: a report rendered for an earlier time (`--at`) has dropped
+the rows after its cutoff, and a figure read after the cutoff is reported
+as unknown for that time instead of landing on an earlier leg.
 Gross stays per bet row, exactly as before: a racing market whose legs
 straddle midnight has yesterday's gross in Yesterday and today's in Today,
 with the commission in Today. A market
@@ -161,9 +165,11 @@ settled in the last fortnight that has no usable row in the store, newest
 first and capped at 2,000 per run. `backfill-commission` does the same for
 any range at once.
 
-A market counts as **commission unknown** when the store has no row for it,
-or — for a market the status file ever saw pending — its row was read
-before the close was observed (a stale `0.0` placeholder). Unknown markets
+A market counts as **commission unknown** when the store has no row for it;
+when — for a market the status file ever saw pending — its row was read
+before the close was observed (a stale `0.0` placeholder); when the store
+row predates a leg the canonical already holds; or when the store row's
+settlement is after the report's `--at` cutoff. Unknown markets
 contribute `$0.00` to their section's commission and net, and the section
 adds a line saying how many markets are unknown:
 

@@ -41,11 +41,16 @@ def _row(bet_id: str, market_id: str, event_type: int, profit: float, settled: s
     }
 
 
-def _commission(market_id: str, amount: str, fetched="2026-06-06T10:00:00Z") -> dict:
+def _commission(
+    market_id: str,
+    amount: str,
+    fetched="2026-06-06T10:00:00Z",
+    settled="2026-06-06T02:00:00Z",
+) -> dict:
     return {
         "marketId": market_id,
         "eventTypeId": "7",
-        "settledDateUtc": "2026-06-06T02:00:00Z",
+        "settledDateUtc": settled,
         "betCount": "1",
         "grossProfit": "0.00",
         "commission": amount,
@@ -88,8 +93,8 @@ def test_gross_commission_net_and_percentage_per_sport_and_in_total() -> None:
     )
     store = _commission_frame(
         _commission("1.100", "5.60"),
-        _commission("1.200", "3.50"),
-        _commission("1.300", "0.00"),
+        _commission("1.200", "3.50", settled="2026-06-06T03:00:00Z"),
+        _commission("1.300", "0.00", settled="2026-06-06T04:00:00Z"),
     )
 
     report = build_daily_dm_report_from_dataframe(
@@ -186,9 +191,24 @@ def test_a_read_taken_before_the_close_is_still_a_placeholder() -> None:
         _status("1.300", "CLOSED", closed="2026-06-06T05:00:00Z"),
     )
     store = _commission_frame(
-        _commission("1.100", "0.00", fetched="2026-06-06T04:45:00Z"),  # before close
-        _commission("1.200", "0.64", fetched="2026-06-06T05:30:00Z"),  # after close
-        _commission("1.300", "0.56", fetched="2026-06-06T04:45:00Z"),  # never pending
+        _commission(
+            "1.100",
+            "0.00",
+            fetched="2026-06-06T04:45:00Z",
+            settled="2026-06-06T04:30:00Z",
+        ),  # before close
+        _commission(
+            "1.200",
+            "0.64",
+            fetched="2026-06-06T05:30:00Z",
+            settled="2026-06-06T04:30:00Z",
+        ),  # after close
+        _commission(
+            "1.300",
+            "0.56",
+            fetched="2026-06-06T04:45:00Z",
+            settled="2026-06-06T04:30:00Z",
+        ),  # never pending
     )
 
     report = build_daily_dm_report_from_dataframe(
@@ -231,6 +251,79 @@ def test_commission_follows_the_market_to_the_window_of_its_latest_leg() -> None
     assert report.week_to_date.total.gross == 40.0
     assert report.week_to_date.total.commission == 2.8
     assert report.week_to_date.total.commission_pct == 7.0
+
+
+def test_a_report_for_an_earlier_time_does_not_borrow_a_later_commission() -> None:
+    """
+    Rendered with --at before a market's final leg, the canonical rows after
+    the cutoff are gone. The store's figure was read after that final leg,
+    so it did not exist at the report time: placed on the store's own
+    settlement, it falls after the cutoff and the market is unknown, rather
+    than landing its final commission on an earlier leg.
+    """
+    df = pd.DataFrame(
+        [
+            _row("1", "1.100", 7, 30.0, "2026-06-06T13:50:00Z"),  # Sat 11:50 PM local
+            _row("2", "1.100", 7, 10.0, "2026-06-06T14:10:00Z"),  # Sun 12:10 AM local
+        ]
+    )
+    store = _commission_frame(
+        _commission(
+            "1.100",
+            "2.80",
+            fetched="2026-06-06T15:00:00Z",
+            settled="2026-06-06T14:10:00Z",
+        )
+    )
+
+    before = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 6, 23, 55, tzinfo=SYDNEY),
+        market_commission=store,
+    )
+    after = build_daily_dm_report_from_dataframe(
+        df, report_dt=datetime(2026, 6, 7, 9, 0, tzinfo=SYDNEY), market_commission=store
+    )
+
+    assert before.day_to_date.total.gross == 30.0
+    assert before.day_to_date.total.commission == 0.0
+    assert before.day_to_date.total.unknown_markets == 1
+    assert before.day_to_date.total.commission_pct is None
+    assert after.yesterday is not None
+    assert (
+        after.yesterday.total.gross == 30.0 and after.yesterday.total.commission == 0.0
+    )
+    assert (
+        after.day_to_date.total.gross == 10.0
+        and after.day_to_date.total.commission == 2.8
+    )
+    assert after.day_to_date.total.unknown_markets == 0
+
+
+def test_a_store_row_older_than_the_canonical_is_a_stale_read() -> None:
+    """A store row that predates a leg the canonical holds cannot be final."""
+    df = pd.DataFrame(
+        [
+            _row("1", "1.100", 7, 30.0, "2026-06-05T02:00:00Z"),
+            _row("2", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),
+        ]
+    )
+    store = _commission_frame(
+        _commission(
+            "1.100",
+            "2.10",
+            fetched="2026-06-05T03:00:00Z",
+            settled="2026-06-05T02:00:00Z",
+        )
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=REPORT_AT, market_commission=store
+    )
+
+    assert report.day_to_date.total.commission == 0.0
+    assert report.day_to_date.total.unknown_markets == 1
+    assert report.week_to_date.total.unknown_markets == 1
 
 
 def test_pending_markets_carry_no_commission_into_the_totals() -> None:
@@ -279,10 +372,10 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     )
     store = _commission_frame(
         _commission("1.100", "0.70"),
-        _commission("1.200", "1.40"),
-        _commission("1.300", "2.80"),
-        _commission("1.400", "5.60"),
-        _commission("1.500", "11.20"),
+        _commission("1.200", "1.40", settled="2026-05-30T02:00:00Z"),
+        _commission("1.300", "2.80", settled="2026-06-01T02:00:00Z"),
+        _commission("1.400", "5.60", settled="2025-12-31T14:00:00Z"),
+        _commission("1.500", "11.20", settled="2025-12-31T12:00:00Z"),
     )
 
     report = build_daily_dm_report_from_dataframe(
@@ -319,9 +412,9 @@ def test_report_reads_the_commission_store_beside_the_csv(tmp_path) -> None:
         "1,1.100,7,12.5,2026-06-06T00:30:00Z\n",
         encoding="utf-8",
     )
-    _commission_frame(_commission("1.100", "0.88")).to_csv(
-        tmp_path / ".cache" / COMMISSION_FILENAME, index=False
-    )
+    _commission_frame(
+        _commission("1.100", "0.88", settled="2026-06-06T00:30:00Z")
+    ).to_csv(tmp_path / ".cache" / COMMISSION_FILENAME, index=False)
     _status_frame(_status("1.100", "CLOSED", closed="2026-06-06T05:00:00Z")).to_csv(
         tmp_path / ".cache" / STATUS_FILENAME, index=False
     )
