@@ -216,8 +216,8 @@ def test_daily_dm_report_yesterday_is_the_full_previous_local_day() -> None:
 
     text = report.text
     assert "Yesterday (Friday 5 June)" in text
-    assert text.index("Week to date") < text.index("Yesterday") < text.index("Today")
-    yesterday_block = text[text.index("Yesterday") : text.index("Today")]
+    assert text.index("Today") < text.index("Yesterday") < text.index("Week to date")
+    yesterday_block = text[text.index("Yesterday") : text.index("Week to date")]
     assert (
         "• Total: gross $15.00, commission $0.00 (0.0%), net $15.00" in yesterday_block
     )
@@ -228,6 +228,58 @@ def test_daily_dm_report_yesterday_is_the_full_previous_local_day() -> None:
         "• Greyhounds: gross $5.00, commission $0.00 (0.0%), net $5.00"
         in yesterday_block
     )
+
+
+def test_daily_dm_report_non_sunday_excludes_month_and_year_to_date() -> None:
+    """On a non-Sunday the report omits Month to date and Year to date."""
+    df = pd.DataFrame(
+        [
+            {
+                "betId": "1",
+                "eventTypeId": 7,
+                "profit": 10.0,
+                "settledDate": "2026-06-06T00:30:00Z",  # Sat local
+            }
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 6, 21, 0, tzinfo=SYDNEY_TZ),  # Saturday
+    )
+
+    assert "Month to date" not in report.text
+    assert "Year to date" not in report.text
+    # The dataclass fields are still populated for programmatic access
+    assert report.month_to_date is not None
+    assert report.year_to_date is not None
+
+
+def test_daily_dm_report_sunday_includes_month_and_year_to_date() -> None:
+    """On a Sunday the report includes Month to date and Year to date."""
+    df = pd.DataFrame(
+        [
+            {
+                "betId": "1",
+                "eventTypeId": 7,
+                "profit": 25.0,
+                "settledDate": "2026-06-07T08:00:00Z",  # Sunday 18:00 local
+            }
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 7, 21, 0, tzinfo=SYDNEY_TZ),  # Sunday
+    )
+
+    assert "Month to date" in report.text
+    assert "Year to date" in report.text
+    text = report.text
+    # Order: Today < Yesterday < Week to date < Month to date < Year to date
+    assert text.index("Today") < text.index("Week to date")
+    assert text.index("Week to date") < text.index("Month to date")
+    assert text.index("Month to date") < text.index("Year to date")
 
 
 def test_daily_dm_report_yesterday_ignores_the_week_boundary() -> None:

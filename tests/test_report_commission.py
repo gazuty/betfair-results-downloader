@@ -417,15 +417,19 @@ def test_pending_markets_carry_no_commission_into_the_totals() -> None:
 
 
 def test_month_and_year_to_date_windows_and_headings() -> None:
+    """Month and year sections appear in the rendered text only on Sundays."""
+    # Sunday 7 June 2026, 9:00 PM Sydney -- the report must include
+    # Month to date and Year to date on this day.
+    sunday_report_at = datetime(2026, 6, 7, 21, 0, tzinfo=SYDNEY)
     df = pd.DataFrame(
         [
-            _row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),  # Sat 6 June: all
+            _row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),  # Sat 6 June: month, year
             _row(
                 "2", "1.200", 7, 20.0, "2026-05-30T02:00:00Z"
             ),  # Sat 30 May: year only
             _row(
                 "3", "1.300", 7, 40.0, "2026-06-01T02:00:00Z"
-            ),  # Mon 1 June: month, week
+            ),  # Mon 1 June: month, year (prev week)
             _row(
                 "4", "1.400", 7, 80.0, "2025-12-31T14:00:00Z"
             ),  # 1 Jan 1:00 AM local: year
@@ -433,7 +437,7 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
         ]
     )
     store = _commission_frame(
-        _commission("1.100", "0.70"),
+        _commission("1.100", "0.70", settled="2026-06-06T02:00:00Z"),
         _commission("1.200", "1.40", settled="2026-05-30T02:00:00Z"),
         _commission("1.300", "2.80", settled="2026-06-01T02:00:00Z"),
         _commission("1.400", "5.60", settled="2025-12-31T14:00:00Z"),
@@ -441,13 +445,15 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     )
 
     report = build_daily_dm_report_from_dataframe(
-        df, report_dt=REPORT_AT, market_commission=store
+        df, report_dt=sunday_report_at, market_commission=store
     )
 
     assert report.month_start == datetime(2026, 6, 1, 0, 0, tzinfo=SYDNEY)
     assert report.year_start == datetime(2026, 1, 1, 0, 0, tzinfo=SYDNEY)
     assert report.month_to_date is not None and report.year_to_date is not None
-    assert report.week_to_date.total.gross == 50.0
+    # Week to date is Sunday 7 June only (new week); month includes rows
+    # 1 and 3; year includes rows 1-4.
+    assert report.week_to_date.total.gross == 0.0
     assert report.month_to_date.total.gross == 50.0
     assert report.month_to_date.total.commission == 3.5
     assert report.year_to_date.total.gross == 150.0
@@ -459,6 +465,7 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     assert "Year to date (since Thursday 1 January)" in text
     assert (
         text.index("Today (since 12:00 AM)")
+        < text.index("Week to date")
         < text.index("Month to date")
         < text.index("Year to date")
         < text.index("Pending (partially settled")
