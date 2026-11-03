@@ -215,19 +215,23 @@ def _format_report(
         lines.append(
             f"⚠️ Data may be stale — newest result is {_format_age(hours_stale)} old"
         )
-    lines += ["", "Week to date (since Sunday 12:00 AM)"]
-    lines += _format_breakdown_lines(week_to_date)
+    lines += ["", "Today (since 12:00 AM)"]
+    lines += _format_breakdown_lines(day_to_date)
     if yesterday is not None and yesterday_start is not None:
         # The 6:00 AM report is the first full picture of the previous day;
         # the 7:35 PM one repeats it so the two reports agree.
         lines += ["", f"Yesterday ({_format_day_name(yesterday_start)})"]
         lines += _format_breakdown_lines(yesterday)
-    lines += ["", "Today (since 12:00 AM)"]
-    lines += _format_breakdown_lines(day_to_date)
-    if month_to_date is not None and month_start is not None:
+    lines += ["", "Week to date (since Sunday 12:00 AM)"]
+    lines += _format_breakdown_lines(week_to_date)
+    # Month and year aggregates appear only on Sundays: they add weight to
+    # the daily message without being actionable on a weekday, and Sunday
+    # is a natural week-boundary checkpoint.
+    is_sunday = report_dt.weekday() == 6
+    if is_sunday and month_to_date is not None and month_start is not None:
         lines += ["", f"Month to date (since {_format_day_name(month_start)})"]
         lines += _format_breakdown_lines(month_to_date)
-    if year_to_date is not None and year_start is not None:
+    if is_sunday and year_to_date is not None and year_start is not None:
         lines += ["", f"Year to date (since {_format_day_name(year_start)})"]
         lines += _format_breakdown_lines(year_to_date)
 
