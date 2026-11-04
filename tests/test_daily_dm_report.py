@@ -55,25 +55,22 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
     assert report.day_to_date.horses_profit == 100.0
     assert report.day_to_date.greyhounds_profit == 0.0
 
-    assert "Betfair results update" in report.text
+    assert "*Betfair results* · " in report.text
     assert "Friday 6 June, 9:00 PM" not in report.text
     assert "Saturday 6 June, 9:00 PM" in report.text
-    assert "Week to date (since Sunday 12:00 AM)" in report.text
+    assert "*Week to date* (since Sunday 12:00 AM)" in report.text
     assert (
-        "• Total: gross $1,079.00, commission $0.00 (0.0%), net $1,079.00"
+        "• *Total: net $1,079.00* (gross $1,079.00, commission $0.00 · 0.0%)"
         in report.text
     )
     assert (
-        "• Horses: gross $100.00, commission $0.00 (0.0%), net $100.00" in report.text
+        "• Horses: net $100.00 (gross $100.00, commission $0.00 · 0.0%)" in report.text
     )
+    assert "• Greyhounds: net -$20.00 (gross -$20.00, commission $0.00)" in report.text
     assert (
-        "• Greyhounds: gross -$20.00, commission $0.00 (n/a), net -$20.00"
-        in report.text
+        "• Soccer: net $999.00 (gross $999.00, commission $0.00 · 0.0%)" in report.text
     )
-    assert (
-        "• Soccer: gross $999.00, commission $0.00 (0.0%), net $999.00" in report.text
-    )
-    assert "Today (since 12:00 AM)" in report.text
+    assert "*Today* (since 12:00 AM)" in report.text
 
 
 def test_daily_dm_report_treats_naive_datetime_as_sydney_time() -> None:
@@ -121,10 +118,12 @@ def test_daily_dm_report_counts_other_sports_and_keeps_racing_lines() -> None:
     assert report.day_to_date.total_profit == 75.0
     assert report.day_to_date.horses_profit == 0.0
     assert report.day_to_date.greyhounds_profit == 0.0
-    assert "• Total: gross $75.00, commission $0.00 (0.0%), net $75.00" in report.text
-    assert "• Horses: gross $0.00, commission $0.00 (n/a), net $0.00" in report.text
-    assert "• Greyhounds: gross $0.00, commission $0.00 (n/a), net $0.00" in report.text
-    assert "• Soccer: gross $75.00, commission $0.00 (0.0%), net $75.00" in report.text
+    assert (
+        "• *Total: net $75.00* (gross $75.00, commission $0.00 · 0.0%)" in report.text
+    )
+    assert "• Horses: net $0.00 (gross $0.00, commission $0.00)" in report.text
+    assert "• Greyhounds: net $0.00 (gross $0.00, commission $0.00)" in report.text
+    assert "• Soccer: net $75.00 (gross $75.00, commission $0.00 · 0.0%)" in report.text
 
 
 def test_daily_dm_report_heading_is_portable_and_unpadded() -> None:
@@ -215,17 +214,19 @@ def test_daily_dm_report_yesterday_is_the_full_previous_local_day() -> None:
     assert report.week_to_date.total_profit == 1115.0
 
     text = report.text
-    assert "Yesterday (Friday 5 June)" in text
+    assert "*Yesterday* (Friday 5 June)" in text
     assert text.index("Today") < text.index("Yesterday") < text.index("Week to date")
     yesterday_block = text[text.index("Yesterday") : text.index("Week to date")]
     assert (
-        "• Total: gross $15.00, commission $0.00 (0.0%), net $15.00" in yesterday_block
+        "• *Total: net $15.00* (gross $15.00, commission $0.00 · 0.0%)"
+        in yesterday_block
     )
     assert (
-        "• Horses: gross $10.00, commission $0.00 (0.0%), net $10.00" in yesterday_block
+        "• Horses: net $10.00 (gross $10.00, commission $0.00 · 0.0%)"
+        in yesterday_block
     )
     assert (
-        "• Greyhounds: gross $5.00, commission $0.00 (0.0%), net $5.00"
+        "• Greyhounds: net $5.00 (gross $5.00, commission $0.00 · 0.0%)"
         in yesterday_block
     )
 
@@ -276,9 +277,10 @@ def test_daily_dm_report_sunday_includes_month_and_year_to_date() -> None:
     assert "Month to date" in report.text
     assert "Year to date" in report.text
     text = report.text
-    # Order: Today < Yesterday < Week to date < Month to date < Year to date
-    assert text.index("Today") < text.index("Week to date")
-    assert text.index("Week to date") < text.index("Month to date")
+    # Order: Today < Yesterday < Last week < Month to date < Year to date
+    assert text.index("Today") < text.index("Yesterday")
+    assert text.index("Yesterday") < text.index("Last week")
+    assert text.index("Last week") < text.index("Month to date")
     assert text.index("Month to date") < text.index("Year to date")
 
 
@@ -304,4 +306,106 @@ def test_daily_dm_report_yesterday_ignores_the_week_boundary() -> None:
     assert report.yesterday.total_profit == 40.0
     assert report.week_to_date.total_profit == 0.0
     assert report.day_to_date.total_profit == 0.0
-    assert "Yesterday (Saturday 6 June)" in report.text
+    assert "*Yesterday* (Saturday 6 June)" in report.text
+
+
+def _bet(bet_id: str, profit: float, settled_utc: str, event_type: int = 7) -> dict:
+    return {
+        "betId": bet_id,
+        "eventTypeId": event_type,
+        "profit": profit,
+        "settledDate": settled_utc,
+    }
+
+
+def test_sunday_report_shows_last_full_week_in_place_of_week_to_date() -> None:
+    """
+    Last week is [previous Sunday 12:00 AM, this Sunday 12:00 AM) in Sydney
+    time. Each boundary row sits one second either side of an edge, so an
+    off-by-one in either direction moves a row and changes the total.
+    """
+    df = pd.DataFrame(
+        [
+            _bet("1", 1.0, "2026-05-30T13:59:59Z"),  # Sat 30 May 23:59:59: out
+            _bet("2", 2.0, "2026-05-30T14:00:00Z"),  # Sun 31 May 00:00: in
+            _bet("3", 4.0, "2026-06-06T13:59:59Z"),  # Sat 6 June 23:59:59: in
+            _bet("4", 8.0, "2026-06-06T14:00:00Z"),  # Sun 7 June 00:00: today
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=datetime(2026, 6, 7, 19, 35, tzinfo=SYDNEY_TZ)
+    )
+
+    assert report.last_week_start == datetime(2026, 5, 31, tzinfo=SYDNEY_TZ)
+    assert report.last_week is not None
+    assert report.last_week.total.gross == 6.0
+    assert report.day_to_date.total.gross == 8.0
+    assert "*Last week* (Sunday 31 May – Saturday 6 June)" in report.text
+    assert "Week to date" not in report.text
+    last_week_block = report.text[
+        report.text.index("*Last week*") : report.text.index("*Month to date*")
+    ]
+    assert "• *Total: net $6.00* (gross $6.00, commission $0.00 · 0.0%)" in (
+        last_week_block
+    )
+
+
+def test_weekday_report_shows_week_to_date_and_not_last_week() -> None:
+    df = pd.DataFrame([_bet("1", 5.0, "2026-06-01T02:00:00Z")])  # Mon 1 June
+
+    report = build_daily_dm_report_from_dataframe(
+        df,
+        report_dt=datetime(2026, 6, 3, 6, 10, tzinfo=SYDNEY_TZ),  # Wednesday
+    )
+
+    assert "*Week to date* (since Sunday 12:00 AM)" in report.text
+    assert "Last week" not in report.text
+
+
+def test_figures_lines_lead_with_net_and_omit_a_meaningless_rate() -> None:
+    """
+    Net comes first so it is read first when Slack wraps the line on a
+    phone; a rate that has no meaning (a losing sport) is left out rather
+    than printed as n/a; only the Total line is bold.
+    """
+    df = pd.DataFrame(
+        [
+            _bet("1", 30.0, "2026-06-03T02:00:00Z"),
+            _bet("2", -10.0, "2026-06-03T03:00:00Z", event_type=4339),
+        ]
+    )
+
+    report = build_daily_dm_report_from_dataframe(
+        df, report_dt=datetime(2026, 6, 3, 19, 35, tzinfo=SYDNEY_TZ)
+    )
+
+    today = report.text[report.text.index("*Today*") : report.text.index("*Yesterday*")]
+    assert "• *Total: net $20.00* (gross $20.00, commission $0.00 · 0.0%)" in today
+    assert "• Horses: net $30.00 (gross $30.00, commission $0.00 · 0.0%)" in today
+    assert "• Greyhounds: net -$10.00 (gross -$10.00, commission $0.00)\n" in today
+    assert "n/a" not in report.text
+    assert report.text.count("• *") == report.text.count("• *Total:")
+
+
+def test_report_opens_with_title_and_timestamp_on_one_line() -> None:
+    """A Slack push notification previews only the start of the message."""
+    report = build_daily_dm_report_from_dataframe(
+        pd.DataFrame([_bet("1", 1.0, "2026-06-03T02:00:00Z")]),
+        report_dt=datetime(2026, 6, 3, 6, 10, tzinfo=SYDNEY_TZ),
+    )
+
+    assert report.text.splitlines()[0] == (
+        "*Betfair results* · Wednesday 3 June, 6:10 AM"
+    )
+
+
+def test_every_line_has_balanced_slack_bold_markers() -> None:
+    """An odd ``*`` count on a line leaves Slack showing a stray asterisk."""
+    report = build_daily_dm_report_from_dataframe(
+        pd.DataFrame([_bet("1", 1.0, "2026-06-06T02:00:00Z")]),
+        report_dt=datetime(2026, 6, 7, 19, 35, tzinfo=SYDNEY_TZ),  # Sunday
+    )
+
+    for line in report.text.splitlines():
+        assert line.count("*") % 2 == 0, line

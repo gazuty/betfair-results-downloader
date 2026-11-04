@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **The DM report is formatted for Slack.** The title and timestamp share the first line (`*Betfair results* · Wednesday 4 November, 6:10 AM`), so the push-notification preview says which report it is. Section headings and each Total line are bold. Every line now leads with net, the figure read first when Slack wraps the line on a phone: `• Horses: net $65.74 (gross $71.82, commission $6.08 · 8.5%)`. The commission rate is left off the line when it has no meaning, instead of printing `n/a` on most lines. Plain `dm-report` stdout carries the same text, with Slack's `*` markers.
+- **On Sundays the report shows Last week instead of Week to date.** The week starts at Sunday 12:00 AM, so on a Sunday Week to date only repeated Today. The finished Sunday-to-Saturday week takes its place, before Month to date and Year to date (which PR #37 limited to Sundays). `DailyDmReport` gains `last_week_start` and `last_week`.
+- **Docs describe the Sunday gating and the new section order** (README and `docs/openclaw-dm-reporting.md`, flagged in Codex's review of PR #37), with weekday and Sunday sample output. They also correct the claim that month and year percentages settle to the effective commission rate: the percentage divides by gross net of losing markets, so on 2026-11-01 Year to date for Soccer read 1860.1% while the rate charged on its winning markets was about 5.4%.
+
 ### Fixed
+
+- **Slack alerts no longer lose text in angle brackets.** Slack reads `<...>` as link or mention syntax, so an exception such as `<urlopen error [Errno 8] ...>` vanished from the failure alert that reported it. Everything the CLI posts is now escaped for `&`, `<` and `>` (`slack_notify.escape_mrkdwn`).
 
 - **Tiny wins no longer read as commission unknown.** The placeholder rule added in PR #35 treated any winning market stored with zero commission as a pre-close reading, but a win of 9 cents or less is charged 0.00 once Betfair rounds, so 212 genuine zeros were reported as unknown and the Year to date percentages rendered `n/a` for horses and greyhounds. The rule (now `commission.is_placeholder_commission`, shared by the report and the recent-market seed) applies only to wins above 10 cents.
 

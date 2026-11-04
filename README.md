@@ -11,7 +11,7 @@ A professional Python application for downloading settled Betfair orders, enrich
 - **Data lifecycle management** — automatic snapshot retention, snapshot compression, and yearly archival of old rows keep the results folder small *(new in 0.6.0)*
 - **Market metadata enrichment** — cached market catalogue lookups (avoids repeat API calls)
 - **Azure SQL publishing** — incremental, non-destructive, multi-gate safety model
-- **DM reporting** — gross, commission and net profit across every sport for week-to-date, yesterday, today, month-to-date and year-to-date, printed for an external messenger or posted straight to Slack with `--post-slack` *(commission, month-to-date and year-to-date new in this release)*
+- **DM reporting** — net, gross and commission across every sport for today, yesterday and week-to-date (on Sundays: last week, month-to-date and year-to-date), formatted for Slack and printed for an external messenger or posted straight to Slack with `--post-slack` *(commission, month-to-date and year-to-date new in this release)*
 - **Settlement status gating** — per-market `listMarketBook` status recorded on every run; partially settled outrights are held out of the report until Betfair closes the market *(new in 0.8.0)*
 - **Per-market commission tracking** — `listClearedOrders` grouped by market read on every run and backfillable with `backfill-commission`; commission is charged per market, not per bet, so this is the only source for the net figures in the report *(new in this release)*
 - **Non-interactive cert authentication** — `betfairlightweight` cert-based login for headless use *(new in 0.5.0)*
@@ -421,14 +421,12 @@ scheduled run is announced rather than failing silently. See
 
 Behavior:
 
-- computes **Week to date** from the most recent Sunday `12:00 AM` Australia/Sydney time
-- computes **Yesterday** as the full previous calendar day in Australia/Sydney time
-- computes **Today** from the current day `12:00 AM` Australia/Sydney time
-- computes **Month to date** from the 1st of the current month `12:00 AM` Australia/Sydney time
-- computes **Year to date** from 1 January `12:00 AM` Australia/Sydney time
+- shows **Today** (from the current day `12:00 AM` Australia/Sydney time), then **Yesterday** (the full previous calendar day), then **Week to date** (from the most recent Sunday `12:00 AM`)
+- on **Sundays only**, replaces Week to date with **Last week** (the previous full Sunday-to-Saturday week, since Week to date would only repeat Today) and adds **Month to date** (from the 1st of the current month) and **Year to date** (from 1 January), all Australia/Sydney time
+- is written for Slack: bold title and section headings, a bold Total line, and the title and timestamp together on the first line so a push notification says which report it is
 - covers **all sports** — Horses and Greyhounds are always shown (even at `$0.00`), followed by one line per other sport with a settlement in the window, ordered by absolute profit
-- every line shows **gross, commission and net** — `commission` is what Betfair actually charged the market (read via `listClearedOrders` grouped by market, since commission is a whole-market charge with no per-bet figure to show); the percentage is commission divided by gross profit for that sport and period, shown as `n/a` when gross is zero or a loss, or when any market in that line is commission unknown
-- holds markets that Betfair has only partially settled out of every total, and summarizes them in a final "Pending (partially settled, not counted above)" section instead — see [Settlement status gating](docs/openclaw-dm-reporting.md#settlement-status-gating)
+- every line leads with **net**, then gross and commission in brackets — `commission` is what Betfair actually charged the market (read via `listClearedOrders` grouped by market, since commission is a whole-market charge with no per-bet figure to show); the percentage is commission divided by gross profit for that sport and period, left off the line when gross is zero or a loss, or when any market in that line is commission unknown
+- holds markets that Betfair has only partially settled out of every total, and summarizes them in a final "Pending" section instead — see [Settlement status gating](docs/openclaw-dm-reporting.md#settlement-status-gating)
 - when a window has markets with no trustworthy commission figure yet, adds a line saying how many and that they are counted as $0.00 — see [Commission](docs/openclaw-dm-reporting.md#commission)
 - prefers the exact canonical CSV `cleared_orders_cleaned.csv` when present
 - with `--csv PATH`, looks for the settlement status file at `<directory of PATH>/.cache/market_settlement_status.csv` and the commission store at `<directory of PATH>/.cache/market_commission.csv`; either being unreadable is logged and treated as absent

@@ -428,11 +428,17 @@ def _post_to_slack(text: str, creds: dict | None = None) -> int:
 
 
 def _send_slack(text: str, creds: dict) -> int:
-    """Post ``text`` with ``creds``, reporting any failure on stdout."""
-    from .slack_notify import SlackNotConfigured, post_message
+    """
+    Post ``text`` with ``creds``, reporting any failure on stdout.
+
+    Every message this CLI posts is built from plain text plus Slack
+    ``*bold*`` and ``:emoji:``; none uses ``<link>`` syntax, so the whole
+    text is escaped here, once, for whatever exception detail it carries.
+    """
+    from .slack_notify import SlackNotConfigured, escape_mrkdwn, post_message
 
     try:
-        post_message(text, creds)
+        post_message(escape_mrkdwn(text), creds)
     except SlackNotConfigured as exc:
         print(f"FAIL: Slack not configured: {exc}")
         return 1

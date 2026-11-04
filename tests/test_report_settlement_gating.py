@@ -84,7 +84,7 @@ def test_pending_market_is_held_out_of_totals_and_shown_as_pending() -> None:
     assert report.pending.markets == 1
     assert report.pending.profit == 12.25
     assert "• Tennis" not in report.text
-    assert "Pending (partially settled, not counted above)" in report.text
+    assert "*Pending* (partially settled, not counted above)" in report.text
     assert "• 1 market, $12.25 settled so far — each counts in full" in report.text
 
 
@@ -249,14 +249,14 @@ def test_sport_lines_keep_horses_and_greyhounds_first_then_by_magnitude() -> Non
     assert labels == ["Horses", "Greyhounds", "Soccer", "Tennis", "Australian Rules"]
     text = report.text
     assert text.index(
-        "• Horses: gross $0.00, commission $0.00 (n/a), net $0.00"
-    ) < text.index("• Greyhounds: gross $0.00, commission $0.00 (n/a), net $0.00")
+        "• Horses: net $0.00 (gross $0.00, commission $0.00)"
+    ) < text.index("• Greyhounds: net $0.00 (gross $0.00, commission $0.00)")
     assert text.index(
-        "• Soccer: gross -$50.00, commission $0.00 (n/a), net -$50.00"
-    ) < text.index("• Tennis: gross $12.00, commission $0.00 (n/a), net $12.00")
+        "• Soccer: net -$50.00 (gross -$50.00, commission $0.00)"
+    ) < text.index("• Tennis: net $12.00 (gross $12.00, commission $0.00)")
     assert text.index(
-        "• Tennis: gross $12.00, commission $0.00 (n/a), net $12.00"
-    ) < text.index("• Australian Rules: gross $3.00, commission $0.00 (n/a), net $3.00")
+        "• Tennis: net $12.00 (gross $12.00, commission $0.00)"
+    ) < text.index("• Australian Rules: net $3.00 (gross $3.00, commission $0.00)")
     assert report.day_to_date.total_profit == -35.0
 
 

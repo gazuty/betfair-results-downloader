@@ -115,10 +115,10 @@ def test_gross_commission_net_and_percentage_per_sport_and_in_total() -> None:
     assert today.total.unknown_markets == 0
 
     text = report.text
-    assert "• Total: gross $100.00, commission $9.10 (9.1%), net $90.90" in text
-    assert "• Horses: gross $80.00, commission $5.60 (7.0%), net $74.40" in text
-    assert "• Greyhounds: gross $50.00, commission $3.50 (7.0%), net $46.50" in text
-    assert "• Soccer: gross -$30.00, commission $0.00 (n/a), net -$30.00" in text
+    assert "• *Total: net $90.90* (gross $100.00, commission $9.10 · 9.1%)" in text
+    assert "• Horses: net $74.40 (gross $80.00, commission $5.60 · 7.0%)" in text
+    assert "• Greyhounds: net $46.50 (gross $50.00, commission $3.50 · 7.0%)" in text
+    assert "• Soccer: net -$30.00 (gross -$30.00, commission $0.00)" in text
     assert "Commission unknown" not in text
     # Gross accessors are unchanged for callers that only want the old figure.
     assert today.total_profit == 100.0 and today.horses_profit == 80.0
@@ -149,7 +149,7 @@ def test_markets_without_a_commission_row_are_counted_and_announced() -> None:
     assert today.total.commission_pct is None
     assert sports["Horses"].commission_pct is None
     assert sports["Tennis"].commission_pct is None
-    assert "• Total: gross $35.00, commission $0.70 (n/a), net $34.30" in report.text
+    assert "• *Total: net $34.30* (gross $35.00, commission $0.70)" in report.text
 
 
 def test_rows_without_a_market_id_are_commission_unknown() -> None:
@@ -423,7 +423,9 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     sunday_report_at = datetime(2026, 6, 7, 21, 0, tzinfo=SYDNEY)
     df = pd.DataFrame(
         [
-            _row("1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"),  # Sat 6 June: month, year
+            _row(
+                "1", "1.100", 7, 10.0, "2026-06-06T02:00:00Z"
+            ),  # Sat 6 June: month, year
             _row(
                 "2", "1.200", 7, 20.0, "2026-05-30T02:00:00Z"
             ),  # Sat 30 May: year only
@@ -460,18 +462,28 @@ def test_month_and_year_to_date_windows_and_headings() -> None:
     assert report.year_to_date.total.commission == 10.5
     assert report.year_to_date.total.commission_pct == 7.0
 
+    # Last week is Sun 31 May - Sat 6 June: rows 1 and 3, not row 2.
+    assert report.last_week is not None
+    assert report.last_week.total.gross == 50.0
+    assert report.last_week.total.commission == 3.5
+
     text = report.text
-    assert "Month to date (since Monday 1 June)" in text
-    assert "Year to date (since Thursday 1 January)" in text
+    assert "*Month to date* (since Monday 1 June)" in text
+    assert "*Year to date* (since Thursday 1 January)" in text
+    # On a Sunday the finished week replaces Week to date, which would only
+    # repeat Today.
+    assert "Week to date" not in text
     assert (
-        text.index("Today (since 12:00 AM)")
-        < text.index("Week to date")
+        text.index("*Today* (since 12:00 AM)")
+        < text.index("*Last week*")
         < text.index("Month to date")
         < text.index("Year to date")
-        < text.index("Pending (partially settled")
+        < text.index("*Pending* (partially settled")
     )
-    year_block = text[text.index("Year to date") : text.index("Pending (")]
-    assert "• Total: gross $150.00, commission $10.50 (7.0%), net $139.50" in year_block
+    year_block = text[text.index("Year to date") : text.index("*Pending* (")]
+    assert (
+        "• *Total: net $139.50* (gross $150.00, commission $10.50 · 7.0%)" in year_block
+    )
 
 
 def test_year_to_date_includes_rows_already_moved_to_the_archives(tmp_path) -> None:
@@ -551,7 +563,9 @@ def test_report_reads_the_commission_store_beside_the_csv(tmp_path) -> None:
     report = build_daily_dm_report_from_results_dir(str(tmp_path), report_dt=REPORT_AT)
 
     assert report.day_to_date.total.commission == 0.88
-    assert "• Total: gross $12.50, commission $0.88 (7.0%), net $11.62" in report.text
+    assert (
+        "• *Total: net $11.62* (gross $12.50, commission $0.88 · 7.0%)" in report.text
+    )
 
 
 def test_unreadable_commission_store_degrades_to_unknown(tmp_path, caplog) -> None:
