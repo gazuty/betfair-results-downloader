@@ -163,9 +163,9 @@ def _format_age(hours: float) -> str:
 def _format_figures_line(figures: SportFigures, *, bold: bool = False) -> str:
     """
     One bullet, net first: in a Slack message on a phone the line wraps, and
-    the figure read first should be the bottom line. The commission rate is
-    left out when it has no meaning (see ``commission_pct``) rather than
-    printed as ``n/a`` on most lines.
+    the figure read first should be the bottom line. The commission rate
+    reads ``n/a`` when it has no meaning (see ``commission_pct``): a zero or
+    negative gross, or a commission figure that is partly unknown.
     """
     headline = f"{figures.label}: net {_money(figures.net)}"
     if bold:
@@ -173,8 +173,7 @@ def _format_figures_line(figures: SportFigures, *, bold: bool = False) -> str:
         headline = f"*{headline}*"
     commission = f"commission {_money(figures.commission)}"
     pct = figures.commission_pct
-    if pct is not None:
-        commission += f" · {pct:.1f}%"
+    commission += " · n/a" if pct is None else f" · {pct:.1f}%"
     return f"• {headline} (gross {_money(figures.gross)}, {commission})"
 
 

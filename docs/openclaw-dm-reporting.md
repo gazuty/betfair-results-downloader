@@ -167,7 +167,7 @@ Commission rates vary by market and are not recoverable once a market has
 left the catalogue, so the store only ever holds amounts; `dm-report`
 derives the effective percentage at the sport-and-period level, never per
 market. A window's commission percentage is commission divided by gross
-profit for that sport and period, left off the line when gross is zero or a
+profit for that sport and period, shown as `n/a` when gross is zero or a
 loss — Betfair charges commission on winning markets only, so the ratio has
 no meaning for a losing period — and also when any market in that line is
 commission unknown, since a rate over a partly missing numerator would read
@@ -248,7 +248,9 @@ python -m betfair_results_downloader backfill-commission --from YYYY-MM-DD --to 
 
 The text is written for Slack, which renders `*bold*`. Each line leads
 with net, the figure read first when Slack wraps the line on a phone. The
-commission rate follows when it has a meaning. A weekday report:
+commission rate (commission as a percentage of gross) follows, or `n/a`
+when gross is zero or a loss, or when any market in the line is commission
+unknown. A weekday report:
 
 ```text
 *Betfair results* · Saturday 6 June, 6:00 AM
@@ -269,7 +271,7 @@ commission rate follows when it has a meaning. A weekday report:
 • Horses: net $326.69 (gross $355.10, commission $28.41 · 8.0%)
 • Greyhounds: net $53.81 (gross $57.25, commission $3.44 · 6.0%)
 • Tennis: net $11.59 (gross $12.25, commission $0.66 · 5.4%)
-• Soccer: net -$12.25 (gross -$12.25, commission $0.00)
+• Soccer: net -$12.25 (gross -$12.25, commission $0.00 · n/a)
 
 *Pending* (partially settled, not counted above)
 • 2 markets, $17.40 settled so far — each counts in full on the day it closes
@@ -297,21 +299,24 @@ month and year:
 • Horses: net $416.21 (gross $452.40, commission $36.19 · 8.0%)
 • Greyhounds: net $65.32 (gross $69.50, commission $4.18 · 6.0%)
 • Tennis: net $23.18 (gross $24.50, commission $1.32 · 5.4%)
-• Soccer: net -$12.25 (gross -$12.25, commission $0.00)
+• Soccer: net -$12.25 (gross -$12.25, commission $0.00 · n/a)
 
 *Month to date* (since Monday 1 June)
-• *Total: net $1,706.81* (gross $1,845.60, commission $138.79)
+• *Total: net $1,729.99* (gross $1,870.10, commission $140.11 · n/a)
 • Horses: net $1,382.02 (gross $1,502.20, commission $120.18 · 8.0%)
 • Greyhounds: net $291.54 (gross $310.15, commission $18.61 · 6.0%)
-• Golf: net $33.25 (gross $33.25, commission $0.00)
+• Golf: net $33.25 (gross $33.25, commission $0.00 · n/a)
+• Tennis: net $23.18 (gross $24.50, commission $1.32 · 5.4%)
 • ⚠️ Commission unknown for 1 market (counted as $0.00)
 
 *Year to date* (since Thursday 1 January)
-• *Total: net $20,259.36* (gross $21,960.85, commission $1,701.49 · 7.7%)
+• *Total: net $20,292.61* (gross $21,994.10, commission $1,701.49 · n/a)
 • Horses: net $17,443.57 (gross $18,960.40, commission $1,516.83 · 8.0%)
 • Greyhounds: net $2,736.06 (gross $2,910.70, commission $174.64 · 6.0%)
 • Tennis: net $175.48 (gross $185.50, commission $10.02 · 5.4%)
-• Soccer: net -$95.75 (gross -$95.75, commission $0.00)
+• Soccer: net -$95.75 (gross -$95.75, commission $0.00 · n/a)
+• Golf: net $33.25 (gross $33.25, commission $0.00 · n/a)
+• ⚠️ Commission unknown for 1 market (counted as $0.00)
 
 *Pending* (partially settled, not counted above)
 • None
