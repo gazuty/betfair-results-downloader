@@ -94,6 +94,21 @@ def load_slack_config(creds: Optional[dict[str, Any]] = None) -> Tuple[str, str]
     return token, channel
 
 
+def escape_mrkdwn(text: str) -> str:
+    """
+    Escape the three characters Slack treats as control syntax in ``text``.
+
+    Slack reads ``<...>`` as a link, mention or command, so exception text
+    such as ``<urlopen error [Errno 8] ...>`` would vanish from an alert.
+    ``*``, ``_`` and ``~`` are left alone: the messages use ``*bold*`` on
+    purpose, and Slack only formats those around word boundaries. Raw
+    exception text can still meet that rule by chance (a ``*.csv`` glob),
+    which changes how an alert looks but loses none of it. ``&`` is escaped
+    first so the entities added for ``<`` and ``>`` survive.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _parse_retry_after(value: Optional[str]) -> Optional[float]:
     """Slack's Retry-After is whole seconds; anything unparsable is ignored."""
     if not value:

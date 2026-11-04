@@ -58,8 +58,10 @@ class SportFigures:
         market's commission is unknown (a ratio over a partly missing
         numerator would read as a real rate). Over a day the ratio is also
         distorted by markets whose legs straddle midnight, since gross is
-        per leg and commission lands with the latest leg; the month and
-        year sections are where it settles to the effective rate.
+        per leg and commission lands with the latest leg. Over any period it
+        is not the rate Betfair charged: gross is net of losing markets while
+        commission is charged on winning ones only, so a sport whose losses
+        nearly cancel its wins reads far above the market rate.
         """
         if self.gross <= 0 or self.unknown_markets:
             return None
@@ -122,6 +124,10 @@ class DailyDmReport:
     month_to_date: ProfitBreakdown | None = None
     year_start: datetime | None = None
     year_to_date: ProfitBreakdown | None = None
+    # The previous full Sunday-to-Saturday week, [last_week_start,
+    # week_start). Rendered on Sundays in place of Week to date.
+    last_week_start: datetime | None = None
+    last_week: ProfitBreakdown | None = None
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -154,20 +160,30 @@ def _format_age(hours: float) -> str:
     return f"{int(hours // 24)} days"
 
 
-def _format_pct(pct: float | None) -> str:
-    return "n/a" if pct is None else f"{pct:.1f}%"
+def _format_figures_line(figures: SportFigures, *, bold: bool = False) -> str:
+    """
+    One bullet, net first: in a Slack message on a phone the line wraps, and
+    the figure read first should be the bottom line. The commission rate is
+    left out when it has no meaning (see ``commission_pct``) rather than
+    printed as ``n/a`` on most lines.
+    """
+    headline = f"{figures.label}: net {_money(figures.net)}"
+    if bold:
+        # Slack mrkdwn bold; the report text is written for Slack.
+        headline = f"*{headline}*"
+    commission = f"commission {_money(figures.commission)}"
+    pct = figures.commission_pct
+    if pct is not None:
+        commission += f" · {pct:.1f}%"
+    return f"• {headline} (gross {_money(figures.gross)}, {commission})"
 
 
-def _format_figures_line(figures: SportFigures) -> str:
-    return (
-        f"• {figures.label}: gross {_money(figures.gross)}, "
-        f"commission {_money(figures.commission)} "
-        f"({_format_pct(figures.commission_pct)}), net {_money(figures.net)}"
-    )
+def _format_section_heading(title: str, detail: str) -> str:
+    return f"*{title}* ({detail})"
 
 
 def _format_breakdown_lines(breakdown: ProfitBreakdown) -> list[str]:
-    lines = [_format_figures_line(breakdown.total)]
+    lines = [_format_figures_line(breakdown.total, bold=True)]
     lines.extend(_format_figures_line(figures) for figures in breakdown.by_sport)
     unknown = breakdown.total.unknown_markets
     if unknown:
@@ -195,13 +211,12 @@ def _format_report(
     month_start: datetime | None = None,
     year_to_date: ProfitBreakdown | None = None,
     year_start: datetime | None = None,
+    last_week: ProfitBreakdown | None = None,
+    last_week_start: datetime | None = None,
 ) -> str:
-    heading = _format_heading(report_dt)
-    lines = [
-        "Betfair results update",
-        "",
-        heading,
-    ]
+    # Title and timestamp share the first line so a Slack push notification,
+    # which previews only the start of the message, says which report it is.
+    lines = [f"*Betfair results* · {_format_heading(report_dt)}"]
     if hours_stale is None:
         # No usable settlement timestamp at all: a header-only or unreadable
         # canonical. Treating an unknown age as fresh would deliver a
@@ -215,28 +230,53 @@ def _format_report(
         lines.append(
             f"⚠️ Data may be stale — newest result is {_format_age(hours_stale)} old"
         )
-    lines += ["", "Today (since 12:00 AM)"]
+    lines += ["", _format_section_heading("Today", "since 12:00 AM")]
     lines += _format_breakdown_lines(day_to_date)
     if yesterday is not None and yesterday_start is not None:
         # The 6:00 AM report is the first full picture of the previous day;
         # the 7:35 PM one repeats it so the two reports agree.
-        lines += ["", f"Yesterday ({_format_day_name(yesterday_start)})"]
+        lines += [
+            "",
+            _format_section_heading("Yesterday", _format_day_name(yesterday_start)),
+        ]
         lines += _format_breakdown_lines(yesterday)
-    lines += ["", "Week to date (since Sunday 12:00 AM)"]
-    lines += _format_breakdown_lines(week_to_date)
-    # Month and year aggregates appear only on Sundays: they add weight to
-    # the daily message without being actionable on a weekday, and Sunday
-    # is a natural week-boundary checkpoint.
+    # Sunday is the week-boundary checkpoint. Week to date would only repeat
+    # Today (the week starts at Sunday 12:00 AM), so the finished week takes
+    # its place, followed by the month and year aggregates, which add weight
+    # to the daily message without being actionable on a weekday.
     is_sunday = report_dt.weekday() == 6
+    if is_sunday and last_week is not None and last_week_start is not None:
+        last_saturday = last_week_start + timedelta(days=6)
+        span = (
+            f"{_format_day_name(last_week_start)} – {_format_day_name(last_saturday)}"
+        )
+        lines += ["", _format_section_heading("Last week", span)]
+        lines += _format_breakdown_lines(last_week)
+    else:
+        lines += ["", _format_section_heading("Week to date", "since Sunday 12:00 AM")]
+        lines += _format_breakdown_lines(week_to_date)
     if is_sunday and month_to_date is not None and month_start is not None:
-        lines += ["", f"Month to date (since {_format_day_name(month_start)})"]
+        lines += [
+            "",
+            _format_section_heading(
+                "Month to date", f"since {_format_day_name(month_start)}"
+            ),
+        ]
         lines += _format_breakdown_lines(month_to_date)
     if is_sunday and year_to_date is not None and year_start is not None:
-        lines += ["", f"Year to date (since {_format_day_name(year_start)})"]
+        lines += [
+            "",
+            _format_section_heading(
+                "Year to date", f"since {_format_day_name(year_start)}"
+            ),
+        ]
         lines += _format_breakdown_lines(year_to_date)
 
     pending = pending or PendingSummary(markets=0, profit=0.0)
-    lines += ["", "Pending (partially settled, not counted above)"]
+    lines += [
+        "",
+        _format_section_heading("Pending", "partially settled, not counted above"),
+    ]
     if pending.markets:
         noun = "market" if pending.markets == 1 else "markets"
         # Deliberately unbounded by the week: a partially settled market's
@@ -560,6 +600,7 @@ def build_daily_dm_report_from_dataframe(
     pending_rows = pending_rows.loc[pending_rows["settled_dt_local"] <= report_dt_local]
 
     yesterday_start = day_start - timedelta(days=1)
+    last_week_start = week_start - timedelta(days=7)
     month_start = day_start.replace(day=1)
     year_start = day_start.replace(month=1, day=1)
 
@@ -585,6 +626,7 @@ def build_daily_dm_report_from_dataframe(
     yesterday = breakdown(yesterday_start, day_start)
     month_to_date = breakdown(month_start)
     year_to_date = breakdown(year_start)
+    last_week = breakdown(last_week_start, week_start)
     pending = PendingSummary(
         markets=int(pending_rows["marketId"].map(decimal_key).nunique())
         if not pending_rows.empty
@@ -592,18 +634,22 @@ def build_daily_dm_report_from_dataframe(
         profit=float(pending_rows["profit"].sum()) if not pending_rows.empty else 0.0,
     )
 
+    # Keywords, not positions: several arguments share a type, and a swap
+    # would type-check and only show up as wrong figures.
     text = _format_report(
         report_dt_local,
-        week_to_date,
-        day_to_date,
-        hours_stale,
-        pending,
-        yesterday,
-        yesterday_start,
-        month_to_date,
-        month_start,
-        year_to_date,
-        year_start,
+        week_to_date=week_to_date,
+        day_to_date=day_to_date,
+        hours_stale=hours_stale,
+        pending=pending,
+        yesterday=yesterday,
+        yesterday_start=yesterday_start,
+        month_to_date=month_to_date,
+        month_start=month_start,
+        year_to_date=year_to_date,
+        year_start=year_start,
+        last_week=last_week,
+        last_week_start=last_week_start,
     )
 
     return DailyDmReport(
@@ -622,6 +668,8 @@ def build_daily_dm_report_from_dataframe(
         month_to_date=month_to_date,
         year_start=year_start,
         year_to_date=year_to_date,
+        last_week_start=last_week_start,
+        last_week=last_week,
     )
 
 

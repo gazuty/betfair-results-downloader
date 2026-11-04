@@ -259,7 +259,7 @@ def test_explicit_csv_does_not_require_credentials(
     exit_code = main(["dm-report", "--csv", str(csv_path)])
 
     assert exit_code == 0
-    assert "• Total: gross" in capsys.readouterr().out
+    assert "• *Total: net" in capsys.readouterr().out
 
 
 def test_explicit_csv_leaves_creds_unresolved_for_the_notifier(
@@ -441,3 +441,43 @@ def test_dm_report_expands_tilde_in_results_dir(monkeypatch) -> None:
     assert exit_code == 1
     assert "~" not in captured["results_dir"]
     assert captured["results_dir"] == str(Path("~/BetfairData").expanduser())
+
+
+def test_escape_mrkdwn_escapes_slack_control_characters_only() -> None:
+    from betfair_results_downloader.slack_notify import escape_mrkdwn
+
+    assert escape_mrkdwn("a & b <c> *bold* _x_") == "a &amp; b &lt;c&gt; *bold* _x_"
+    # & first, so the entities produced for < and > are not themselves mangled.
+    assert escape_mrkdwn("<&>") == "&lt;&amp;&gt;"
+
+
+def test_build_failure_detail_survives_slack_link_syntax(monkeypatch) -> None:
+    """
+    Slack reads ``<...>`` as a link or mention, so an unescaped
+    ``<urlopen error ...>`` would vanish from the very alert that reports it.
+    """
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {"results_csv_dir": "/tmp"}}, None),
+    )
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("<urlopen error [Errno 8] nodename nor servname>")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.reporting.daily_dm_report."
+        "build_daily_dm_report_from_results_dir",
+        explode,
+    )
+    monkeypatch.setattr(
+        "betfair_results_downloader.slack_notify.post_message",
+        lambda text, creds=None, channel_override=None: sent.append(text) or "1.0",
+    )
+
+    exit_code = main(["dm-report", "--post-slack"])
+
+    assert exit_code == 1
+    assert len(sent) == 1
+    assert "&lt;urlopen error [Errno 8] nodename nor servname&gt;" in sent[0]
+    assert "<urlopen" not in sent[0]

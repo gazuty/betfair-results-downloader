@@ -428,11 +428,17 @@ def _post_to_slack(text: str, creds: dict | None = None) -> int:
 
 
 def _send_slack(text: str, creds: dict) -> int:
-    """Post ``text`` with ``creds``, reporting any failure on stdout."""
-    from .slack_notify import SlackNotConfigured, post_message
+    """
+    Post ``text`` with ``creds``, reporting any failure on stdout.
+
+    Every message this CLI posts is built from plain text plus Slack
+    ``*bold*`` and ``:emoji:``; none uses ``<link>`` syntax, so the whole
+    text is escaped here, once, for whatever exception detail it carries.
+    """
+    from .slack_notify import SlackNotConfigured, escape_mrkdwn, post_message
 
     try:
-        post_message(text, creds)
+        post_message(escape_mrkdwn(text), creds)
     except SlackNotConfigured as exc:
         print(f"FAIL: Slack not configured: {exc}")
         return 1
@@ -499,11 +505,13 @@ def _load_creds_for_report(
 
 def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
-    Render the OpenClaw-oriented daily DM report from the local results CSV.
+    Render the daily DM report from the local results CSV.
 
-    This command computes week-to-date from the most recent Sunday 00:00
-    Australia/Sydney time and day-to-date from the current day 00:00, then
-    prints the final message body to stdout.
+    Prints the message body to stdout and, with ``--post-slack``, posts it.
+    The sections, all in Australia/Sydney time, are Today, Yesterday and
+    Week to date, with Week to date replaced on Sundays by Last week and
+    followed by Month to date and Year to date; see
+    ``reporting.daily_dm_report``.
     """
     from datetime import datetime
 

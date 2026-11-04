@@ -30,15 +30,28 @@ and reached only via the `--post-slack` flag described below.
 
 ## Reporting windows
 
-For a report run at a given Sydney-local timestamp:
+For a report run at a given Sydney-local timestamp, the sections appear in
+this order:
 
-- **Week to date** starts at the most recent Sunday at `12:00 AM`
-- **Yesterday** is the full previous calendar day, `12:00 AM` to `12:00 AM`
 - **Today** starts at the current day at `12:00 AM`
+- **Yesterday** is the full previous calendar day, `12:00 AM` to `12:00 AM`
+- **Week to date** starts at the most recent Sunday at `12:00 AM` (Monday
+  to Saturday only)
+- **Last week** is the previous full week, Sunday `12:00 AM` to Sunday
+  `12:00 AM` (Sundays only, in place of Week to date)
 - **Month to date** starts at `12:00 AM` on the 1st of the current month
-- **Year to date** starts at `12:00 AM` on 1 January
+  (Sundays only)
+- **Year to date** starts at `12:00 AM` on 1 January (Sundays only)
+- **Pending** closes every report
 
-Week to date, Today, Month to date and Year to date end at the report
+Sunday is the week-boundary checkpoint. Week to date would only repeat
+Today on a Sunday, because the week starts at Sunday `12:00 AM`, so the
+finished week takes its place. Month to date and Year to date are left off
+Monday to Saturday: they add weight to a twice-daily message without being
+actionable on a weekday. The `DailyDmReport` object still carries every
+window on every day; only the rendered text is gated.
+
+Today, Week to date, Month to date and Year to date end at the report
 timestamp. Year to date also reads the yearly archives
 (`cleared_orders_archive_YYYY.csv.gz`) for rows settled since 1 January
 that `user.canonical_archive_months` has already moved out of the rolling
@@ -85,11 +98,11 @@ has been observed to settle over more than a day, while most soccer,
 tennis, golf, AFL, cycling, GAA, and politics outright markets do.
 
 `dm-report` uses that file to hold every non-CLOSED market's rows out of
-every total in Week to date and Today, and summarises them in a final
+every total, and summarises them in a final
 "Pending" section instead:
 
 ```text
-Pending (partially settled, not counted above)
+*Pending* (partially settled, not counted above)
 • 2 markets, $17.40 settled so far — each counts in full on the day it closes
 ```
 
@@ -154,13 +167,18 @@ Commission rates vary by market and are not recoverable once a market has
 left the catalogue, so the store only ever holds amounts; `dm-report`
 derives the effective percentage at the sport-and-period level, never per
 market. A window's commission percentage is commission divided by gross
-profit for that sport and period, shown as `n/a` when gross is zero or a
+profit for that sport and period, left off the line when gross is zero or a
 loss — Betfair charges commission on winning markets only, so the ratio has
 no meaning for a losing period — and also when any market in that line is
 commission unknown, since a rate over a partly missing numerator would read
 as real. Over a single day the ratio is also distorted by markets whose legs
-straddle midnight (gross is per leg, commission lands with the latest leg);
-Month to date and Year to date are where it settles to the effective rate.
+straddle midnight (gross is per leg, commission lands with the latest leg).
+Over a longer period it is still not the rate Betfair charged: gross is net
+of losing markets, while commission is charged only on winning ones, so a
+sport whose losses nearly cancel its wins shows a very high percentage. On
+2026-11-01, Year to date for Soccer read 1860.1%: $3,894.41 commission at
+the market rate of about 5.4% on $72,139.94 of winning markets, against
+$209.36 gross once the losing markets were netted off.
 
 A window the step missed (Betfair unreachable at 06:00, say) heals itself:
 on every run the step also reads, by explicit id, every canonical market
@@ -228,46 +246,80 @@ python -m betfair_results_downloader backfill-commission --from YYYY-MM-DD --to 
 
 ## Example output
 
+The text is written for Slack, which renders `*bold*`. Each line leads
+with net, the figure read first when Slack wraps the line on a phone. The
+commission rate follows when it has a meaning. A weekday report:
+
 ```text
-Betfair results update
+*Betfair results* · Saturday 6 June, 6:00 AM
 
-Saturday 6 June, 6:00 AM
+*Today* (since 12:00 AM)
+• *Total: net $45.24* (gross $48.90, commission $3.66 · 7.5%)
+• Horses: net $33.49 (gross $36.40, commission $2.91 · 8.0%)
+• Greyhounds: net $11.75 (gross $12.50, commission $0.75 · 6.0%)
 
-Week to date (since Sunday 12:00 AM)
-• Total: gross $412.35, commission $32.51 (7.9%), net $379.84
-• Horses: gross $355.10, commission $28.41 (8.0%), net $326.69
-• Greyhounds: gross $57.25, commission $3.44 (6.0%), net $53.81
-• Tennis: gross $12.25, commission $0.66 (5.4%), net $11.59
-• Soccer: gross -$12.25, commission $0.00 (n/a), net -$12.25
+*Yesterday* (Friday 5 June)
+• *Total: net $112.62* (gross $121.80, commission $9.18 · 7.5%)
+• Horses: net $89.52 (gross $97.30, commission $7.78 · 8.0%)
+• Greyhounds: net $11.51 (gross $12.25, commission $0.74 · 6.0%)
+• Tennis: net $11.59 (gross $12.25, commission $0.66 · 5.4%)
 
-Yesterday (Friday 5 June)
-• Total: gross $121.80, commission $9.18 (7.5%), net $112.62
-• Horses: gross $97.30, commission $7.78 (8.0%), net $89.52
-• Greyhounds: gross $12.25, commission $0.74 (6.0%), net $11.51
-• Tennis: gross $12.25, commission $0.66 (5.4%), net $11.59
+*Week to date* (since Sunday 12:00 AM)
+• *Total: net $379.84* (gross $412.35, commission $32.51 · 7.9%)
+• Horses: net $326.69 (gross $355.10, commission $28.41 · 8.0%)
+• Greyhounds: net $53.81 (gross $57.25, commission $3.44 · 6.0%)
+• Tennis: net $11.59 (gross $12.25, commission $0.66 · 5.4%)
+• Soccer: net -$12.25 (gross -$12.25, commission $0.00)
 
-Today (since 12:00 AM)
-• Total: gross $48.90, commission $3.66 (7.5%), net $45.24
-• Horses: gross $36.40, commission $2.91 (8.0%), net $33.49
-• Greyhounds: gross $12.50, commission $0.75 (6.0%), net $11.75
-
-Month to date (since Monday 1 June)
-• Total: gross $1,845.60, commission $138.79 (n/a), net $1,706.81
-• Horses: gross $1,502.20, commission $120.18 (8.0%), net $1,382.02
-• Greyhounds: gross $310.15, commission $18.61 (6.0%), net $291.54
-• Golf: gross $33.25, commission $0.00 (n/a), net $33.25
-• ⚠️ Commission unknown for 1 market (counted as $0.00)
-
-Year to date (since Thursday 1 January)
-• Total: gross $21,960.85, commission $1,701.49 (7.7%), net $20,259.36
-• Horses: gross $18,960.40, commission $1,516.83 (8.0%), net $17,443.57
-• Greyhounds: gross $2,910.70, commission $174.64 (6.0%), net $2,736.06
-• Tennis: gross $185.50, commission $10.02 (5.4%), net $175.48
-• Soccer: gross -$95.75, commission $0.00 (n/a), net -$95.75
-
-Pending (partially settled, not counted above)
+*Pending* (partially settled, not counted above)
 • 2 markets, $17.40 settled so far — each counts in full on the day it closes
 ```
+
+The Sunday report swaps Week to date for the finished week and adds the
+month and year:
+
+```text
+*Betfair results* · Sunday 7 June, 7:35 PM
+
+*Today* (since 12:00 AM)
+• *Total: net $45.24* (gross $48.90, commission $3.66 · 7.5%)
+• Horses: net $33.49 (gross $36.40, commission $2.91 · 8.0%)
+• Greyhounds: net $11.75 (gross $12.50, commission $0.75 · 6.0%)
+
+*Yesterday* (Saturday 6 June)
+• *Total: net $112.62* (gross $121.80, commission $9.18 · 7.5%)
+• Horses: net $89.52 (gross $97.30, commission $7.78 · 8.0%)
+• Greyhounds: net $11.51 (gross $12.25, commission $0.74 · 6.0%)
+• Tennis: net $11.59 (gross $12.25, commission $0.66 · 5.4%)
+
+*Last week* (Sunday 31 May – Saturday 6 June)
+• *Total: net $492.46* (gross $534.15, commission $41.69 · 7.8%)
+• Horses: net $416.21 (gross $452.40, commission $36.19 · 8.0%)
+• Greyhounds: net $65.32 (gross $69.50, commission $4.18 · 6.0%)
+• Tennis: net $23.18 (gross $24.50, commission $1.32 · 5.4%)
+• Soccer: net -$12.25 (gross -$12.25, commission $0.00)
+
+*Month to date* (since Monday 1 June)
+• *Total: net $1,706.81* (gross $1,845.60, commission $138.79)
+• Horses: net $1,382.02 (gross $1,502.20, commission $120.18 · 8.0%)
+• Greyhounds: net $291.54 (gross $310.15, commission $18.61 · 6.0%)
+• Golf: net $33.25 (gross $33.25, commission $0.00)
+• ⚠️ Commission unknown for 1 market (counted as $0.00)
+
+*Year to date* (since Thursday 1 January)
+• *Total: net $20,259.36* (gross $21,960.85, commission $1,701.49 · 7.7%)
+• Horses: net $17,443.57 (gross $18,960.40, commission $1,516.83 · 8.0%)
+• Greyhounds: net $2,736.06 (gross $2,910.70, commission $174.64 · 6.0%)
+• Tennis: net $175.48 (gross $185.50, commission $10.02 · 5.4%)
+• Soccer: net -$95.75 (gross -$95.75, commission $0.00)
+
+*Pending* (partially settled, not counted above)
+• None
+```
+
+When posting, `--post-slack` escapes `&`, `<` and `>`, which Slack would
+otherwise read as entities or as link and mention syntax. That keeps
+exception text such as `<urlopen error ...>` visible in failure alerts.
 
 ## Recommended operational model
 
@@ -304,7 +356,7 @@ That preserves a clean separation of concerns:
 
 ### Expected semantics
 
-- The `06:00` report is primarily valuable for the *week-to-date* and *yesterday* sections: it is the first full picture of the previous day.
+- The `06:00` report is primarily valuable for the *week-to-date* (*last week* on Sundays) and *yesterday* sections: it is the first full picture of the previous day.
 - The `06:00` *today* section may legitimately be `$0.00` if nothing has settled since midnight Sydney time.
 - The `06:00` *today* section may also legitimately show an outright market sitting in the Pending section instead of a total — Betfair settling early legs of a still-open tournament is expected, not a bug.
 - The `19:35` report is expected to be the more meaningful day-level operational summary.
@@ -331,6 +383,8 @@ Those tests verify:
 - Sunday-start week logic
 - same-day totals
 - the full-previous-day Yesterday window, including across the week boundary
+- the Sunday-only Last week, Month to date and Year to date sections, and Last week's boundaries
+- Slack formatting: title line, bold headings and Total, net-first lines, balanced `*` markers, and escaping of `&`, `<` and `>` when posting
 - Sydney timezone handling
 - all-sports coverage, ordered by absolute profit
 - partially-settled markets held out of totals and summarised in the Pending section
