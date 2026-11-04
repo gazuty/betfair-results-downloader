@@ -85,6 +85,6 @@ def test_cli_dm_report_reads_the_status_file_beside_the_csv(tmp_path, capsys) ->
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "• *Total: net $12.50* (gross $12.50, commission $0.00)" in out
+    assert "• *Total: net $12.50* (gross $12.50, commission $0.00 · n/a)" in out
     assert "• Tennis" not in out
     assert "• 1 market, $7.25 settled so far" in out

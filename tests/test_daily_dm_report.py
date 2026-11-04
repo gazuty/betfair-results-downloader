@@ -67,7 +67,10 @@ def test_daily_dm_report_uses_most_recent_sunday_and_current_day_windows() -> No
     assert (
         "• Horses: net $100.00 (gross $100.00, commission $0.00 · 0.0%)" in report.text
     )
-    assert "• Greyhounds: net -$20.00 (gross -$20.00, commission $0.00)" in report.text
+    assert (
+        "• Greyhounds: net -$20.00 (gross -$20.00, commission $0.00 · n/a)"
+        in report.text
+    )
     assert (
         "• Soccer: net $999.00 (gross $999.00, commission $0.00 · 0.0%)" in report.text
     )
@@ -122,8 +125,10 @@ def test_daily_dm_report_counts_other_sports_and_keeps_racing_lines() -> None:
     assert (
         "• *Total: net $75.00* (gross $75.00, commission $0.00 · 0.0%)" in report.text
     )
-    assert "• Horses: net $0.00 (gross $0.00, commission $0.00)" in report.text
-    assert "• Greyhounds: net $0.00 (gross $0.00, commission $0.00)" in report.text
+    assert "• Horses: net $0.00 (gross $0.00, commission $0.00 · n/a)" in report.text
+    assert (
+        "• Greyhounds: net $0.00 (gross $0.00, commission $0.00 · n/a)" in report.text
+    )
     assert "• Soccer: net $75.00 (gross $75.00, commission $0.00 · 0.0%)" in report.text
 
 
@@ -364,11 +369,11 @@ def test_weekday_report_shows_week_to_date_and_not_last_week() -> None:
     assert "Last week" not in report.text
 
 
-def test_figures_lines_lead_with_net_and_omit_a_meaningless_rate() -> None:
+def test_figures_lines_lead_with_net_and_mark_a_meaningless_rate_na() -> None:
     """
     Net comes first so it is read first when Slack wraps the line on a
-    phone; a rate that has no meaning (a losing sport) is left out rather
-    than printed as n/a; only the Total line is bold.
+    phone; a losing sport's rate has no meaning and reads n/a; only the
+    Total line is bold.
     """
     df = pd.DataFrame(
         [
@@ -384,8 +389,10 @@ def test_figures_lines_lead_with_net_and_omit_a_meaningless_rate() -> None:
     today = report.text[report.text.index("*Today*") : report.text.index("*Yesterday*")]
     assert "• *Total: net $20.00* (gross $20.00, commission $0.00 · 0.0%)" in today
     assert "• Horses: net $30.00 (gross $30.00, commission $0.00 · 0.0%)" in today
-    assert "• Greyhounds: net -$10.00 (gross -$10.00, commission $0.00)\n" in today
-    assert "n/a" not in report.text
+    assert (
+        "• Greyhounds: net -$10.00 (gross -$10.00, commission $0.00 · n/a)\n" in today
+    )
+    assert today.count("n/a") == 1, "only the losing sport has no rate"
     assert report.text.count("• *") == report.text.count("• *Total:")
 
 

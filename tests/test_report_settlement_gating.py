@@ -249,14 +249,16 @@ def test_sport_lines_keep_horses_and_greyhounds_first_then_by_magnitude() -> Non
     assert labels == ["Horses", "Greyhounds", "Soccer", "Tennis", "Australian Rules"]
     text = report.text
     assert text.index(
-        "• Horses: net $0.00 (gross $0.00, commission $0.00)"
-    ) < text.index("• Greyhounds: net $0.00 (gross $0.00, commission $0.00)")
+        "• Horses: net $0.00 (gross $0.00, commission $0.00 · n/a)"
+    ) < text.index("• Greyhounds: net $0.00 (gross $0.00, commission $0.00 · n/a)")
     assert text.index(
-        "• Soccer: net -$50.00 (gross -$50.00, commission $0.00)"
-    ) < text.index("• Tennis: net $12.00 (gross $12.00, commission $0.00)")
+        "• Soccer: net -$50.00 (gross -$50.00, commission $0.00 · n/a)"
+    ) < text.index("• Tennis: net $12.00 (gross $12.00, commission $0.00 · n/a)")
     assert text.index(
-        "• Tennis: net $12.00 (gross $12.00, commission $0.00)"
-    ) < text.index("• Australian Rules: net $3.00 (gross $3.00, commission $0.00)")
+        "• Tennis: net $12.00 (gross $12.00, commission $0.00 · n/a)"
+    ) < text.index(
+        "• Australian Rules: net $3.00 (gross $3.00, commission $0.00 · n/a)"
+    )
     assert report.day_to_date.total_profit == -35.0
 
 

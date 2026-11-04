@@ -118,7 +118,7 @@ def test_gross_commission_net_and_percentage_per_sport_and_in_total() -> None:
     assert "• *Total: net $90.90* (gross $100.00, commission $9.10 · 9.1%)" in text
     assert "• Horses: net $74.40 (gross $80.00, commission $5.60 · 7.0%)" in text
     assert "• Greyhounds: net $46.50 (gross $50.00, commission $3.50 · 7.0%)" in text
-    assert "• Soccer: net -$30.00 (gross -$30.00, commission $0.00)" in text
+    assert "• Soccer: net -$30.00 (gross -$30.00, commission $0.00 · n/a)" in text
     assert "Commission unknown" not in text
     # Gross accessors are unchanged for callers that only want the old figure.
     assert today.total_profit == 100.0 and today.horses_profit == 80.0
@@ -149,7 +149,7 @@ def test_markets_without_a_commission_row_are_counted_and_announced() -> None:
     assert today.total.commission_pct is None
     assert sports["Horses"].commission_pct is None
     assert sports["Tennis"].commission_pct is None
-    assert "• *Total: net $34.30* (gross $35.00, commission $0.70)" in report.text
+    assert "• *Total: net $34.30* (gross $35.00, commission $0.70 · n/a)" in report.text
 
 
 def test_rows_without_a_market_id_are_commission_unknown() -> None:
