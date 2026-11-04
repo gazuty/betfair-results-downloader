@@ -4,6 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
 from betfair_results_downloader.reporting.daily_dm_report import (
     build_daily_dm_report_from_dataframe,
@@ -409,3 +410,50 @@ def test_every_line_has_balanced_slack_bold_markers() -> None:
 
     for line in report.text.splitlines():
         assert line.count("*") % 2 == 0, line
+
+
+@pytest.mark.parametrize(
+    ("report_day", "rows", "expected_start"),
+    [
+        # DST ends Sun 5 April 2026 at 3:00 AM: the window opens at +11 and
+        # closes at +10.
+        (
+            datetime(2026, 4, 12, 19, 35, tzinfo=SYDNEY_TZ),
+            [
+                ("1", 1.0, "2026-04-04T12:59:59Z"),  # Sat 4 Apr 23:59:59 +11: out
+                ("2", 2.0, "2026-04-04T13:00:00Z"),  # Sun 5 Apr 00:00 +11: in
+                ("3", 4.0, "2026-04-11T13:59:59Z"),  # Sat 11 Apr 23:59:59 +10: in
+                ("4", 8.0, "2026-04-11T14:00:00Z"),  # Sun 12 Apr 00:00 +10: today
+            ],
+            datetime(2026, 4, 5, tzinfo=SYDNEY_TZ),
+        ),
+        # DST starts Sun 4 October 2026 at 2:00 AM: +10 to +11.
+        (
+            datetime(2026, 10, 11, 19, 35, tzinfo=SYDNEY_TZ),
+            [
+                ("1", 1.0, "2026-10-03T13:59:59Z"),  # Sat 3 Oct 23:59:59 +10: out
+                ("2", 2.0, "2026-10-03T14:00:00Z"),  # Sun 4 Oct 00:00 +10: in
+                ("3", 4.0, "2026-10-10T12:59:59Z"),  # Sat 10 Oct 23:59:59 +11: in
+                ("4", 8.0, "2026-10-10T13:00:00Z"),  # Sun 11 Oct 00:00 +11: today
+            ],
+            datetime(2026, 10, 4, tzinfo=SYDNEY_TZ),
+        ),
+    ],
+    ids=["dst-ends", "dst-starts"],
+)
+def test_last_week_window_spans_a_daylight_saving_change(
+    report_day: datetime, rows: list, expected_start: datetime
+) -> None:
+    """
+    Sydney changes its clocks on a Sunday, so a week window spans the
+    change twice a year. Both edges must stay at local midnight; arithmetic
+    done in UTC or at a fixed offset would move one of them by an hour.
+    """
+    df = pd.DataFrame([_bet(*row) for row in rows])
+
+    report = build_daily_dm_report_from_dataframe(df, report_dt=report_day)
+
+    assert report.last_week_start == expected_start
+    assert report.last_week is not None
+    assert report.last_week.total.gross == 6.0
+    assert report.day_to_date.total.gross == 8.0

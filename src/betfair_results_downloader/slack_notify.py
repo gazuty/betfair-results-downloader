@@ -101,8 +101,10 @@ def escape_mrkdwn(text: str) -> str:
     Slack reads ``<...>`` as a link, mention or command, so exception text
     such as ``<urlopen error [Errno 8] ...>`` would vanish from an alert.
     ``*``, ``_`` and ``~`` are left alone: the messages use ``*bold*`` on
-    purpose, and Slack only formats those around word boundaries. ``&`` is
-    escaped first so the entities added for ``<`` and ``>`` survive.
+    purpose, and Slack only formats those around word boundaries. Raw
+    exception text can still meet that rule by chance (a ``*.csv`` glob),
+    which changes how an alert looks but loses none of it. ``&`` is escaped
+    first so the entities added for ``<`` and ``>`` survive.
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 

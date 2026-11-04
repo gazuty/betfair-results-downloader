@@ -505,11 +505,13 @@ def _load_creds_for_report(
 
 def _cmd_dm_report(args: argparse.Namespace) -> int:
     """
-    Render the OpenClaw-oriented daily DM report from the local results CSV.
+    Render the daily DM report from the local results CSV.
 
-    This command computes week-to-date from the most recent Sunday 00:00
-    Australia/Sydney time and day-to-date from the current day 00:00, then
-    prints the final message body to stdout.
+    Prints the message body to stdout and, with ``--post-slack``, posts it.
+    The sections, all in Australia/Sydney time, are Today, Yesterday and
+    Week to date, with Week to date replaced on Sundays by Last week and
+    followed by Month to date and Year to date; see
+    ``reporting.daily_dm_report``.
     """
     from datetime import datetime
 

@@ -11,7 +11,6 @@
 ### Fixed
 
 - **Slack alerts no longer lose text in angle brackets.** Slack reads `<...>` as link or mention syntax, so an exception such as `<urlopen error [Errno 8] ...>` vanished from the failure alert that reported it. Everything the CLI posts is now escaped for `&`, `<` and `>` (`slack_notify.escape_mrkdwn`).
-
 - **Tiny wins no longer read as commission unknown.** The placeholder rule added in PR #35 treated any winning market stored with zero commission as a pre-close reading, but a win of 9 cents or less is charged 0.00 once Betfair rounds, so 212 genuine zeros were reported as unknown and the Year to date percentages rendered `n/a` for horses and greyhounds. The rule (now `commission.is_placeholder_commission`, shared by the report and the recent-market seed) applies only to wins above 10 cents.
 
 ### Added

@@ -634,20 +634,22 @@ def build_daily_dm_report_from_dataframe(
         profit=float(pending_rows["profit"].sum()) if not pending_rows.empty else 0.0,
     )
 
+    # Keywords, not positions: several arguments share a type, and a swap
+    # would type-check and only show up as wrong figures.
     text = _format_report(
         report_dt_local,
-        week_to_date,
-        day_to_date,
-        hours_stale,
-        pending,
-        yesterday,
-        yesterday_start,
-        month_to_date,
-        month_start,
-        year_to_date,
-        year_start,
-        last_week,
-        last_week_start,
+        week_to_date=week_to_date,
+        day_to_date=day_to_date,
+        hours_stale=hours_stale,
+        pending=pending,
+        yesterday=yesterday,
+        yesterday_start=yesterday_start,
+        month_to_date=month_to_date,
+        month_start=month_start,
+        year_to_date=year_to_date,
+        year_start=year_start,
+        last_week=last_week,
+        last_week_start=last_week_start,
     )
 
     return DailyDmReport(
