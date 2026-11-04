@@ -249,7 +249,8 @@ python -m betfair_results_downloader backfill-commission --from YYYY-MM-DD --to 
 The text is written for Slack, which renders `*bold*`. Each line leads
 with net, the figure read first when Slack wraps the line on a phone. The
 commission rate (commission as a percentage of gross) follows, or `n/a`
-when gross is zero or a loss. A weekday report:
+when gross is zero or a loss, or when any market in the line is commission
+unknown. A weekday report:
 
 ```text
 *Betfair results* · Saturday 6 June, 6:00 AM
@@ -301,18 +302,21 @@ month and year:
 • Soccer: net -$12.25 (gross -$12.25, commission $0.00 · n/a)
 
 *Month to date* (since Monday 1 June)
-• *Total: net $1,706.81* (gross $1,845.60, commission $138.79 · n/a)
+• *Total: net $1,729.99* (gross $1,870.10, commission $140.11 · n/a)
 • Horses: net $1,382.02 (gross $1,502.20, commission $120.18 · 8.0%)
 • Greyhounds: net $291.54 (gross $310.15, commission $18.61 · 6.0%)
 • Golf: net $33.25 (gross $33.25, commission $0.00 · n/a)
+• Tennis: net $23.18 (gross $24.50, commission $1.32 · 5.4%)
 • ⚠️ Commission unknown for 1 market (counted as $0.00)
 
 *Year to date* (since Thursday 1 January)
-• *Total: net $20,259.36* (gross $21,960.85, commission $1,701.49 · 7.7%)
+• *Total: net $20,292.61* (gross $21,994.10, commission $1,701.49 · n/a)
 • Horses: net $17,443.57 (gross $18,960.40, commission $1,516.83 · 8.0%)
 • Greyhounds: net $2,736.06 (gross $2,910.70, commission $174.64 · 6.0%)
 • Tennis: net $175.48 (gross $185.50, commission $10.02 · 5.4%)
 • Soccer: net -$95.75 (gross -$95.75, commission $0.00 · n/a)
+• Golf: net $33.25 (gross $33.25, commission $0.00 · n/a)
+• ⚠️ Commission unknown for 1 market (counted as $0.00)
 
 *Pending* (partially settled, not counted above)
 • None
