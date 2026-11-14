@@ -24,9 +24,9 @@ than it about status (see _hold_unchecked):
 
 - A partially settled market (an outright still being settled leg by leg)
   is held back until Betfair closes it. It then appears once, for the whole
-  market, at its close: the time of its last settled leg when that leg
-  settled within a day of the close being observed, otherwise the moment
-  the close was observed (see :func:`_settled_times`). The website download instead caught the interim
+  market, at its close: the time of its last settled leg when no run saw
+  the market still open after that leg, otherwise the moment the close was
+  observed (see :func:`_settled_times`). The website download instead caught the interim
   legs in one week and the full market again in a later one, which
   double-counted it.
 - A market whose commission is not yet known is held back until a later
@@ -69,6 +69,7 @@ from .market_status import (
     DEFAULT_ABSENT_RECHECK_HOURS,
     RACING_EVENT_TYPE_IDS,
     SOURCE_ABSENT,
+    is_pending_status,
     _fmt_utc,
     _now_utc,
     load_market_status,
@@ -102,9 +103,8 @@ FEED_COLUMNS: list[str] = [
     "market",
     # racecard | catalogue | item_description | fallback (see market_names)
     "nameSource",
-    # The market's last settled leg; for a market seen partially settled
-    # whose last leg is more than a day older than its close, the moment
-    # the close was observed.
+    # The market's last settled leg; for a market still seen open by a run
+    # after that leg, the moment the close was observed.
     "settledUtc",
     "settledLocal",
     "betCount",
@@ -141,11 +141,15 @@ STUCK_COMMISSION_HOURS = 48
 STATUS_REQUIRED_DAYS = 14
 
 
-# How close to the observed close a market's last leg must have settled to
-# be taken as the close itself (see _settled_times). Runs are at most ten
-# hours apart, so a day covers the gap between the run that last saw the
-# market open and the one that saw it closed, with room for a missed run.
-CLOSING_LEG_WINDOW = pd.Timedelta(hours=24)
+# Betfair settles a market's bets and marks the market CLOSED a little
+# apart: on the live store, races whose bets settled at 22:58 were still
+# open to the 23:00 run. A last leg settled this long before the market was
+# last seen open is still taken as its settlement (see _settled_times).
+SETTLEMENT_LAG = pd.Timedelta(hours=1)
+
+# The longest gap between two scheduled runs (09:00 to 19:00), standing in
+# for the last open sighting on status rows that predate lastPendingUtc.
+LONGEST_RUN_GAP = pd.Timedelta(hours=10)
 
 
 @dataclass
@@ -360,37 +364,84 @@ def _settled_times(per_market: pd.DataFrame, market_status: Optional[pd.DataFram
     When each market settled, for the feed's ``settledUtc``/``settledLocal``.
 
     ``last_settled_local`` (from the commission frame) is already right for
-    a market closed at first sight: its last leg. For a market that was ever
-    seen partially settled it is the moment a run *observed* the close. That
-    is the best date for an outright whose last leg for this account settled
-    weeks before the market closed: it appears at its close, not back in a
-    week long since published. But it is a run time, up to seven hours after
-    the fact, and most markets ever seen open are not outrights: of 36 on
-    the live store on 2026-11-15, about 20 were ordinary races and
-    correct-score markets a run happened to catch mid-settlement, one of
-    them moved from 23:00 to 06:00 the next day.
+    a market closed at first sight: its last leg. For a market that was seen
+    partially settled and later closed it is the moment a run *observed* the
+    close. That is the best date for an outright whose last leg for this
+    account settled long before the market closed: it appears at its close,
+    not back in a week long since published. But it is a run time, up to
+    ten hours after the fact, and most markets ever seen open are not
+    outrights: of 36 on the live store on 2026-11-15, about 20 were ordinary
+    races and correct-score markets a run happened to catch between the
+    bets settling and Betfair marking the market CLOSED, 11 of them pushed
+    onto the next day.
 
-    So when the last leg settled within :data:`CLOSING_LEG_WINDOW` before
-    the observed close, the market closed between two runs and that leg is
-    its settlement (Betfair settles the last runners as it closes the
-    market): the feed uses the leg's own time. An older last leg says
-    nothing about when the market closed, and the observed close stands.
+    The status file brackets the real close between the last run that saw
+    the market open and the first that saw it closed. If the last leg
+    settled after that last open sighting, or at most
+    :data:`SETTLEMENT_LAG` before it, nothing shows the market staying open
+    after the leg, and the leg is taken as the settlement. A leg older than
+    that was followed by a run that still saw the market open, so it was an
+    interim leg, and the observed close stands.
+
+    Accepted: an outright's interim leg that settles within the lag before
+    a run, with the market closing before the next run, is dated at that
+    leg, at most one run interval before the true close.
     """
     settled = per_market["last_settled_local"].copy()
     if market_status is None or market_status.empty or per_market.empty:
         return settled
-    seen_open = _ever_pending_keys(market_status)
-    for idx, key, observed_close, last_leg in zip(
-        per_market.index,
-        per_market["_key"],
-        per_market["last_settled_local"],
-        per_market["lastLegUtc"],
+    brackets = _close_brackets(market_status)
+    for idx, key, last_leg in zip(
+        per_market.index, per_market["_key"], per_market["lastLegUtc"]
     ):
-        if key not in seen_open or pd.isna(last_leg) or pd.isna(observed_close):
+        bracket = brackets.get(key)
+        if bracket is None or pd.isna(last_leg):
             continue
-        if observed_close - CLOSING_LEG_WINDOW <= last_leg <= observed_close:
+        last_seen_open, observed_close = bracket
+        if last_seen_open - SETTLEMENT_LAG <= last_leg <= observed_close:
             settled.at[idx] = last_leg.tz_convert(SYDNEY_TZ)
     return settled
+
+
+def _close_brackets(
+    market_status: pd.DataFrame,
+) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    ``key -> (last seen open, close first observed)`` for every market that
+    was seen partially settled and has since been observed CLOSED: the same
+    markets :func:`~.reporting.daily_dm_report.apply_settlement_status`
+    re-dates to the observed close.
+
+    A row last seen open before ``lastPendingUtc`` was recorded has no such
+    time. The run before the one that observed the close must have seen the
+    market open, so the open sighting is taken as one run interval
+    (:data:`LONGEST_RUN_GAP`) before the observed close.
+    """
+
+    def column(name: str) -> pd.Series:
+        if name not in market_status.columns:
+            return pd.Series(
+                pd.NaT, index=market_status.index, dtype="datetime64[ns, UTC]"
+            )
+        return pd.to_datetime(
+            market_status[name], utc=True, errors="coerce", format="ISO8601"
+        )
+
+    keys = market_status["marketId"].fillna("").astype(str).map(decimal_key)
+    closed = ~market_status["status"].map(is_pending_status)
+    first_pending, last_pending, observed = (
+        column("firstPendingUtc"),
+        column("lastPendingUtc"),
+        column("closedObservedUtc"),
+    )
+    out: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for key, is_closed, first, last, close in zip(
+        keys, closed, first_pending, last_pending, observed
+    ):
+        if not key or not is_closed or pd.isna(first) or pd.isna(close):
+            continue
+        out[key] = (last if pd.notna(last) else close - LONGEST_RUN_GAP, close)
+    return out
 
 
 def _first_present(series: pd.Series) -> Any:

@@ -595,3 +595,40 @@ def test_a_failing_status_callback_is_logged_and_does_not_stop_the_step(
         )
     assert result.checked == 1
     assert "Market status callback failed: sink closed" in caplog.text
+
+
+def test_every_open_sighting_moves_last_pending_and_the_close_keeps_it() -> None:
+    """lastPendingUtc and closedObservedUtc bracket the real close for the feed."""
+    from datetime import datetime, timezone
+
+    def at(hour: int) -> datetime:
+        return datetime(2026, 3, 14, hour, 0, tzinfo=timezone.utc)
+
+    open_book = ms.BookStatus("OPEN", 8, ms.SOURCE_BOOK)
+    closed_book = ms.BookStatus("CLOSED", 0, ms.SOURCE_BOOK)
+    df = ms.merge_statuses(ms.empty_status_frame(), {"1.200": open_book}, now=at(6))
+    assert (
+        df.loc[0, "firstPendingUtc"]
+        == df.loc[0, "lastPendingUtc"]
+        == "2026-03-14T06:00:00Z"
+    )
+    df = ms.merge_statuses(df, {"1.200": open_book}, now=at(9))
+    assert df.loc[0, "firstPendingUtc"] == "2026-03-14T06:00:00Z"
+    assert df.loc[0, "lastPendingUtc"] == "2026-03-14T09:00:00Z"
+    df = ms.merge_statuses(df, {"1.200": closed_book}, now=at(19))
+    assert df.loc[0, "lastPendingUtc"] == "2026-03-14T09:00:00Z"
+    assert df.loc[0, "closedObservedUtc"] == "2026-03-14T19:00:00Z"
+
+
+def test_a_status_file_written_before_last_pending_existed_still_loads(
+    tmp_path,
+) -> None:
+    path = tmp_path / ms.STATUS_FILENAME
+    path.write_text(
+        "marketId,status,activeRunners,source,checkedUtc,firstPendingUtc,closedObservedUtc\n"
+        "1.251500100,CLOSED,0,book,2026-03-14T19:00:00Z,2026-03-14T06:00:00Z,2026-03-14T19:00:00Z\n"
+    )
+    loaded = ms.load_market_status(path)
+    assert list(loaded.columns) == ms.STATUS_COLUMNS
+    assert loaded.loc[0, "marketId"] == "1.251500100"
+    assert loaded.loc[0, "lastPendingUtc"] == ""

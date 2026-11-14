@@ -178,7 +178,13 @@ def _store() -> pd.DataFrame:
 
 
 def _status() -> pd.DataFrame:
-    def row(market_id, status, first_pending="", closed="2026-11-14T11:57:00Z"):
+    def row(
+        market_id,
+        status,
+        first_pending="",
+        closed="2026-11-14T11:57:00Z",
+        last_pending="",
+    ):
         return {
             "marketId": market_id,
             "status": status,
@@ -187,15 +193,22 @@ def _status() -> pd.DataFrame:
             "checkedUtc": "2026-11-14T11:57:00Z",
             "firstPendingUtc": first_pending,
             "closedObservedUtc": closed,
+            "lastPendingUtc": last_pending,
         }
 
     rows = [
         row("1.251500100", "CLOSED"),
         row("1.265000002", "CLOSED"),
         row("1.265000003", "CLOSED"),
-        row("1.265000004", "CLOSED", "2026-11-08T09:00:00Z", "2026-11-13T09:00:00Z"),
+        row(
+            "1.265000004",
+            "CLOSED",
+            "2026-11-08T09:00:00Z",
+            "2026-11-13T09:00:00Z",
+            "2026-11-12T23:00:00Z",
+        ),
         row("1.265000005", "CLOSED"),
-        row("1.265000006", "OPEN", "2026-11-12T23:00:00Z", ""),
+        row("1.265000006", "OPEN", "2026-11-12T23:00:00Z", "", "2026-11-14T11:57:00Z"),
         row("1.265000007", "CLOSED"),
     ]
     return pd.DataFrame(rows, columns=STATUS_COLUMNS)
