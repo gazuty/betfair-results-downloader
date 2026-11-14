@@ -219,24 +219,26 @@ def test_the_module_loads_and_updates_without_posix_locking(
     ]
 
 
-def test_importing_the_feed_does_not_need_fcntl(monkeypatch) -> None:
-    import builtins
-    import importlib
+def test_importing_the_feed_does_not_need_fcntl() -> None:
+    """
+    Run in a fresh interpreter with fcntl unavailable. Re-importing in this
+    process would leave the package pointing at a second copy of the
+    modules and silently break other tests' patches.
+    """
+    import subprocess
     import sys
 
-    real_import = builtins.__import__
-
-    def no_fcntl(name, *args, **kwargs):
-        if name == "fcntl":
-            raise ImportError("No module named 'fcntl'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", no_fcntl)
-    for mod in (
-        "betfair_results_downloader.racecard",
-        "betfair_results_downloader.market_results",
-    ):
-        monkeypatch.delitem(sys.modules, mod, raising=False)
-    racecard = importlib.import_module("betfair_results_downloader.racecard")
-    importlib.import_module("betfair_results_downloader.market_results")
-    assert racecard.fcntl is None
+    code = (
+        "import builtins\n"
+        "real = builtins.__import__\n"
+        "def no_fcntl(name, *a, **k):\n"
+        "    if name == 'fcntl':\n"
+        "        raise ImportError(\"No module named 'fcntl'\")\n"
+        "    return real(name, *a, **k)\n"
+        "builtins.__import__ = no_fcntl\n"
+        "import betfair_results_downloader.market_results\n"
+        "import betfair_results_downloader.racecard as rc\n"
+        "assert rc.fcntl is None\n"
+    )
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
