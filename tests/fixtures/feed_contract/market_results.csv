@@ -1,0 +1,6 @@
+marketId,eventTypeId,sport,market,nameSource,settledUtc,settledLocal,betCount,grossProfit,commission,netProfit
+1.265000004,2,Tennis,Tennis / Example Open 2026 : Winner,item_description,2026-11-13T05:53:59Z,2026-11-13 16:53:59,2,24.13,1.3,22.83
+1.265000003,1,Football,Football / Bochum v SV Darmstadt : Over/Under 0.5 Goals,item_description,2026-11-13T12:37:43Z,2026-11-13 23:37:43,1,44.0,2.2,41.8
+1.251500100,7,Horse Racing,Horse Racing / Morphettville (AUS) 14th Nov : R7 1200m Hcp,racecard,2026-11-14T07:04:37Z,2026-11-14 18:04:37,2,11.55,0.63,10.92
+1.265000002,4339,Greyhound Racing,Greyhound Racing / Romford (Unknown) 14th Nov : Win,fallback,2026-11-14T08:01:10Z,2026-11-14 19:01:10,1,-4.0,0.0,-4.0
+1.265000005,7,Horse Racing,Horse Racing / Ascot (Unknown) 14th Nov : Win,fallback,2026-11-14T09:15:00Z,2026-11-14 20:15:00,1,0.07,0.0,0.07

@@ -390,7 +390,11 @@ def _publish_market_results(
         )
 
         result = build_market_results_from_disk(results_dir)
-        path = write_market_results(results_dir, result)
+        # This run has just downloaded, so the feed's lastDownloadUtc moves;
+        # a rebuild from disk (export-market-results) leaves it where it was.
+        path = write_market_results(
+            results_dir, result, downloaded_at=datetime.now(timezone.utc)
+        )
         logger.info("%s Written to %s.", result.message, path)
         if status_cb:
             status_cb(result.message)

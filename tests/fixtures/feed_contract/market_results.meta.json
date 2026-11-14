@@ -1,0 +1,24 @@
+{
+  "canonicalGrossMismatchMarkets": 0,
+  "carriedForwardMarkets": 0,
+  "csvSha256": "a418b3abb7f06f43cf5b6c7e6928d1fe9f670d69eb37e1ee82de408aa9ce1ef9",
+  "dataThroughUtc": "2026-11-14T10:30:00Z",
+  "generatedUtc": "2026-11-14T12:00:00Z",
+  "heldCommissionUnknownMarkets": 1,
+  "heldCommissionUnreachableMarkets": 0,
+  "heldNoMarketIdRows": 0,
+  "heldPendingMarkets": 1,
+  "heldStatusUncheckedMarkets": 0,
+  "lastDownloadUtc": "2026-11-14T11:58:00Z",
+  "markets": 5,
+  "nameSources": {
+    "fallback": 2,
+    "item_description": 2,
+    "racecard": 1
+  },
+  "oldestCommissionUnknownHours": 1.5,
+  "schemaVersion": 1,
+  "settledFromLocal": "2026-11-13 16:53:59",
+  "settledToLocal": "2026-11-14 20:15:00",
+  "unknownCountryMarkets": 2
+}

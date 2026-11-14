@@ -8,8 +8,9 @@ files:
 - ``market_results.csv`` -- one row per market, columns
   :data:`FEED_COLUMNS`. Settled times are given in UTC and, to match the
   website download the dashboard's history came from, as naive Sydney time.
-- ``market_results.meta.json`` -- when the feed was built, a SHA-256 of
-  the CSV, and what was held back. A reader checks the hash so it never
+- ``market_results.meta.json`` -- when the feed was built, when a run last
+  downloaded from Betfair (``lastDownloadUtc``, which a rebuild from disk
+  does not advance), a SHA-256 of the CSV, and what was held back. A reader checks the hash so it never
   pairs a new CSV with an old summary, and can skip a publish when the
   hash is unchanged.
 
@@ -23,10 +24,11 @@ than it about status (see _hold_unchecked):
 
 - A partially settled market (an outright still being settled leg by leg)
   is held back until Betfair closes it. It then appears once, for the whole
-  market, at the moment the close was observed (see
-  :func:`~.reporting.daily_dm_report.apply_settlement_status`). The website
-  download instead caught the interim legs in one week and the full market
-  again in a later one, which double-counted it.
+  market, at its close: the time of its last settled leg when that leg
+  settled within a day of the close being observed, otherwise the moment
+  the close was observed (see :func:`_settled_times`). The website download instead caught the interim
+  legs in one week and the full market again in a later one, which
+  double-counted it.
 - A market whose commission is not yet known is held back until a later
   run reads it (see :func:`~.reporting.daily_dm_report.market_commission_frame`).
   Publishing its gross would overstate it, and publishing gross less zero
@@ -100,8 +102,9 @@ FEED_COLUMNS: list[str] = [
     "market",
     # racecard | catalogue | item_description | fallback (see market_names)
     "nameSource",
-    # The market's last settled leg, or the observed close of a market that
-    # was ever partially settled.
+    # The market's last settled leg; for a market seen partially settled
+    # whose last leg is more than a day older than its close, the moment
+    # the close was observed.
     "settledUtc",
     "settledLocal",
     "betCount",
@@ -136,6 +139,13 @@ STUCK_COMMISSION_HOURS = 48
 # within hours, so an old unrecorded race predates status tracking and is
 # final.
 STATUS_REQUIRED_DAYS = 14
+
+
+# How close to the observed close a market's last leg must have settled to
+# be taken as the close itself (see _settled_times). Runs are at most ten
+# hours apart, so a day covers the gap between the run that last saw the
+# market open and the one that saw it closed, with room for a missed run.
+CLOSING_LEG_WINDOW = pd.Timedelta(hours=24)
 
 
 @dataclass
@@ -345,6 +355,44 @@ def load_previous_feed(results_dir: Path) -> Optional[pd.DataFrame]:
     return pd.read_csv(BytesIO(payload), dtype=str, keep_default_na=False)
 
 
+def _settled_times(per_market: pd.DataFrame, market_status: Optional[pd.DataFrame]):
+    """
+    When each market settled, for the feed's ``settledUtc``/``settledLocal``.
+
+    ``last_settled_local`` (from the commission frame) is already right for
+    a market closed at first sight: its last leg. For a market that was ever
+    seen partially settled it is the moment a run *observed* the close. That
+    is the best date for an outright whose last leg for this account settled
+    weeks before the market closed: it appears at its close, not back in a
+    week long since published. But it is a run time, up to seven hours after
+    the fact, and most markets ever seen open are not outrights: of 36 on
+    the live store on 2026-11-15, about 20 were ordinary races and
+    correct-score markets a run happened to catch mid-settlement, one of
+    them moved from 23:00 to 06:00 the next day.
+
+    So when the last leg settled within :data:`CLOSING_LEG_WINDOW` before
+    the observed close, the market closed between two runs and that leg is
+    its settlement (Betfair settles the last runners as it closes the
+    market): the feed uses the leg's own time. An older last leg says
+    nothing about when the market closed, and the observed close stands.
+    """
+    settled = per_market["last_settled_local"].copy()
+    if market_status is None or market_status.empty or per_market.empty:
+        return settled
+    seen_open = _ever_pending_keys(market_status)
+    for idx, key, observed_close, last_leg in zip(
+        per_market.index,
+        per_market["_key"],
+        per_market["last_settled_local"],
+        per_market["lastLegUtc"],
+    ):
+        if key not in seen_open or pd.isna(last_leg) or pd.isna(observed_close):
+            continue
+        if observed_close - CLOSING_LEG_WINDOW <= last_leg <= observed_close:
+            settled.at[idx] = last_leg.tz_convert(SYDNEY_TZ)
+    return settled
+
+
 def _first_present(series: pd.Series) -> Any:
     present = series.dropna()
     present = present[present.astype(str).str.strip() != ""]
@@ -437,6 +485,7 @@ def build_market_results(
             mkt_marketName=("mkt_marketName", _first_present),
             grossProfit=("profit", "sum"),
             betCount=("profit", "size"),
+            lastLegUtc=("settled_dt_utc", "max"),
         )
         .reset_index()
         # Keys are strings on both sides; an empty frame would otherwise
@@ -444,7 +493,7 @@ def build_market_results(
         .astype({"_key": str})
         .merge(commission.astype({"_key": str}), on="_key", how="left")
     )
-    per_market["settled_dt_local"] = per_market["last_settled_local"]
+    per_market["settled_dt_local"] = _settled_times(per_market, market_status)
 
     blank_id = per_market["_key"].astype(str).str.startswith("blank:")
     unknown = per_market["unknown"].fillna(True).astype(bool)
@@ -698,9 +747,44 @@ def _replace_atomically(path: Path, payload: bytes) -> None:
             tmp_path.unlink()
 
 
-def write_market_results(results_dir: Path, result: FeedResult) -> Path:
+def _previous_last_download(results_dir: Path) -> Optional[str]:
+    """
+    When the feed on disk says a run last downloaded from Betfair.
+
+    A meta written before ``lastDownloadUtc`` existed has only
+    ``generatedUtc``, which then meant the same thing for a run's feed, so
+    it stands in. ``None`` when there is no readable meta at all.
+    """
+    for name in (META_FILENAME, PREV_META_FILENAME):
+        try:
+            meta = json.loads((Path(results_dir) / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        if "lastDownloadUtc" in meta:
+            return meta["lastDownloadUtc"]
+        if meta.get("generatedUtc"):
+            return meta["generatedUtc"]
+    return None
+
+
+def write_market_results(
+    results_dir: Path,
+    result: FeedResult,
+    *,
+    downloaded_at: Optional[datetime] = None,
+) -> Path:
     """
     Write the CSV, then the meta that names its hash.
+
+    ``downloaded_at`` is given by a run, which has just read Betfair, and
+    becomes the meta's ``lastDownloadUtc``. A rebuild from disk
+    (``export-market-results``) leaves it out and the previous value is
+    carried forward: ``generatedUtc`` moves on every write, so a reader
+    that judged freshness by it would take a rebuilt feed for proof that
+    the downloader is still running. ``lastDownloadUtc`` is ``null`` when
+    no run has written a feed here yet.
 
     Each file is replaced atomically. A reader that lands between the two
     replacements sees a hash mismatch and waits for the next run, rather
@@ -723,8 +807,17 @@ def write_market_results(results_dir: Path, result: FeedResult) -> Path:
             results_dir / PREV_META_FILENAME,
             (json.dumps(meta_now, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
+    last_download = (
+        _fmt_utc(_now_utc(downloaded_at))
+        if downloaded_at is not None
+        else _previous_last_download(results_dir)
+    )
     csv_bytes = result.feed.to_csv(index=False).encode("utf-8")
-    meta = dict(result.meta, csvSha256=hashlib.sha256(csv_bytes).hexdigest())
+    meta = dict(
+        result.meta,
+        csvSha256=hashlib.sha256(csv_bytes).hexdigest(),
+        lastDownloadUtc=last_download,
+    )
     _replace_atomically(feed_path, csv_bytes)
     _replace_atomically(
         meta_path,
