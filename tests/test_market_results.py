@@ -54,7 +54,7 @@ def _store(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COMMISSION_COLUMNS).astype(str)
 
 
-def _status(rows: list[tuple]) -> pd.DataFrame:
+def _status(rows: list[tuple], source: str = "book") -> pd.DataFrame:
     """(marketId, status, firstPendingUtc, closedObservedUtc)."""
     return pd.DataFrame(
         [
@@ -62,7 +62,7 @@ def _status(rows: list[tuple]) -> pd.DataFrame:
                 "marketId": mid,
                 "status": st,
                 "activeRunners": "0",
-                "source": "book",
+                "source": source,
                 "checkedUtc": "2026-11-14T11:00:00Z",
                 "firstPendingUtc": first,
                 "closedObservedUtc": closed,
@@ -610,3 +610,193 @@ def test_from_disk_names_racing_from_the_fallback_when_the_racecard_is_damaged(
     result = build_market_results_from_disk(tmp_path, now=NOW)
     assert result.feed["nameSource"].tolist() == ["fallback"]
     assert "racecard unreadable" in result.warnings[0]
+
+
+def test_an_outright_closed_only_by_absence_waits_for_confirmation() -> None:
+    # Seen OPEN, then missing from one listMarketBook response: recorded
+    # CLOSED by absence, re-checked for 48 hours. Its losing leg's zero
+    # commission must not reach the dashboard before then.
+    bets = _bets(
+        [("1", "1.500", "2", "2026-11-14T08:00:00.000Z", "-3.0", "Open 2026", "Winner")]
+    )
+    store = _store(
+        [
+            (
+                "1.500",
+                "2",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "-3.00",
+                "0.00",
+                "2026-11-14T11:00:00Z",
+            )
+        ]
+    )
+    absent = _status(
+        [("1.500", "CLOSED", "2026-11-01T00:00:00Z", "2026-11-14T10:00:00Z")],
+        source="absent",
+    )
+    held = _build(bets, store, absent)
+    assert held.feed.empty and held.meta["heldStatusUncheckedMarkets"] == 1
+
+    confirmed = absent.assign(closedObservedUtc="2026-11-11T10:00:00Z")
+    assert len(_build(bets, store, confirmed).feed) == 1
+
+
+def test_absence_is_enough_for_a_race_and_for_a_long_finished_market() -> None:
+    race = _bets(
+        [("1", "1.600", "7", "2026-11-14T08:00:00.000Z", "-2.0", "19:00 Morph", "Win")]
+    )
+    race_store = _store(
+        [
+            (
+                "1.600",
+                "7",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "-2.00",
+                "0.00",
+                "2026-11-14T11:00:00Z",
+            )
+        ]
+    )
+    absent_now = [("1.600", "CLOSED", "", "2026-11-14T10:00:00Z")]
+    assert len(_build(race, race_store, _status(absent_now, source="absent")).feed) == 1
+
+    # The first-run seed of old untracked outrights: absent because long closed.
+    old = _bets(
+        [("1", "1.700", "1", "2026-03-01T08:00:00.000Z", "-3.0", "Cup", "Winner")]
+    )
+    old_store = _store(
+        [
+            (
+                "1.700",
+                "1",
+                "2026-03-01T08:00:00.000Z",
+                "1",
+                "-3.00",
+                "0.00",
+                "2026-09-13T10:00:00Z",
+            )
+        ]
+    )
+    seeded = _status([("1.700", "CLOSED", "", "2026-11-14T10:00:00Z")], source="absent")
+    assert len(_build(old, old_store, seeded).feed) == 1
+
+
+def _feed_rows(result) -> pd.DataFrame:
+    return result.feed.astype(str)
+
+
+def test_markets_aged_out_of_the_canonical_are_carried_forward() -> None:
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            ),
+            (
+                "2",
+                "1.200",
+                "1",
+                "2026-11-14T09:00:00.000Z",
+                "-4.0",
+                "C v D",
+                "Correct Score",
+            ),
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "10.00",
+                "0.50",
+                "2026-11-14T10:00:00Z",
+            ),
+            (
+                "1.200",
+                "1",
+                "2026-11-14T09:00:00.000Z",
+                "1",
+                "-4.00",
+                "0.00",
+                "2026-11-14T10:00:00Z",
+            ),
+        ]
+    )
+    first = _build(bets, store)
+    # 1.100's bets move to the archives; 1.200 is re-settled to a new figure.
+    later_bets = _bets(
+        [
+            (
+                "2",
+                "1.200",
+                "1",
+                "2026-11-14T09:00:00.000Z",
+                "-5.0",
+                "C v D",
+                "Correct Score",
+            )
+        ]
+    )
+    later_store = store.assign(
+        grossProfit=["10.00", "-5.00"], fetchedUtc="2026-11-14T11:00:00Z"
+    )
+    later = build_market_results(
+        later_bets,
+        market_status=_closed_for(bets),
+        market_commission=later_store,
+        racecard=None,
+        catalogue=None,
+        previous_feed=_feed_rows(first),
+        now=NOW,
+    )
+
+    by_id = later.feed.set_index("marketId")["netProfit"].to_dict()
+    assert by_id == {"1.100": 9.5, "1.200": -5.0}
+    assert later.meta["carriedForwardMarkets"] == 1
+
+
+def test_a_damaged_previous_feed_stops_the_rebuild(tmp_path: Path) -> None:
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "10.00",
+                "0.50",
+                "2026-11-14T09:00:00Z",
+            )
+        ]
+    )
+    _seed_disk(tmp_path, bets, store)
+    write_market_results(tmp_path, build_market_results_from_disk(tmp_path, now=NOW))
+    (tmp_path / FEED_FILENAME).write_text("tampered\n")
+
+    # Rebuilding without it would silently drop every aged-out market.
+    with pytest.raises(ValueError, match="does not match"):
+        build_market_results_from_disk(tmp_path, now=NOW)

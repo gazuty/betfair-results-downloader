@@ -13,11 +13,9 @@ files:
   pairs a new CSV with an old summary, and can skip a publish when the
   hash is unchanged.
 
-The feed is a rolling window over the canonical (``user.canonical_archive_months``,
-12 by default), not the whole history: once a market's bets move to the
-yearly archives it leaves the feed. The dashboard keeps every market it has
-ingested, keyed by marketId, so history is held there; a consumer must do
-the same, and must never delete what has dropped out of the feed.
+The feed is cumulative. A market whose bets have moved out of the rolling
+canonical into the yearly archives keeps the row it last had, carried
+forward from the previous feed, so history never drops out of the file.
 
 A market appears only when its figure is final, decided by the same code
 as the daily DM report so the two never disagree:
@@ -59,7 +57,9 @@ from .market_names import (
 )
 from .market_status import (
     CANONICAL_FILENAME,
+    DEFAULT_ABSENT_RECHECK_HOURS,
     RACING_EVENT_TYPE_IDS,
+    SOURCE_ABSENT,
     _fmt_utc,
     _now_utc,
     load_market_status,
@@ -282,7 +282,93 @@ def _hold_unchecked(
     )
     needs_row = ~racing | (latest >= cutoff)
     unchecked = (keys != "") & ~keys.isin(recorded) & needs_row
-    return final.loc[~unchecked], int(keys[unchecked].nunique())
+    provisional = keys.isin(_provisional_absent_keys(market_status, now_utc))
+    # A non-racing market closed only by absence is not yet confirmed: one
+    # dropped response row records an OPEN outright that way, and the next
+    # runs re-check it (market_status DEFAULT_ABSENT_RECHECK_HOURS). Held if
+    # it could plausibly still be open: seen pending before, or settled a
+    # leg recently. A long-finished market absent from the book on its
+    # first check is closed in fact, and is published.
+    was_pending = keys.isin(_ever_pending_keys(market_status))
+    unconfirmed = provisional & ~racing & (was_pending | (latest >= cutoff))
+    held = unchecked | unconfirmed
+    return final.loc[~held], int(keys[held].nunique())
+
+
+def _ever_pending_keys(market_status: Optional[pd.DataFrame]) -> set[str]:
+    if market_status is None or market_status.empty:
+        return set()
+    first = market_status["firstPendingUtc"].fillna("").astype(str)
+    ids = market_status.loc[first != "", "marketId"].fillna("").astype(str)
+    return set(ids.map(decimal_key))
+
+
+def _provisional_absent_keys(
+    market_status: Optional[pd.DataFrame], now_utc: datetime
+) -> set[str]:
+    """Markets recorded CLOSED by absence within the re-check window."""
+    if market_status is None or market_status.empty:
+        return set()
+    closed_at = pd.to_datetime(
+        market_status["closedObservedUtc"], utc=True, errors="coerce", format="ISO8601"
+    )
+    window = pd.Timestamp(now_utc) - pd.Timedelta(hours=DEFAULT_ABSENT_RECHECK_HOURS)
+    mask = (
+        (market_status["source"].astype(str) == SOURCE_ABSENT)
+        & (market_status["status"].astype(str).str.upper() == "CLOSED")
+        & closed_at.notna()
+        & (closed_at >= window)
+    )
+    return set(
+        market_status.loc[mask, "marketId"].fillna("").astype(str).map(decimal_key)
+    )
+
+
+def _carry_forward(
+    feed: pd.DataFrame,
+    previous_feed: Optional[pd.DataFrame],
+    canonical_keys: set[str],
+) -> tuple[pd.DataFrame, int]:
+    """Append the previous feed's rows for markets no longer in the canonical."""
+    if previous_feed is None or previous_feed.empty:
+        return feed, 0
+    prev = previous_feed.reindex(columns=FEED_COLUMNS).copy()
+    keys = prev["marketId"].fillna("").astype(str).map(decimal_key)
+    keep = prev.loc[(keys != "") & ~keys.isin(canonical_keys)].copy()
+    if keep.empty:
+        return feed, 0
+    for col in ("grossProfit", "commission", "netProfit"):
+        keep[col] = pd.to_numeric(keep[col], errors="raise").round(2)
+    keep["betCount"] = pd.to_numeric(keep["betCount"], errors="raise").astype(int)
+    merged = pd.concat([keep, feed], ignore_index=True) if len(feed) else keep
+    merged = merged.sort_values(["settledUtc", "marketId"]).reset_index(drop=True)
+    return merged.reindex(columns=FEED_COLUMNS), len(keep)
+
+
+def load_previous_feed(results_dir: Path) -> Optional[pd.DataFrame]:
+    """
+    The feed last written, for carrying aged-out markets forward.
+
+    ``None`` when there is none yet. A feed that does not match its meta
+    or is of another schema raises: rebuilding without it would silently
+    drop every market that has aged out of the canonical.
+    """
+    feed_path = Path(results_dir) / FEED_FILENAME
+    meta_path = Path(results_dir) / META_FILENAME
+    if not feed_path.exists():
+        return None
+    payload = feed_path.read_bytes()
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta.get("schemaVersion") != SCHEMA_VERSION:
+        raise ValueError(
+            f"Previous feed is schema {meta.get('schemaVersion')!r}, expected "
+            f"{SCHEMA_VERSION}; not carrying it forward."
+        )
+    if hashlib.sha256(payload).hexdigest() != meta.get("csvSha256"):
+        raise ValueError(
+            "Previous feed does not match its meta; not carrying it forward."
+        )
+    return pd.read_csv(feed_path, dtype=str, keep_default_na=False)
 
 
 def _first_present(series: pd.Series) -> Any:
@@ -343,11 +429,22 @@ def build_market_results(
     market_commission: Optional[pd.DataFrame],
     racecard: Optional[pd.DataFrame],
     catalogue: Optional[pd.DataFrame],
+    previous_feed: Optional[pd.DataFrame] = None,
     now: Optional[datetime] = None,
 ) -> FeedResult:
-    """Build the feed and its meta from frames already in memory."""
+    """
+    Build the feed and its meta from frames already in memory.
+
+    ``previous_feed`` is the last feed written (strings, as read from disk).
+    Its rows for markets the canonical no longer holds at all -- their bets
+    have moved to the yearly archives -- are carried forward unchanged, so
+    the feed is cumulative without re-reading the archives on every run. A
+    market still in the canonical is always rebuilt from it, so a carried
+    row can never shadow a newer figure.
+    """
     now_utc = _now_utc(now)
     normalized = normalize_cleared_orders_schema(df_raw)
+    canonical_keys = set(normalized["marketId"].fillna("").astype(str).map(decimal_key))
     settled = normalized.dropna(subset=["settled_dt_local"]).copy()
     data_through = settled["settled_dt_utc"].max() if not settled.empty else None
 
@@ -392,6 +489,7 @@ def build_market_results(
     feed, gross_mismatch_markets = _finish_ready_markets(
         ready, market_commission, racecard=racecard, catalogue=catalogue
     )
+    feed, carried = _carry_forward(feed, previous_feed, canonical_keys)
 
     # Stuck commission: rows with no marketId can never be read, so they are
     # counted separately rather than alerting on every run forever.
@@ -423,7 +521,10 @@ def build_market_results(
         "settledFromLocal": feed["settledLocal"].min() if len(feed) else None,
         "settledToLocal": feed["settledLocal"].max() if len(feed) else None,
         "heldPendingMarkets": pending_markets,
+        # No status row yet, or closed only by absence and not yet confirmed.
         "heldStatusUncheckedMarkets": unchecked_markets,
+        # Markets aged out of the canonical, kept from the previous feed.
+        "carriedForwardMarkets": carried,
         "heldCommissionUnknownMarkets": int(len(held_with_id)),
         "oldestCommissionUnknownHours": oldest_unknown_hours,
         "heldNoMarketIdRows": int(blank_id.sum()),
@@ -490,7 +591,9 @@ def build_market_results_from_disk(
     """
     Build the feed from the files a run leaves in ``results_dir``.
 
-    An unreadable status or commission file raises: without the status a
+    The previous feed is read to carry forward markets that have aged out
+    of the canonical; a damaged one raises rather than drop them. An
+    unreadable status or commission file raises: without the status a
     pending outright would be published as final, and without commission
     every market would be held back. The previous feed then stays in place
     and ages, which the dashboard notices. A damaged racecard only costs
@@ -517,6 +620,7 @@ def build_market_results_from_disk(
         market_commission=market_commission,
         racecard=racecard,
         catalogue=_load_catalogue_cache(cache_dir),
+        previous_feed=load_previous_feed(results_dir),
         now=now,
     )
     result.warnings[:0] = warnings
