@@ -48,7 +48,11 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from .commission import load_market_commission, resolve_commission_path
+from .commission import (
+    DEFAULT_REQUERY_LOOKBACK_DAYS,
+    load_market_commission,
+    resolve_commission_path,
+)
 from .csv_utils import decimal_key
 from .downloader_core import resolve_enrichment_cache_dir
 from .market_names import (
@@ -525,6 +529,13 @@ def build_market_results(
     # Stuck commission: rows with no marketId can never be read, so they are
     # counted separately rather than alerting on every run forever.
     held_with_id = held.loc[~held["_key"].astype(str).str.startswith("blank:")]
+    # Betfair serves grouped (commission) rows for about a year, so a market
+    # older than that -- an archive or an old backfill -- can never learn
+    # its commission. It is counted, not alerted on every run.
+    reach = pd.Timestamp(now_utc) - pd.Timedelta(days=DEFAULT_REQUERY_LOOKBACK_DAYS)
+    unreachable = pd.to_datetime(held_with_id["last_settled_local"], utc=True) < reach
+    unreachable_markets = int(unreachable.sum())
+    held_with_id = held_with_id.loc[~unreachable]
     oldest_unknown_hours: Optional[float] = None
     if not held_with_id.empty:
         oldest = pd.to_datetime(held_with_id["last_settled_local"]).min()
@@ -559,6 +570,7 @@ def build_market_results(
         "heldCommissionUnknownMarkets": int(len(held_with_id)),
         "oldestCommissionUnknownHours": oldest_unknown_hours,
         "heldNoMarketIdRows": int(blank_id.sum()),
+        "heldCommissionUnreachableMarkets": unreachable_markets,
         "nameSources": {
             k: int(v) for k, v in feed["nameSource"].value_counts().items()
         },
@@ -616,6 +628,49 @@ def _load_catalogue_cache(cache_dir: Path) -> Optional[pd.DataFrame]:
         return None
 
 
+ARCHIVE_GLOB = "cleared_orders_archive_*.csv.gz"
+
+
+def archive_signature(results_dir: Path) -> list[list[Any]]:
+    """Name, size and modification time of every yearly archive, sorted."""
+    return [
+        [path.name, path.stat().st_size, path.stat().st_mtime_ns]
+        for path in sorted(Path(results_dir).glob(ARCHIVE_GLOB))
+    ]
+
+
+def _previous_archive_signature(results_dir: Path) -> Optional[list[list[Any]]]:
+    """The archive signature the last feed was built with; None if unknown."""
+    for name in (META_FILENAME, PREV_META_FILENAME):
+        path = Path(results_dir) / name
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if "archiveSignature" in meta:
+            return meta["archiveSignature"]
+    return None
+
+
+def _load_archives(results_dir: Path) -> pd.DataFrame:
+    """
+    Every archived bet, the columns the feed needs only.
+
+    Raises on an unreadable archive: the new signature is recorded once the
+    feed is written, so a skipped archive would never be read again.
+    """
+    frames = [
+        pd.read_csv(
+            path,
+            dtype=str,
+            keep_default_na=False,
+            usecols=lambda c: c in _CANONICAL_COLUMNS,
+        )
+        for path in sorted(Path(results_dir).glob(ARCHIVE_GLOB))
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def build_market_results_from_disk(
     results_dir: Path, *, now: Optional[datetime] = None
 ) -> FeedResult:
@@ -645,6 +700,21 @@ def build_market_results_from_disk(
         )
     df_raw = _load_canonical(results_dir)
     df_raw = supplement_with_archived_legs(df_raw, market_status, results_dir)
+    # Archived markets reach the feed once, when the archives change: the
+    # yearly roll moves bets out of the canonical, and a backfill of old
+    # dates writes ordinary markets straight into an archive, so neither
+    # would otherwise ever have a feed row to carry forward. Unchanged
+    # archives are already in the previous feed and are not read again.
+    signature = archive_signature(results_dir)
+    if signature and signature != _previous_archive_signature(results_dir):
+        from .downloader_core import _rows_not_already_held  # noqa: PLC0415
+
+        extra = _rows_not_already_held(df_raw, _load_archives(results_dir))
+        if len(extra):
+            df_raw = pd.concat([df_raw, extra], ignore_index=True)
+        logger.info(
+            "Results feed: read the yearly archives (%d new row(s)).", len(extra)
+        )
     result = build_market_results(
         df_raw,
         market_status=market_status,
@@ -654,6 +724,7 @@ def build_market_results_from_disk(
         previous_feed=load_previous_feed(results_dir),
         now=now,
     )
+    result.meta["archiveSignature"] = signature
     result.warnings[:0] = warnings
     return result
 

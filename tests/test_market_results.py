@@ -847,3 +847,103 @@ def test_an_interrupted_write_heals_from_the_previous_generation(
         == hashlib.sha256((tmp_path / FEED_FILENAME).read_bytes()).hexdigest()
     )
     assert rebuilt.feed["netProfit"].tolist() == [9.5]
+
+
+def test_a_backfilled_archive_market_reaches_the_feed_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    A backfill of old dates writes an ordinary market straight into a yearly
+    archive. It has no feed row to carry forward, so the changed archive is
+    read; after that it is carried forward without reading the archive.
+    """
+    from betfair_results_downloader import market_results as mr
+
+    recent = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    archived = _bets(
+        [
+            (
+                "9",
+                "1.900",
+                "1",
+                "2026-01-10T08:00:00.000Z",
+                "6.0",
+                "E v F",
+                "Correct Score",
+            )
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "10.00",
+                "0.50",
+                "2026-11-14T09:00:00Z",
+            ),
+            (
+                "1.900",
+                "1",
+                "2026-01-10T08:00:00.000Z",
+                "1",
+                "6.00",
+                "0.30",
+                "2026-09-13T10:00:00Z",
+            ),
+        ]
+    )
+    _seed_disk(tmp_path, recent, store)
+    archived.to_csv(tmp_path / "cleared_orders_archive_2026.csv.gz", index=False)
+    # Status rows for both, as the seed would record them.
+    save_market_status(
+        _closed_for(pd.concat([recent, archived])),
+        resolve_status_path(tmp_path / ".cache"),
+    )
+
+    first = build_market_results_from_disk(tmp_path, now=NOW)
+    assert sorted(first.feed["marketId"]) == ["1.100", "1.900"]
+    write_market_results(tmp_path, first)
+
+    def must_not_read(_dir):
+        raise AssertionError("unchanged archives must not be re-read")
+
+    monkeypatch.setattr(mr, "_load_archives", must_not_read)
+    second = build_market_results_from_disk(tmp_path, now=NOW)
+    assert sorted(second.feed["marketId"]) == ["1.100", "1.900"]
+    assert second.meta["carriedForwardMarkets"] == 1
+
+
+def test_a_market_older_than_betfairs_commission_reach_is_counted_not_alerted() -> None:
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2025-06-01T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    result = _build(bets, store=_store([]))
+    assert result.feed.empty
+    assert result.meta["heldCommissionUnreachableMarkets"] == 1
+    assert result.meta["heldCommissionUnknownMarkets"] == 0
+    assert result.warnings == []
