@@ -351,7 +351,10 @@ def _refresh_racecard(
 
 
 def _publish_market_results(
-    results_dir: Path, status_cb: Optional[Any] = None
+    results_dir: Path,
+    status_cb: Optional[Any] = None,
+    *,
+    status_failed: bool = False,
 ) -> list[str]:
     """
     Rebuild the results feed the dashboard reads (see market_results).
@@ -361,7 +364,18 @@ def _publish_market_results(
     feed stays in place and ages, and the returned ⚠️ warning reaches
     Slack. Also returns the feed's own warnings (a market stuck without
     commission).
+
+    Skipped when this run's status step failed. The status file is then
+    stale for this window, and a market that has just started settling in
+    stages would be published as final; the previous feed is kept instead.
     """
+    if status_failed:
+        warning = (
+            "⚠️ Results feed not rebuilt because the settlement status check "
+            "failed; the dashboard keeps the previous feed until a run succeeds."
+        )
+        logger.warning(warning)
+        return [warning]
     try:
         from ..market_results import (  # noqa: PLC0415
             build_market_results_from_disk,
@@ -475,7 +489,9 @@ def _run_pipeline_inner(
             racecard_warning = _refresh_racecard(client, results_dir)
             # A quiet run still rebuilds the feed: it is the run that sees an
             # outright close or a late commission land.
-            feed_warnings = _publish_market_results(results_dir)
+            feed_warnings = _publish_market_results(
+                results_dir, status_failed=status_warning is not None
+            )
             empty_warnings = [
                 w for w in (status_warning, commission_warning, racecard_warning) if w
             ] + feed_warnings
@@ -572,7 +588,9 @@ def _run_pipeline_inner(
         )
 
         racecard_warning = _refresh_racecard(client, results_dir, _say)
-        feed_warnings = _publish_market_results(results_dir, _say)
+        feed_warnings = _publish_market_results(
+            results_dir, _say, status_failed=status_warning is not None
+        )
 
         run_warnings = [
             w

@@ -210,3 +210,16 @@ def test_a_stuck_commission_warning_from_the_feed_reaches_the_message(
         result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
 
     assert "⚠️ Results feed: stuck" in result.message
+
+
+def test_a_failed_status_check_keeps_the_previous_feed(tmp_path: Path) -> None:
+    (tmp_path / FEED_FILENAME).write_text("previous")
+    client = _client()
+    client.betting.list_market_book.side_effect = RuntimeError("book down")
+    p1, p2, p3, p4 = _patches(tmp_path, _window(), client)
+    with p1, p2, p3, p4:
+        result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
+
+    assert result.ok and result.status == "success"
+    assert "settlement status check failed" in result.message
+    assert (tmp_path / FEED_FILENAME).read_text() == "previous"

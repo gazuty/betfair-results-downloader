@@ -73,7 +73,21 @@ def _status(rows: list[tuple]) -> pd.DataFrame:
     )
 
 
-def _build(bets, store, status=None, racecard=None, catalogue=None):
+_ALL_CLOSED = object()
+
+
+def _closed_for(bets: pd.DataFrame) -> pd.DataFrame:
+    """Status rows recording every market in ``bets`` as closed at first sight."""
+    ids = sorted({m for m in bets["marketId"] if m})
+    return _status([(m, "CLOSED", "", "2026-11-14T11:00:00Z") for m in ids])
+
+
+def _build(bets, store, status=_ALL_CLOSED, racecard=None, catalogue=None):
+    # By default every market has been seen closed, as the status step
+    # records every market a run touches; tests about missing or pending
+    # status pass their own.
+    if status is _ALL_CLOSED:
+        status = _closed_for(bets)
     return build_market_results(
         bets,
         market_status=status,
@@ -370,6 +384,62 @@ def test_rows_without_a_market_id_are_counted_but_never_alert() -> None:
     assert result.warnings == []
 
 
+def test_a_recent_market_with_no_status_row_is_held_back() -> None:
+    # The status step failed or has not reached it: publishing would treat
+    # a newly opened outright as finished.
+    bets = _bets(
+        [("1", "1.100", "2", "2026-11-14T08:00:00.000Z", "-3.0", "Open 2026", "Winner")]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "2",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "-3.00",
+                "0.00",
+                "2026-11-14T09:00:00Z",
+            )
+        ]
+    )
+    result = _build(bets, store, status=_status([]))
+    assert result.feed.empty
+    assert result.meta["heldStatusUncheckedMarkets"] == 1
+
+
+def test_an_old_market_with_no_status_row_predates_tracking_and_is_final() -> None:
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2026-08-01T08:00:00.000Z",
+                "-3.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-08-01T08:00:00.000Z",
+                "1",
+                "-3.00",
+                "0.00",
+                "2026-08-02T09:00:00Z",
+            )
+        ]
+    )
+    result = _build(bets, store, status=None)
+    assert result.feed["netProfit"].tolist() == [-3.0]
+    assert result.meta["heldStatusUncheckedMarkets"] == 0
+
+
 def test_written_feed_round_trips_and_the_meta_names_its_hash(tmp_path: Path) -> None:
     bets = _bets(
         [
@@ -414,7 +484,7 @@ def _seed_disk(tmp_path: Path, bets: pd.DataFrame, store: pd.DataFrame) -> Path:
     bets.to_csv(tmp_path / "cleared_orders_cleaned.csv", index=False)
     cache = tmp_path / ".cache"
     save_market_commission(store, resolve_commission_path(cache))
-    save_market_status(_status([]), resolve_status_path(cache))
+    save_market_status(_closed_for(bets), resolve_status_path(cache))
     return cache
 
 

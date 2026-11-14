@@ -109,6 +109,15 @@ _CANONICAL_COLUMNS = [
 # still missing after this long is stuck, not late, and is worth a warning.
 STUCK_COMMISSION_HOURS = 48
 
+# A market settled within this many days must have a settlement-status row
+# before it is published. The status step records every market a run
+# touches and seeds a fortnight of unrecorded ones (market_status
+# DEFAULT_RECENT_DAYS), so a recent market without a row means that step
+# failed or has not reached it yet -- and the report's rule that "no row
+# means final" would publish a newly opened outright as finished. Older
+# markets without a row predate status tracking and stay final.
+STATUS_REQUIRED_DAYS = 14
+
 # How long after an observed close a zero commission must still read zero
 # before the feed accepts it as final (see _confirmed_zero_commission_keys).
 CONFIRMED_ZERO_AFTER = timedelta(hours=24)
@@ -236,6 +245,26 @@ def _confirmed_zero_commission_keys(
     return set(joined.loc[ok, "_key"])
 
 
+def _hold_unchecked_recent(
+    final: pd.DataFrame,
+    market_status: Optional[pd.DataFrame],
+    now_utc: datetime,
+) -> tuple[pd.DataFrame, int]:
+    """Drop recent markets that have no status row; return them as a count."""
+    if final.empty:
+        return final, 0
+    recorded: set[str] = set()
+    if market_status is not None and not market_status.empty:
+        recorded = set(
+            market_status["marketId"].fillna("").astype(str).map(decimal_key)
+        )
+    keys = final["marketId"].fillna("").astype(str).map(decimal_key)
+    latest = final.groupby(keys)["settled_dt_utc"].transform("max")
+    cutoff = pd.Timestamp(now_utc) - pd.Timedelta(days=STATUS_REQUIRED_DAYS)
+    unchecked = (keys != "") & ~keys.isin(recorded) & (latest >= cutoff)
+    return final.loc[~unchecked], int(keys[unchecked].nunique())
+
+
 def _first_present(series: pd.Series) -> Any:
     present = series.dropna()
     present = present[present.astype(str).str.strip() != ""]
@@ -303,6 +332,7 @@ def build_market_results(
     data_through = settled["settled_dt_utc"].max() if not settled.empty else None
 
     final, pending_rows = apply_settlement_status(settled, market_status)
+    final, unchecked_markets = _hold_unchecked_recent(final, market_status, now_utc)
     final = final.reset_index(drop=True)
     commission = market_commission_frame(final, market_commission, market_status)
 
@@ -373,6 +403,7 @@ def build_market_results(
         "settledFromLocal": feed["settledLocal"].min() if len(feed) else None,
         "settledToLocal": feed["settledLocal"].max() if len(feed) else None,
         "heldPendingMarkets": pending_markets,
+        "heldStatusUncheckedMarkets": unchecked_markets,
         "heldCommissionUnknownMarkets": int(len(held_with_id)),
         "oldestCommissionUnknownHours": oldest_unknown_hours,
         "heldNoMarketIdRows": int(blank_id.sum()),
@@ -397,8 +428,9 @@ def build_market_results(
         )
     message = (
         f"Results feed: {len(feed):,} markets; held back "
-        f"{pending_markets:,} partially settled and {len(held_with_id):,} "
-        f"commission-unknown; names {meta['nameSources']}."
+        f"{pending_markets:,} partially settled, {unchecked_markets:,} with no "
+        f"settlement status yet and {len(held_with_id):,} commission-unknown; "
+        f"names {meta['nameSources']}."
     )
     return FeedResult(feed=feed, meta=meta, message=message, warnings=warnings)
 
