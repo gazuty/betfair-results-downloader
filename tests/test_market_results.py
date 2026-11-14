@@ -241,6 +241,9 @@ def test_a_market_stuck_without_commission_past_48_hours_warns() -> None:
 
 
 def test_a_zero_commission_confirmed_a_day_after_close_is_final() -> None:
+    # $0.40 is above the 15-cent placeholder threshold, so this is the
+    # feed's safety net: a rate lower than any seen yet. Still zero a day
+    # after the observed close means it is Betfair's final answer.
     bets = _bets(
         [
             (
@@ -248,7 +251,7 @@ def test_a_zero_commission_confirmed_a_day_after_close_is_final() -> None:
                 "1.264531699",
                 "7",
                 "2026-10-28T04:12:07.000Z",
-                "0.11",
+                "0.40",
                 "15:12 Bendigo",
                 "Win",
             )
@@ -263,14 +266,14 @@ def test_a_zero_commission_confirmed_a_day_after_close_is_final() -> None:
                 "7",
                 "2026-10-28T04:12:07.000Z",
                 "24",
-                "0.11",
+                "0.40",
                 "0.00",
                 "2026-11-10T22:00:21Z",
             )
         ]
     )
     accepted = _build(bets, read_late, status)
-    assert accepted.feed["netProfit"].tolist() == [0.11]
+    assert accepted.feed["netProfit"].tolist() == [0.40]
 
     read_early = read_late.assign(fetchedUtc="2026-10-28T09:00:00Z")
     held = _build(bets, read_early, status)

@@ -13,6 +13,12 @@ files:
   pairs a new CSV with an old summary, and can skip a publish when the
   hash is unchanged.
 
+The feed is a rolling window over the canonical (``user.canonical_archive_months``,
+12 by default), not the whole history: once a market's bets move to the
+yearly archives it leaves the feed. The dashboard keeps every market it has
+ingested, keyed by marketId, so history is held there; a consumer must do
+the same, and must never delete what has dropped out of the feed.
+
 A market appears only when its figure is final, decided by the same code
 as the daily DM report so the two never disagree:
 
@@ -184,12 +190,15 @@ def _confirmed_zero_commission_keys(
     Markets whose zero commission is Betfair's final answer, not the
     pre-close placeholder :func:`market_commission_frame` takes it for.
 
-    The placeholder rule treats a zero against a win above 10 cents as
+    The placeholder rule treats a zero against a win above 15 cents as
     unknown, because a partially settled market reports 0.0 until it
-    closes. That is right for a read taken before the close, but a small
-    win at a low rate can genuinely be charged nothing: market 1.264531699
-    won $0.11 and still read $0.00 thirteen days after it closed. Left as
-    unknown it would be held back, and alerted on, forever.
+    closes. That is right for a read taken before the close, but Betfair
+    rounds commission to the nearest cent, so a win at a rate below any
+    seen so far can still genuinely be charged nothing. Market 1.264531699
+    ($0.11 won, still $0.00 thirteen days after it closed) showed the
+    threshold was once too low. This is the safety net for the next such
+    case: without it the market would be held back, and alerted on,
+    forever.
 
     A zero is accepted only when all of these hold: the market was never
     seen partially settled, the status step saw it CLOSED, the store row

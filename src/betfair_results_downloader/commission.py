@@ -95,12 +95,17 @@ DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 
 # A winning market whose stored commission is zero is a pre-close
 # placeholder (Betfair charges on every win), unless the win is so small
-# that the charge rounds to nothing: 9 cents at 5.4% is 0.0049, reported
-# as 0.00. Above this gross a zero cannot be a genuine charge. Verified on
-# the live store on 2026-09-13: of 217 winning markets with zero
-# commission, 212 had gross at or below 9 cents and the other 5 were the
-# open outrights.
-PLACEHOLDER_MIN_GROSS = 0.10
+# that the charge rounds to nothing. Betfair rounds commission to the
+# nearest cent: under half a cent is 0.00, and from half a cent it is 0.01
+# (7-cent wins were charged 0.01). The threshold is the largest win whose
+# charge can round to zero at the lowest rate Betfair has charged: on the
+# live store on 2026-11-14, wins of $1 or more paid between 3.31% and 10.4%
+# (median 5.45%), and 0.005 / 0.0331 is just over 15 cents. Below that a zero
+# may be genuine; above it a zero cannot be, and the market is read again.
+# The same store held 246 zero-commission wins, none above 11 cents, so the
+# rule leaves no genuine zero unknown. Previously 10 cents, taken from a 5.4%
+# rate, which wrongly held a $0.11 win at about 4% as unknown.
+PLACEHOLDER_MIN_GROSS = 0.15
 
 # The store is never pruned: the report's Year to date section reads a
 # full year of it, and a year of markets is a few megabytes of CSV.

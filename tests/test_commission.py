@@ -465,11 +465,16 @@ def test_recent_seed_asks_for_the_full_spelling_of_a_damaged_id() -> None:
 
 
 def test_placeholder_rule_ignores_wins_too_small_to_be_charged() -> None:
-    """9 cents at 5.4% rounds to a 0.00 charge; that zero is final."""
+    """
+    Below half a cent Betfair charges 0.00; at the lowest rate seen (3.31%)
+    that is any win up to 15 cents, so those zeros are final.
+    """
     assert cm.is_placeholder_commission("412.00", "0.00")
-    assert cm.is_placeholder_commission(0.11, 0)
+    assert cm.is_placeholder_commission(0.16, 0)
     assert not cm.is_placeholder_commission("0.09", "0.00")
-    assert not cm.is_placeholder_commission("0.10", "0.00")
+    # Market 1.264531699: won $0.11, still $0.00 thirteen days after closing.
+    assert not cm.is_placeholder_commission(0.11, 0)
+    assert not cm.is_placeholder_commission("0.15", "0.00")
     assert not cm.is_placeholder_commission("-6.50", "0.00")
     assert not cm.is_placeholder_commission("412.00", "22.00")
     assert not cm.is_placeholder_commission("", "0.00")
