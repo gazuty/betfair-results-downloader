@@ -568,3 +568,30 @@ class TestUpdate:
             )
 
         assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_failing_status_callback_is_logged_and_does_not_stop_the_step(
+    tmp_path, caplog
+) -> None:
+    """The callback is a courtesy; its failure must be visible, not swallowed."""
+    from unittest.mock import MagicMock
+
+    from betfair_results_downloader.market_status import update_market_status
+
+    client = MagicMock()
+    client.betting.list_market_book.return_value = []
+
+    def broken(_msg: str) -> None:
+        raise RuntimeError("sink closed")
+
+    with caplog.at_level("WARNING"):
+        result = update_market_status(
+            client=client,
+            cache_dir=tmp_path,
+            df_window=pd.DataFrame({"marketId": ["1.251500100"]}),
+            df_canonical=None,
+            status_cb=broken,
+            sleep_seconds=0,
+        )
+    assert result.checked == 1
+    assert "Market status callback failed: sink closed" in caplog.text

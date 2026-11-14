@@ -283,3 +283,148 @@ def test_status_does_not_crash_on_a_dash_pid(monkeypatch, tmp_path: Path) -> Non
     assert info["loaded"] is True
     assert info["pid"] is None
     assert info["last_exit"] is None
+
+
+# ---------------------------------------------------------------------------
+# install: a loaded job is replaced, not collided with
+# ---------------------------------------------------------------------------
+
+
+def _install_with(
+    monkeypatch,
+    tmp_path: Path,
+    bootstrap_code: int = 0,
+    bootout_code: int = 3,
+    bootstrap_codes: tuple[int, ...] = (),
+    **cfg,
+):
+    """
+    Run install() with launchctl recorded; returns (result, calls, plist).
+
+    ``bootout_code`` 3 is "nothing loaded" (a first install), 0 a loaded
+    copy removed. ``bootstrap_codes`` gives one exit code per attempt.
+    """
+    import subprocess
+
+    from betfair_results_downloader.scheduler.installers import launchd
+
+    plist = tmp_path / "com.betfair.results.scheduler.plist"
+    monkeypatch.setattr(launchd, "PLIST_PATH", plist)
+    monkeypatch.setattr(launchd, "AGENTS_DIR", tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        if args[1] == "bootout":
+            return subprocess.CompletedProcess(
+                args, bootout_code, "", "No such process"
+            )
+        code = attempts.pop(0) if attempts else bootstrap_code
+        return subprocess.CompletedProcess(args, code, "", "boom")
+
+    attempts = list(bootstrap_codes)
+    monkeypatch.setattr(launchd.subprocess, "run", fake_run)
+    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: calls.append(["sleep"]))
+    result = LaunchdInstaller().install(
+        schedule_cfg=_cfg(**cfg),
+        repo_root=tmp_path,
+        venv_python_path=Path(sys.executable),
+        log_dir=tmp_path / "logs",
+    )
+    return result, calls, plist
+
+
+def test_install_boots_out_a_loaded_copy_before_bootstrapping(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """
+    Without the bootout a reinstall failed on "service already loaded" after
+    rewriting the plist: launchd kept the old times, the file showed the new.
+    """
+    result, calls, plist = _install_with(monkeypatch, tmp_path, primary_time="07:15")
+    assert result["ok"] is True
+    assert [c[1] for c in calls] == ["bootout", "bootstrap"]
+    assert calls[0][2].endswith(f"/{LABEL}")
+    assert calls[1][3] == str(plist)
+    written = plistlib.loads(plist.read_bytes())["StartCalendarInterval"]
+    assert {"Hour": 7, "Minute": 15} in written
+
+
+def test_a_first_install_succeeds_though_there_is_nothing_to_boot_out(
+    monkeypatch, tmp_path: Path
+) -> None:
+    result, calls, _plist = _install_with(monkeypatch, tmp_path)
+    assert result["ok"] is True and "Installed and loaded" in result["message"]
+    assert len(calls) == 2
+
+
+def test_a_failed_bootstrap_is_still_reported(monkeypatch, tmp_path: Path) -> None:
+    result, _calls, _plist = _install_with(monkeypatch, tmp_path, bootstrap_code=5)
+    assert result["ok"] is False
+    assert "launchctl bootstrap failed (exit 5): boom" in result["message"]
+
+
+def test_a_bootstrap_refused_right_after_the_bootout_is_tried_once_more(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """launchd can refuse while it is still tearing the old job down."""
+    result, calls, _plist = _install_with(
+        monkeypatch, tmp_path, bootout_code=0, bootstrap_codes=(5, 0)
+    )
+    assert result["ok"] is True
+    assert [c[0] if c == ["sleep"] else c[1] for c in calls] == [
+        "bootout",
+        "bootstrap",
+        "sleep",
+        "bootstrap",
+    ]
+
+
+def test_a_job_booted_out_and_not_replaced_is_called_out(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """
+    The worst outcome of a reinstall: the old job is gone and the new one
+    did not load. That job will never run, so it can never alert; the
+    install's own message is the only warning there will be.
+    """
+    result, calls, _plist = _install_with(
+        monkeypatch, tmp_path, bootout_code=0, bootstrap_codes=(5, 5)
+    )
+    assert result["ok"] is False
+    assert "launchctl bootstrap failed (exit 5): boom" in result["message"]
+    assert "NO scheduled job is loaded now" in result["message"]
+    assert sum(1 for c in calls if c[:2] == ["launchctl", "bootstrap"]) == 2
+
+
+def test_a_failed_first_install_does_not_claim_a_job_was_unloaded(
+    monkeypatch, tmp_path: Path
+) -> None:
+    result, calls, _plist = _install_with(monkeypatch, tmp_path, bootstrap_code=5)
+    assert result["ok"] is False
+    assert "NO scheduled job" not in result["message"]
+    assert ["sleep"] not in calls, "nothing was torn down, so nothing to wait for"
+
+
+def test_install_racecard_calls_out_a_job_it_unloaded_and_could_not_replace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import subprocess
+
+    from betfair_results_downloader.scheduler.installers import launchd
+
+    monkeypatch.setattr(launchd, "RACECARD_PLIST_PATH", tmp_path / "racecard.plist")
+    monkeypatch.setattr(launchd, "AGENTS_DIR", tmp_path)
+    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        launchd.subprocess,
+        "run",
+        lambda args, **_kw: subprocess.CompletedProcess(
+            args, 0 if args[1] == "bootout" else 5, "", "boom"
+        ),
+    )
+    result = LaunchdInstaller().install_racecard(
+        repo_root=tmp_path, venv_python_path=Path(sys.executable), log_dir=tmp_path
+    )
+    assert result["ok"] is False
+    assert f"previous {launchd.RACECARD_LABEL} job was unloaded" in result["message"]

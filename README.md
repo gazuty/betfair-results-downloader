@@ -35,7 +35,7 @@ Then:
 
 1. Create your credentials file (see [Credentials file](#credentials-file)) — copy `secrets/credentials.template.json` as a starting point.
 2. Enroll a Betfair client certificate (see [Betfair Certificate Enrollment](#betfair-certificate-enrollment)) and verify with `betfair-results auth-test`.
-3. Run a one-off download: `betfair-results run` — five phases: download → enrich → CSV → market status → Azure (if enabled).
+3. Run a one-off download: `betfair-results run` — download → enrich → CSV → market status → commission → racecard → results feed → Azure (if enabled).
 4. *(Optional)* Install the daily scheduled job: `betfair-results schedule install`.
 
 ### Lookback (auto)
@@ -336,8 +336,10 @@ python -m betfair_results_downloader run
 6. Writes canonical + gzip snapshot CSVs, archives rows older than `user.canonical_archive_months`, and prunes snapshots beyond `user.snapshot_retention_days`.
 7. Checks per-market settlement status via `listMarketBook` and updates `<results_csv_dir>/.cache/market_settlement_status.csv` — this is what lets `dm-report` hold back partially settled outrights (see [Enrichment cache](#enrichment-cache-results_csv_dircache) and `docs/openclaw-dm-reporting.md`). Non-fatal: a failure is announced as a warning and the run continues, with the report treating that window's markets as fully settled until the next run re-checks them.
 8. Reads per-market commission via `listClearedOrders` (grouped by market) for the run's window, plus a re-query of every market ever seen pending whose figure is not yet final, and updates `<results_csv_dir>/.cache/market_commission.csv` — this is what lets `dm-report` show commission and net alongside gross (see [Enrichment cache](#enrichment-cache-results_csv_dircache) and `docs/openclaw-dm-reporting.md`). Non-fatal: a failure is announced as a warning and the run continues, with the report showing that window's markets as commission unknown until a later run re-reads them (recent markets missing from the store are re-read by id on every run).
-9. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
-10. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
+9. Captures the forward racecard (see [`racecard`](#racecard)) so racing markets settling before the next run keep their full names. Non-fatal: a failure is announced as a warning.
+10. Rebuilds the results feed (`market_results.csv` and its meta, see [Outputs](#outputs)) from the files the steps above left on disk. Non-fatal: on failure, or when this run's settlement-status check failed, the previous feed is kept and the run carries a warning.
+11. Optionally publishes to Azure SQL (see [Azure Publish Safety Gates — Scheduled Mode](#azure-publish-safety-gates-scheduled-mode)). A failed publish records the run as `partial`, never as published.
+12. On success: upserts `dbo.ScheduleState` with both UTC and scheduler-local coverage dates plus the latest confirmed settled timestamp (monotonic — an empty download keeps the previous checkpoint), writes audit markers, appends to `run_history.jsonl`. Failed runs are also recorded in `run_history.jsonl`.
 
 Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
 
@@ -478,6 +480,8 @@ python -m betfair_results_downloader schedule status
 python -m betfair_results_downloader schedule uninstall
 python -m betfair_results_downloader schedule logs [--tail N]
 python -m betfair_results_downloader schedule install-racecard     # hourly racecard job
+# Either install replaces a copy that is already loaded, which stops a run in
+# progress: reinstall between the scheduled times.
 python -m betfair_results_downloader schedule uninstall-racecard
 ```
 
@@ -866,6 +870,7 @@ settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 
 - **A market sits in "Pending" for weeks** — expected for outrights (tournament winners, season markets): Betfair settles losers early and the market only closes at the final. Inspect `<results_csv_dir>/.cache/market_settlement_status.csv`; `status` OPEN with `activeRunners > 0` confirms it. The run log's "Oldest pending market first seen N day(s) ago" line tracks it.
 - **A sport line appears one day and not the next** — only sports with a settlement in the window get a line; Horses and Greyhounds are always shown.
+- **"⚠️ N bet rows have an unreadable profit (counted as $0.00); oldest settled <date>"** — that many rows in the canonical have a profit that is blank or not a number, so every total that includes them is off by their real amount. The canonical is damaged at those rows; re-download their dates with `backfill` (rows are replaced by `betId`).
 - **Yesterday differs between the 6:00 AM and 7:35 PM reports** — it should not; both cover the same closed day. A difference means a market closed in between and was counted on its close day, or a late download filled in yesterday's rows.
 - **"Commission unknown for N markets" in a section** — those markets have no trustworthy row yet in `<results_csv_dir>/.cache/market_commission.csv`: either nothing has been read for them, or they were only read before they closed (a partially settled market reports commission `0.0` until it closes). They are counted as $0.00 commission until the next run re-reads them; run `backfill-commission` to fill the gap immediately instead of waiting.
 

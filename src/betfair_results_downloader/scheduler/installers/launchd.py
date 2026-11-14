@@ -17,6 +17,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,54 @@ def _installed_times() -> list[str]:
     )
 
 
+# launchd can refuse a bootstrap that follows a bootout too closely, while
+# it is still tearing the old job down ("Bootstrap failed: 5: Input/output
+# error"). One retry after this pause covers it.
+BOOTSTRAP_RETRY_SECONDS = 2.0
+
+
+def _replace_loaded_job(label: str, plist_path: Path) -> str | None:
+    """
+    Load ``plist_path`` in place of any copy of ``label`` already loaded.
+
+    Boots the loaded copy out first. Without that a reinstall with new
+    times wrote the plist and then failed on "service already loaded":
+    launchd kept the old times while ``schedule status``, which reads the
+    file, reported the new ones. A bootout that fails because nothing was
+    loaded is the normal first install. Booting out stops a run that is in
+    progress, exactly as ``uninstall`` does.
+
+    Returns ``None`` on success, else the message to show. The message
+    says when the old job is gone and nothing replaced it: that job will
+    never run, so it will never raise a failure alert of its own.
+    """
+    uid = _get_gui_uid()
+    bootout = subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}/{label}"],
+        capture_output=True,
+        text=True,
+    )
+    was_loaded = bootout.returncode == 0
+    command = ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0 and was_loaded:
+        time.sleep(BOOTSTRAP_RETRY_SECONDS)
+        result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode == 0:
+        return None
+    message = (
+        f"Plist written to {plist_path} but launchctl bootstrap failed "
+        f"(exit {result.returncode}): {result.stderr.strip()}"
+    )
+    if was_loaded:
+        message += (
+            f". The previous {label} job was unloaded first, so NO scheduled "
+            f"job is loaded now and nothing will run until this install "
+            f"succeeds: fix the cause and run it again."
+        )
+    return message
+
+
 class LaunchdInstaller:
     """
     macOS launchd scheduler installer.
@@ -225,21 +274,9 @@ class LaunchdInstaller:
         AGENTS_DIR.mkdir(parents=True, exist_ok=True)
         PLIST_PATH.write_bytes(plist_bytes)
 
-        uid = _get_gui_uid()
-        result = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", str(PLIST_PATH)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return {
-                "ok": False,
-                "plist_path": str(PLIST_PATH),
-                "message": (
-                    f"Plist written to {PLIST_PATH} but launchctl bootstrap failed "
-                    f"(exit {result.returncode}): {result.stderr.strip()}"
-                ),
-            }
+        failure = _replace_loaded_job(LABEL, PLIST_PATH)
+        if failure:
+            return {"ok": False, "plist_path": str(PLIST_PATH), "message": failure}
 
         return {
             "ok": True,
@@ -319,25 +356,12 @@ class LaunchdInstaller:
         )
         AGENTS_DIR.mkdir(parents=True, exist_ok=True)
         RACECARD_PLIST_PATH.write_bytes(plist_bytes)
-        uid = _get_gui_uid()
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{uid}/{RACECARD_LABEL}"],
-            capture_output=True,
-            text=True,
-        )
-        result = subprocess.run(
-            ["launchctl", "bootstrap", f"gui/{uid}", str(RACECARD_PLIST_PATH)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        failure = _replace_loaded_job(RACECARD_LABEL, RACECARD_PLIST_PATH)
+        if failure:
             return {
                 "ok": False,
                 "plist_path": str(RACECARD_PLIST_PATH),
-                "message": (
-                    f"Plist written to {RACECARD_PLIST_PATH} but launchctl bootstrap "
-                    f"failed (exit {result.returncode}): {result.stderr.strip()}"
-                ),
+                "message": failure,
             }
         return {
             "ok": True,

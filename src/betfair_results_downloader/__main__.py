@@ -5,6 +5,7 @@ Subcommands:
   auth-test     — cert-based non-interactive login test
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
   backfill      — explicit date-range download
+  backfill-commission — read per-market commission for a date range
   racecard      — capture the forward racing card (full racing market names)
   export-market-results — rebuild the dashboard results feed from disk
   audit         — report missing settled-date gaps in the canonical CSV
@@ -701,7 +702,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     """
     Install, uninstall, query status, or show logs for the platform scheduler.
 
-    Actions: install | uninstall | status | logs [--tail N]
+    Actions: install | uninstall | install-racecard | uninstall-racecard |
+    status | logs [--tail N]
     """
     import logging
 
@@ -729,7 +731,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         repo_root = Path(__file__).resolve().parents[2]
         import sys
 
-        venv_python = Path(getattr(args, "python", None) or sys.executable)
+        venv_python = Path(sys.executable)
 
         # Apply CLI time overrides to schedule config if provided
         if getattr(args, "time", None) or getattr(args, "retries", None):
@@ -770,7 +772,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         log_dir = Path(schedule_cfg.log_dir or str(repo_root / "outputs")).expanduser()
         result = installer.install_racecard(
             repo_root=repo_root,
-            venv_python_path=Path(getattr(args, "python", None) or sys.executable),
+            venv_python_path=Path(sys.executable),
             log_dir=log_dir,
         )
         print(result["message"])
