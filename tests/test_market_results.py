@@ -1037,7 +1037,7 @@ def test_rereading_archives_keeps_carried_rows_and_adds_only_new_markets(
             (
                 "1.900",
                 "2",
-                "2025-11-25T08:00:00.000Z",
+                "2025-10-25T08:00:00.000Z",
                 "1",
                 "6.00",
                 "0.30",

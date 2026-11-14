@@ -17,8 +17,9 @@ The feed is cumulative. A market whose bets have moved out of the rolling
 canonical into the yearly archives keeps the row it last had, carried
 forward from the previous feed, so history never drops out of the file.
 
-A market appears only when its figure is final, decided by the same code
-as the daily DM report so the two never disagree:
+A market appears only when its figure is final. The feed uses the same
+settlement and commission rules as the daily DM report, and is stricter
+than it about status (see _hold_unchecked):
 
 - A partially settled market (an outright still being settled leg by leg)
   is held back until Betfair closes it. It then appears once, for the whole
@@ -560,10 +561,12 @@ def _load_catalogue_cache(cache_dir: Path) -> Optional[pd.DataFrame]:
 ARCHIVE_GLOB = "cleared_orders_archive_*.csv.gz"
 
 # Marks rows read from the yearly archives for a market the feed never had.
-# Every leg of such a market settled more than the archive window ago (a
-# year by default), so it is final whether or not a status row survives:
-# CLOSED rows are pruned after 400 days, and history from before status
-# tracking never had one.
+# Once its latest leg is ARCHIVE_FINAL_DAYS old it is final whether or not a
+# status row survives (CLOSED rows are pruned after 400 days, and history
+# from before status tracking never had one). With the default 12-month
+# archive window every archived market is that old. With a shorter window
+# a younger one waits in heldStatusUncheckedMarkets until it is a year old,
+# because the status seed does not read the archives.
 ARCHIVED_COLUMN = "_fromArchive"
 
 # An archive-only market counts as final without a status row only when its
