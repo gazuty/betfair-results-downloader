@@ -854,6 +854,7 @@ settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 
 ### Downloads
 
+- **"… did not start: the pipeline lock … is held by pid N (command, started …)"** — another downloader command is writing the same results directory. `run`, `backfill`, `backfill-commission` and `export-market-results` take one lock between them (`<results_csv_dir>/.pipeline.lock`) so they cannot overwrite each other's files. Wait for the named command to finish and run yours again. `run` waits up to ten minutes before failing this way, whether launchd or a person started it, and the next scheduled run then covers the same window. The lock is released when its process exits, however it exits, so there is never a stale lock to delete.
 - **Credentials not found** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
 - **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
 - **Azure publish silently skipped** — verify all four safety gates are open (see [Azure SQL Publishing](#azure-sql-publishing)).

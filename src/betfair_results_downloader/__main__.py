@@ -298,6 +298,7 @@ def _cmd_backfill_commission(args: argparse.Namespace) -> int:
         resolve_status_path,
     )
     from .paths import resolve_results_dir
+    from .run_lock import PipelineBusy, pipeline_lock
     from .scheduler.auth import build_api_client
 
     if from_date < date.today() - timedelta(days=DEFAULT_REQUERY_LOOKBACK_DAYS):
@@ -317,30 +318,38 @@ def _cmd_backfill_commission(args: argparse.Namespace) -> int:
     results_dir = resolve_results_dir(creds)
     cache_dir = resolve_enrichment_cache_dir(results_dir)
 
+    # The lock comes before the login: a scheduled run rewriting the same
+    # commission store would lose one side's rows, and a command refused for
+    # that reason should not have opened a Betfair session first.
     try:
-        client = build_api_client(creds.get("betfair") or {})
-    except Exception as exc:
-        print(f"FAIL: Betfair authentication failed: {exc}")
+        with pipeline_lock(results_dir, command="backfill-commission"):
+            try:
+                client = build_api_client(creds.get("betfair") or {})
+            except Exception as exc:
+                print(f"FAIL: Betfair authentication failed: {exc}")
+                return 1
+            try:
+                result = update_market_commission(
+                    client=client,
+                    cache_dir=cache_dir,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    df_status=load_market_status(resolve_status_path(cache_dir)),
+                    df_canonical=load_canonical_market_dates(results_dir),
+                    chunk_days=schedule_cfg.chunk_days,
+                    status_cb=print,
+                )
+            except Exception as exc:
+                print(f"FAIL: commission backfill raised {type(exc).__name__}: {exc}")
+                return 1
+            finally:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+    except PipelineBusy as exc:
+        print(f"FAIL: {exc}")
         return 1
-    try:
-        result = update_market_commission(
-            client=client,
-            cache_dir=cache_dir,
-            from_dt=from_dt,
-            to_dt=to_dt,
-            df_status=load_market_status(resolve_status_path(cache_dir)),
-            df_canonical=load_canonical_market_dates(results_dir),
-            chunk_days=schedule_cfg.chunk_days,
-            status_cb=print,
-        )
-    except Exception as exc:
-        print(f"FAIL: commission backfill raised {type(exc).__name__}: {exc}")
-        return 1
-    finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
     print(f"OK: {result.message}")
     return 0
 
@@ -419,11 +428,18 @@ def _cmd_export_market_results(_args: argparse.Namespace) -> int:
 
     from .market_results import build_market_results_from_disk, write_market_results
     from .paths import resolve_results_dir
+    from .run_lock import PipelineBusy, pipeline_lock
 
     results_dir = resolve_results_dir(creds)
     try:
-        result = build_market_results_from_disk(results_dir)
-        path = write_market_results(results_dir, result)
+        # Under the lock so the feed is never built from a canonical or a
+        # store that a run is half-way through replacing one after another.
+        with pipeline_lock(results_dir, command="export-market-results"):
+            result = build_market_results_from_disk(results_dir)
+            path = write_market_results(results_dir, result)
+    except PipelineBusy as exc:
+        print(f"FAIL: {exc}")
+        return 1
     except Exception as exc:
         print(f"FAIL: results feed not rebuilt ({type(exc).__name__}: {exc})")
         return 1

@@ -686,8 +686,9 @@ def build_market_results_from_disk(
 
 
 def _replace_atomically(path: Path, payload: bytes) -> None:
-    # The pid keeps a manual export-market-results and a scheduled run from
-    # sharing one temp file; the hash check covers an interleaved pair.
+    # Writers are serialised by the pipeline lock (run_lock). The pid in the
+    # name and the reader's hash check are the second line of defence where
+    # that lock is unavailable: no shared temp file, no mismatched pair read.
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp_path.write_bytes(payload)

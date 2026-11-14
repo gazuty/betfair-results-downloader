@@ -20,6 +20,7 @@ import pandas as pd
 
 from ..config import ScheduleConfig
 from ..paths import resolve_results_dir
+from ..run_lock import PipelineBusy, pipeline_lock
 from .auth import build_api_client
 from .gap_detector import compute_backfill_window, derive_coverage_dates
 from .state import append_run_history, upsert_schedule_state, write_today_success_marker
@@ -49,6 +50,12 @@ class RunResult:
 # Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
 # every run; writing it onto a full disk is the one moment damage is possible,
 # and the 2026-08-30/31 incidents both began as a full disk nothing reported.
+# How long the unattended scheduled run waits for another command to finish
+# before giving up. A manual export or commission backfill takes seconds to
+# a few minutes; a full run about two. Past this the run fails and says so,
+# and the next scheduled run covers the same window through gap detection.
+SCHEDULED_LOCK_WAIT_SECONDS = 600.0
+
 DISK_HARD_FLOOR_BYTES = 2 * 1024**3
 DISK_SOFT_FLOOR_BYTES = 10 * 1024**3
 
@@ -402,16 +409,40 @@ def _run_pipeline(
     schedule_cfg: ScheduleConfig,
     from_dt_utc: datetime,
     to_dt_utc: datetime,
+    *,
+    command: str = "run",
+    lock_wait_seconds: float = 0.0,
 ) -> RunResult:
     """
-    Run the download → enrich → CSV → Azure pipeline for one window.
+    Run the pipeline for one window: download, enrich, write the CSVs,
+    record settlement status and commission, capture the racecard, rebuild
+    the results feed and publish to Azure.
+
+    Holds the pipeline lock throughout (see :mod:`..run_lock`), so a
+    scheduled run and a manual command cannot overwrite each other's
+    files. A lock still busy after ``lock_wait_seconds`` is a failed run
+    that touched nothing.
 
     Never raises: any unhandled exception is converted into a failed
     :class:`RunResult` so the caller always records the attempt in
     ``run_history.jsonl``.
     """
     try:
-        return _run_pipeline_inner(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+        with pipeline_lock(
+            _resolve_results_dir(creds),
+            command=command,
+            wait_seconds=lock_wait_seconds,
+        ):
+            return _run_pipeline_inner(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    except PipelineBusy as exc:
+        logger.error("%s", exc)
+        return RunResult(
+            ok=False,
+            status="failed",
+            from_dt_utc=from_dt_utc,
+            to_dt_utc=to_dt_utc,
+            message=str(exc),
+        )
     except Exception as exc:
         logger.exception("Scheduled pipeline failed with an unhandled error.")
         return RunResult(
@@ -751,7 +782,14 @@ def run_scheduled(
     from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
-    result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    result = _run_pipeline(
+        creds,
+        schedule_cfg,
+        from_dt_utc,
+        to_dt_utc,
+        command="run",
+        lock_wait_seconds=SCHEDULED_LOCK_WAIT_SECONDS,
+    )
     if disk_warning:
         # Attached before state and history are written: the operational
         # record must carry the same warning the operator is alerted with --
@@ -871,7 +909,10 @@ def run_backfill(
     to_dt_utc = datetime(end_day.year, end_day.month, end_day.day, tzinfo=timezone.utc)
 
     logger.info("Backfill run: %s → %s", from_dt_utc, to_dt_utc)
-    result = _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc)
+    # No wait: a person typed this and should be told at once what is running.
+    result = _run_pipeline(
+        creds, schedule_cfg, from_dt_utc, to_dt_utc, command="backfill"
+    )
     if disk_warning:
         # The operator sees only the result message; a soft warning discarded
         # here would leave a manual rewrite of the canonical unwarned.
