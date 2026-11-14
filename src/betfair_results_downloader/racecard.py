@@ -26,11 +26,14 @@ dropped once it can no longer be bet on.
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 import pandas as pd
 from betfairlightweight import filters
@@ -126,10 +129,14 @@ def load_racecard(path: Path) -> pd.DataFrame:
 
 
 def save_racecard(df: pd.DataFrame, path: Path) -> None:
-    """Write via a temp file and rename so a crash cannot leave a torn file."""
+    """
+    Write via a temp file and rename so a crash cannot leave a torn file.
+    The temp name carries the process id so two writers never share it;
+    :func:`update_racecard` also serialises them with :func:`_store_lock`.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         df.reindex(columns=RACECARD_COLUMNS).to_csv(tmp_path, index=False)
         tmp_path.replace(path)
@@ -261,6 +268,27 @@ def prune_racecard(
     return df.loc[recent | was_bet].reset_index(drop=True)
 
 
+@contextmanager
+def _store_lock(path: Path) -> Iterator[None]:
+    """
+    Exclusive lock on the store for one load-merge-save.
+
+    The hourly job and a scheduled run can overlap (a run that lasts past
+    half past, or a run time configured at :30). Without the lock the later
+    save would replace the store with a merge that never saw the other
+    process's capture. ``flock`` is released when the file closes, including
+    when the process dies, so a crash cannot leave the store locked.
+    """
+    lock_path = Path(path).with_name(Path(path).name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def update_racecard(
     *,
     client: Any,
@@ -273,17 +301,21 @@ def update_racecard(
     Capture the forward racecard, merge it into the store, prune, save.
 
     Raises on an API failure or an unreadable store, leaving the store on
-    disk untouched; the caller decides how loudly to report it.
+    disk untouched; the caller decides how loudly to report it. Concurrent
+    updates are serialised, so each merges into the other's result.
     """
     now_utc = _now_utc(now)
     path = resolve_racecard_path(cache_dir)
-    store = load_racecard(path)
+    # Fetch outside the lock: the API calls are the slow part, and the
+    # store is only read and written once the capture is in hand.
     cats, truncated = fetch_racecard(client, now=now_utc)
     captured_utc = _fmt_utc(now_utc)
     rows = [r for r in (catalogue_to_row(c, captured_utc) for c in cats) if r]
-    merged = merge_racecard(store, rows)
-    pruned = prune_racecard(merged, bet_market_keys=bet_market_keys, now=now_utc)
-    save_racecard(pruned, path)
+    with _store_lock(path):
+        store = load_racecard(path)
+        merged = merge_racecard(store, rows)
+        pruned = prune_racecard(merged, bet_market_keys=bet_market_keys, now=now_utc)
+        save_racecard(pruned, path)
 
     message = (
         f"Racecard: captured {len(rows):,} racing markets; store holds {len(pruned):,}."

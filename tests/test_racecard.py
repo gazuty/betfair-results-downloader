@@ -155,3 +155,47 @@ def test_the_store_round_trips_market_ids_as_strings(tmp_path: Path) -> None:
     )
     save_racecard(df, path)
     assert load_racecard(path)["marketId"].tolist() == ["1.251500100"]
+
+
+def test_concurrent_updates_both_land_in_the_store(tmp_path: Path) -> None:
+    """
+    The hourly job and a scheduled run overlapping: the second save must
+    merge into the first's result, not replace it with a stale merge.
+    """
+    import threading
+
+    from betfair_results_downloader import racecard as rc
+
+    first_loaded = threading.Event()
+    real_load = rc.load_racecard
+
+    def slow_first_load(path):
+        df = real_load(path)
+        if threading.current_thread().name == "first":
+            first_loaded.set()
+            # Hold the store open long enough for the second update to try.
+            threading.Event().wait(0.3)
+        return df
+
+    def run(name: str, market_id: str) -> None:
+        client = MagicMock()
+        client.betting.list_market_catalogue.return_value = [_cat(market_id)]
+        update_racecard(
+            client=client, cache_dir=tmp_path, bet_market_keys=set(), now=NOW
+        )
+
+    rc.load_racecard = slow_first_load
+    try:
+        first = threading.Thread(target=run, args=("first", "1.111"), name="first")
+        second = threading.Thread(target=run, args=("second", "1.222"), name="second")
+        first.start()
+        first_loaded.wait(2)
+        second.start()
+        first.join(5)
+        second.join(5)
+    finally:
+        rc.load_racecard = real_load
+
+    stored = load_racecard(resolve_racecard_path(tmp_path))
+    assert set(stored["marketId"]) == {"1.111", "1.222"}
+    assert not list(tmp_path.glob("*.tmp"))
