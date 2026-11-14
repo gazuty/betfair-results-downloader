@@ -59,6 +59,7 @@ from .market_names import (
 )
 from .market_status import (
     CANONICAL_FILENAME,
+    RACING_EVENT_TYPE_IDS,
     _fmt_utc,
     _now_utc,
     load_market_status,
@@ -115,13 +116,15 @@ _CANONICAL_COLUMNS = [
 # still missing after this long is stuck, not late, and is worth a warning.
 STUCK_COMMISSION_HOURS = 48
 
-# A market settled within this many days must have a settlement-status row
-# before it is published. The status step records every market a run
-# touches and seeds a fortnight of unrecorded ones (market_status
-# DEFAULT_RECENT_DAYS), so a recent market without a row means that step
-# failed or has not reached it yet -- and the report's rule that "no row
-# means final" would publish a newly opened outright as finished. Older
-# markets without a row predate status tracking and stay final.
+# A market must have a settlement-status row before it is published, unless
+# it is a racing market settled more than this many days ago. The report's
+# rule that "no row means final" would otherwise publish an outright that
+# is still open as finished. The status step records every market a run
+# touches, seeds a fortnight of unrecorded ones, and seeds every unrecorded
+# non-racing market of any age (market_status). So a missing row means that
+# step failed or has not reached the market yet. Racing markets close
+# within hours, so an old unrecorded race predates status tracking and is
+# final.
 STATUS_REQUIRED_DAYS = 14
 
 # How long after an observed close a zero commission must still read zero
@@ -254,12 +257,12 @@ def _confirmed_zero_commission_keys(
     return set(joined.loc[ok, "_key"])
 
 
-def _hold_unchecked_recent(
+def _hold_unchecked(
     final: pd.DataFrame,
     market_status: Optional[pd.DataFrame],
     now_utc: datetime,
 ) -> tuple[pd.DataFrame, int]:
-    """Drop recent markets that have no status row; return them as a count."""
+    """Drop markets that must have a status row and don't; return the count."""
     if final.empty:
         return final, 0
     recorded: set[str] = set()
@@ -270,7 +273,15 @@ def _hold_unchecked_recent(
     keys = final["marketId"].fillna("").astype(str).map(decimal_key)
     latest = final.groupby(keys)["settled_dt_utc"].transform("max")
     cutoff = pd.Timestamp(now_utc) - pd.Timedelta(days=STATUS_REQUIRED_DAYS)
-    unchecked = (keys != "") & ~keys.isin(recorded) & (latest >= cutoff)
+    racing = (
+        final["eventTypeId"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .isin(RACING_EVENT_TYPE_IDS)
+    )
+    needs_row = ~racing | (latest >= cutoff)
+    unchecked = (keys != "") & ~keys.isin(recorded) & needs_row
     return final.loc[~unchecked], int(keys[unchecked].nunique())
 
 
@@ -341,7 +352,7 @@ def build_market_results(
     data_through = settled["settled_dt_utc"].max() if not settled.empty else None
 
     final, pending_rows = apply_settlement_status(settled, market_status)
-    final, unchecked_markets = _hold_unchecked_recent(final, market_status, now_utc)
+    final, unchecked_markets = _hold_unchecked(final, market_status, now_utc)
     final = final.reset_index(drop=True)
     commission = market_commission_frame(final, market_commission, market_status)
 

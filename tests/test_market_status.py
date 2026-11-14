@@ -253,6 +253,49 @@ class TestSelect:
 
         assert chosen == ["1.new", "1.mid"]
 
+    def test_untracked_non_racing_markets_of_any_age_are_seeded(self) -> None:
+        """
+        An outright can stay open for months, so its latest leg can be older
+        than the fortnight seed; racing cannot, so old races are left alone.
+        """
+        status = _frame(_status_row("1.known", "CLOSED"))
+        canonical = pd.DataFrame(
+            {
+                "marketId": ["1.outright", "1.race", "1.dogs", "1.known", "1.golf"],
+                "eventTypeId": ["2", "7", "4339", "1", "3"],
+                "settledDate": [
+                    "2026-03-01T00:00:00Z",
+                    "2026-03-01T00:00:00Z",
+                    "2026-03-01T00:00:00Z",
+                    "2026-03-01T00:00:00Z",
+                    "2026-04-01T00:00:00Z",
+                ],
+            }
+        )
+
+        chosen = ms.select_markets_to_check([], status, canonical, now=NOW)
+        assert chosen == ["1.golf", "1.outright"]
+
+        capped = ms.select_markets_to_check(
+            [], status, canonical, now=NOW, max_untracked_non_racing=1
+        )
+        assert capped == ["1.golf"]
+
+    def test_the_seed_reads_event_types_from_the_canonical_on_disk(
+        self, tmp_path: Path
+    ) -> None:
+        pd.DataFrame(
+            {
+                "betId": ["1"],
+                "marketId": ["1.251500100"],
+                "eventTypeId": ["2"],
+                "settledDate": ["2026-03-01T00:00:00Z"],
+            }
+        ).to_csv(tmp_path / ms.CANONICAL_FILENAME, index=False)
+        loaded = ms.load_canonical_market_dates(tmp_path)
+        assert set(loaded.columns) == {"marketId", "eventTypeId", "settledDate"}
+        assert loaded.loc[0, "marketId"] == "1.251500100"
+
     def test_no_canonical_and_no_file_is_just_the_window(self) -> None:
         chosen = ms.select_markets_to_check(
             ["1.1", float("nan"), ""], None, None, now=NOW

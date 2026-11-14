@@ -88,6 +88,17 @@ DEFAULT_RECENT_DAYS = 14
 # the Azure publish, and the remainder is picked up next run.
 DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 
+# Ceiling on untracked non-racing markets of any age seeded per run (see
+# select_markets_to_check). Outrights can stay open for months, so the
+# fortnight seed above cannot vouch for them; on 2026-11-14 the canonical
+# held 3,669 non-racing markets with no record (status tracking began on
+# 2026-09-06), about 92 calls of 40 -- one run's worth.
+DEFAULT_MAX_UNTRACKED_NON_RACING = 5_000
+
+# Racing markets close within hours of the race, so an untracked racing
+# market older than the fortnight seed cannot still be open.
+RACING_EVENT_TYPE_IDS = frozenset({"7", "4339"})
+
 # A market closed by absence is asked about again for this long. An open
 # market is always returned, so a genuine close stays absent and costs one
 # extra id per run for two days; a market that was merely dropped from one
@@ -210,7 +221,9 @@ def load_canonical_market_dates(results_dir: Path) -> Optional[pd.DataFrame]:
             path,
             dtype=str,
             keep_default_na=False,
-            usecols=["marketId", "settledDate"],
+            # eventTypeId when present: it lets the seed tell outrights,
+            # which can stay open for months, from racing.
+            usecols=lambda c: c in {"marketId", "settledDate", "eventTypeId"},
         )
     except (OSError, ValueError) as exc:
         logger.warning(
@@ -300,6 +313,7 @@ def select_markets_to_check(
     recent_days: int = DEFAULT_RECENT_DAYS,
     max_recent_unknown: int = DEFAULT_MAX_RECENT_UNKNOWN,
     absent_recheck_hours: int = DEFAULT_ABSENT_RECHECK_HOURS,
+    max_untracked_non_racing: int = DEFAULT_MAX_UNTRACKED_NON_RACING,
 ) -> list[str]:
     """
     The ids to ask Betfair about this run:
@@ -312,7 +326,12 @@ def select_markets_to_check(
       final;
     - up to ``max_recent_unknown`` canonical markets settled within
       ``recent_days`` (newest first) that have no record yet -- the
-      self-heal after a failed step, and the first-run seed.
+      self-heal after a failed step, and the first-run seed;
+    - up to ``max_untracked_non_racing`` canonical markets of any age that
+      are not racing and have no record (newest first), when the canonical
+      carries ``eventTypeId``. An outright can stay open for months, so its
+      latest leg can be older than the fortnight; without a record the
+      results feed would have to guess whether it is finished.
 
     One id per market: float-damaged spellings collapse on the numeric key
     and the *longest* spelling is the one sent. A damaged id is always a
@@ -378,6 +397,33 @@ def select_markets_to_check(
                 continue
             add(cleaned)
             added += 1
+
+    if (
+        df_canonical is not None
+        and not df_canonical.empty
+        and {"marketId", "settledDate", "eventTypeId"} <= set(df_canonical.columns)
+        and max_untracked_non_racing > 0
+    ):
+        settled = _parse_utc(df_canonical["settledDate"])
+        event_type = df_canonical["eventTypeId"].fillna("").astype(str).str.strip()
+        others = (
+            pd.DataFrame({"marketId": df_canonical["marketId"], "settled": settled})
+            .loc[(event_type != "") & ~event_type.isin(RACING_EVENT_TYPE_IDS)]
+            .sort_values("settled", ascending=False, kind="mergesort")
+        )
+        seeded = 0
+        for mid in others["marketId"].drop_duplicates():
+            cleaned = _clean_id(mid)
+            if not cleaned:
+                continue
+            key = decimal_key(cleaned)
+            if key in chosen:
+                add(cleaned)
+                continue
+            if key in known_keys or seeded >= max_untracked_non_racing:
+                continue
+            add(cleaned)
+            seeded += 1
 
     return list(chosen.values())
 

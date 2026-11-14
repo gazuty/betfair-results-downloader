@@ -411,7 +411,31 @@ def test_a_recent_market_with_no_status_row_is_held_back() -> None:
     assert result.meta["heldStatusUncheckedMarkets"] == 1
 
 
-def test_an_old_market_with_no_status_row_predates_tracking_and_is_final() -> None:
+def test_an_old_race_with_no_status_row_predates_tracking_and_is_final() -> None:
+    bets = _bets(
+        [("1", "1.100", "7", "2026-08-01T08:00:00.000Z", "-3.0", "18:01 Morph", "Win")]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "7",
+                "2026-08-01T08:00:00.000Z",
+                "1",
+                "-3.00",
+                "0.00",
+                "2026-08-02T09:00:00Z",
+            )
+        ]
+    )
+    result = _build(bets, store, status=None)
+    assert result.feed["netProfit"].tolist() == [-3.0]
+    assert result.meta["heldStatusUncheckedMarkets"] == 0
+
+
+def test_an_old_outright_with_no_status_row_is_held_until_checked() -> None:
+    # Its latest leg is months old, but outrights stay open for months; a
+    # losing leg's zero commission would otherwise publish it as finished.
     bets = _bets(
         [
             (
@@ -420,8 +444,8 @@ def test_an_old_market_with_no_status_row_predates_tracking_and_is_final() -> No
                 "1",
                 "2026-08-01T08:00:00.000Z",
                 "-3.0",
-                "A v B",
-                "Correct Score",
+                "Ballon d'Or",
+                "Winner",
             )
         ]
     )
@@ -439,8 +463,10 @@ def test_an_old_market_with_no_status_row_predates_tracking_and_is_final() -> No
         ]
     )
     result = _build(bets, store, status=None)
-    assert result.feed["netProfit"].tolist() == [-3.0]
-    assert result.meta["heldStatusUncheckedMarkets"] == 0
+    assert result.feed.empty
+    assert result.meta["heldStatusUncheckedMarkets"] == 1
+    # Once the status step records it closed, it is published.
+    assert len(_build(bets, store).feed) == 1
 
 
 def test_written_feed_round_trips_and_the_meta_names_its_hash(tmp_path: Path) -> None:
