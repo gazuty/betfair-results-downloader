@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **A results feed for the dashboard, replacing the manual website download.** Every run now ends by writing `market_results.csv` and `market_results.meta.json` to `<results_csv_dir>/` (new `market_results.py`). The feed has one row per finished market, with website-style name, settled time (UTC and Sydney), Betfair's whole-market gross, commission and net. A comparison on 14 Nov 2026 covered 39,519 markets from 12 Dec 2025 to 8 Nov 2026. It showed the website download over-counting outrights that settle in stages and markets Betfair renamed, and missing about 50 non-racing markets, while the API figures agreed with it everywhere else to the cent. The feed uses the report's settlement gating and commission rules:
+  - Partially settled markets and commission-unknown markets are held back.
+  - A closed outright appears once, at its close.
+  - A zero commission on a small win is accepted 24 hours after the observed close. Market 1.264531699 won $0.11 and still read $0.00 thirteen days later, so it would otherwise have been held back forever.
+
+  Gross and bet count come from the commission store, because 4 of 40,206 markets differed in the canonical's per-bet sum and the store matched the website each time. A run that cannot rebuild the feed keeps the old one and carries a ⚠️ warning, as does a market waiting more than 48 hours for commission. A new `export-market-results` subcommand rebuilds the feed from disk.
+- **Racecard capture for full racing names.** `listMarketCatalogue` returns nothing for a settled racing market, even 2–6 hours later (0 of 288 in a live check), and `itemDescription` names it only "18:01 Morphettville" / "Win". So a new `racecard.py` captures every racing market starting in the next 30 hours on every run, and from a new hourly `racecard` subcommand (`schedule install-racecard` installs `com.betfair.results.racecard` at :30 past each hour).
+  - Full pages are halved until they fit under the 1,000-market cap.
+  - The store keeps markets that were bet on, and drops the rest 72 hours after their start.
+  - Names come from the racecard, then the catalogue cache, then a fallback from `itemDescription` with the track learned for that venue. An ambiguous or unseen venue gets country `Unknown`, because a name without brackets would count as UK on the dashboard. Sports keep their `itemDescription` names, which already match the website.
+
 ### Changed
 
 - **The DM report is formatted for Slack.** The title and timestamp share the first line (`*Betfair results* · Wednesday 4 November, 6:10 AM`), so the push-notification preview says which report it is. Section headings and each Total line are bold. Every line now leads with net, the figure read first when Slack wraps the line on a phone: `• Horses: net $65.74 (gross $71.82, commission $6.08 · 8.5%)`. The commission rate still reads `n/a` when gross is zero or a loss, or when any market in the line is commission unknown. Plain `dm-report` stdout carries the same text, with Slack's `*` markers.

@@ -1,0 +1,502 @@
+"""
+The market results feed: one row per finished market, net of commission.
+
+This is the contract the Betfair dashboard ingests in place of the website
+"Betting P&L" download. It is written to ``<results_csv_dir>/`` as two
+files:
+
+- ``market_results.csv`` -- one row per market, columns
+  :data:`FEED_COLUMNS`. Settled times are given in UTC and, to match the
+  website download the dashboard's history came from, as naive Sydney time.
+- ``market_results.meta.json`` -- when the feed was built, a SHA-256 of
+  the CSV, and what was held back. A reader checks the hash so it never
+  pairs a new CSV with an old summary, and can skip a publish when the
+  hash is unchanged.
+
+A market appears only when its figure is final, decided by the same code
+as the daily DM report so the two never disagree:
+
+- A partially settled market (an outright still being settled leg by leg)
+  is held back until Betfair closes it. It then appears once, for the whole
+  market, at the moment the close was observed (see
+  :func:`~.reporting.daily_dm_report.apply_settlement_status`). The website
+  download instead caught the interim legs in one week and the full market
+  again in a later one, which double-counted it.
+- A market whose commission is not yet known is held back until a later
+  run reads it (see :func:`~.reporting.daily_dm_report.market_commission_frame`).
+  Publishing its gross would overstate it, and publishing gross less zero
+  would be a silent zero commission.
+
+The meta records both counts, and the oldest commission-unknown market's
+age, so the runner can warn when a market is stuck rather than late.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Optional
+
+import pandas as pd
+
+from .commission import load_market_commission, resolve_commission_path
+from .csv_utils import decimal_key
+from .downloader_core import resolve_enrichment_cache_dir
+from .market_names import (
+    SOURCE_FALLBACK,
+    UNKNOWN_COUNTRY,
+    resolve_market_names,
+)
+from .market_status import (
+    CANONICAL_FILENAME,
+    _fmt_utc,
+    _now_utc,
+    load_market_status,
+    resolve_status_path,
+)
+from .racecard import load_racecard, resolve_racecard_path
+from .reporting.daily_dm_report import (
+    apply_settlement_status,
+    market_commission_frame,
+    supplement_with_archived_legs,
+)
+from .reporting.schema import SYDNEY_TZ, normalize_cleared_orders_schema
+
+logger = logging.getLogger(__name__)
+
+FEED_FILENAME = "market_results.csv"
+META_FILENAME = "market_results.meta.json"
+
+# Bumped whenever a column is added, removed or changes meaning; the
+# dashboard refuses a version it does not know.
+SCHEMA_VERSION = 1
+
+FEED_COLUMNS: list[str] = [
+    "marketId",
+    "eventTypeId",
+    "sport",
+    # "Horse Racing / Morphettville (AUS) 14th Nov : R7 1200m Hcp"
+    "market",
+    # racecard | catalogue | item_description | fallback (see market_names)
+    "nameSource",
+    # The market's last settled leg, or the observed close of a market that
+    # was ever partially settled.
+    "settledUtc",
+    "settledLocal",
+    "betCount",
+    "grossProfit",
+    "commission",
+    "netProfit",
+]
+
+# The canonical's columns the feed needs. betId lets the archived legs of a
+# long-running outright be merged without double counting.
+_CANONICAL_COLUMNS = [
+    "betId",
+    "marketId",
+    "eventTypeId",
+    "settledDate",
+    "profit",
+    "evt_eventName",
+    "mkt_marketName",
+]
+
+# A commission figure normally lands within a run or two of settlement. One
+# still missing after this long is stuck, not late, and is worth a warning.
+STUCK_COMMISSION_HOURS = 48
+
+# How long after an observed close a zero commission must still read zero
+# before the feed accepts it as final (see _confirmed_zero_commission_keys).
+CONFIRMED_ZERO_AFTER = timedelta(hours=24)
+
+
+@dataclass
+class FeedResult:
+    feed: pd.DataFrame
+    meta: dict[str, Any]
+    message: str
+    warnings: list[str] = field(default_factory=list)
+
+
+def _market_keys(final: pd.DataFrame) -> list[str]:
+    """
+    The per-market key :func:`market_commission_frame` uses, row for row:
+    the numeric marketId, or ``blank:<position>`` for a row without one so
+    that each such row stands as its own commission-unknown market.
+    """
+    ids = final["marketId"].fillna("").astype(str).str.strip()
+    return [
+        decimal_key(mid) if mid else f"blank:{pos}"
+        for pos, mid in enumerate(ids.tolist())
+    ]
+
+
+def _store_by_key(market_commission: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    The commission store indexed by numeric key: its marketId spelling,
+    Betfair's whole-market gross and its bet count.
+
+    The spelling matters because the dashboard keys on the id: the store's
+    ids come straight from the API as strings, while the canonical still
+    holds float-damaged spellings for some historical rows ("1.25194156"
+    for "1.251941560").
+
+    The gross matters because it is Betfair's own figure for the market,
+    and it is the one the website download agreed with to the cent. The
+    canonical's per-bet sum can differ from it: a long-running outright's
+    early bets can be older than the canonical's start, and a bet Betfair
+    settled and later took back out of the market stays in the canonical
+    under its own betId. Checked live on 2026-11-14: 4 of 40,206 markets
+    differed, and in each one the store matched the website.
+    """
+    columns = ["storeMarketId", "storeGross", "storeBetCount"]
+    if market_commission is None or market_commission.empty:
+        return pd.DataFrame(columns=columns)
+    store = market_commission.copy()
+    store["storeMarketId"] = store["marketId"].fillna("").astype(str).str.strip()
+    store = store[store["storeMarketId"] != ""]
+    store["_key"] = store["storeMarketId"].map(decimal_key)
+    store["storeGross"] = pd.to_numeric(store["grossProfit"], errors="coerce")
+    store["storeBetCount"] = pd.to_numeric(store["betCount"], errors="coerce")
+    store = store.drop_duplicates(subset=["_key"], keep="last")
+    return store.set_index("_key")[columns]
+
+
+def _confirmed_zero_commission_keys(
+    market_commission: Optional[pd.DataFrame],
+    market_status: Optional[pd.DataFrame],
+    rows_latest: pd.Series,
+) -> set[str]:
+    """
+    Markets whose zero commission is Betfair's final answer, not the
+    pre-close placeholder :func:`market_commission_frame` takes it for.
+
+    The placeholder rule treats a zero against a win above 10 cents as
+    unknown, because a partially settled market reports 0.0 until it
+    closes. That is right for a read taken before the close, but a small
+    win at a low rate can genuinely be charged nothing: market 1.264531699
+    won $0.11 and still read $0.00 thirteen days after it closed. Left as
+    unknown it would be held back, and alerted on, forever.
+
+    A zero is accepted only when all of these hold: the market was never
+    seen partially settled, the status step saw it CLOSED, the store row
+    was read at least :data:`CONFIRMED_ZERO_AFTER` after that, and the
+    store row covers the canonical's latest leg. ``rows_latest`` maps the
+    numeric key to that latest leg (tz-aware).
+    """
+    if (
+        market_commission is None
+        or market_commission.empty
+        or market_status is None
+        or market_status.empty
+    ):
+        return set()
+    store = market_commission.copy()
+    store["_key"] = store["marketId"].fillna("").astype(str).map(decimal_key)
+    store = store[store["_key"] != ""].drop_duplicates(subset=["_key"], keep="last")
+    amount = pd.to_numeric(store["commission"], errors="coerce")
+    store = store.loc[amount == 0.0]
+    if store.empty:
+        return set()
+    status = market_status.copy()
+    status["_key"] = status["marketId"].fillna("").astype(str).map(decimal_key)
+    status = status[status["_key"] != ""].drop_duplicates(subset=["_key"], keep="last")
+    status = status.loc[
+        (status["status"].astype(str).str.upper() == "CLOSED")
+        & (status["firstPendingUtc"].fillna("").astype(str) == "")
+    ].set_index("_key")
+    closed_at = pd.to_datetime(
+        status["closedObservedUtc"], utc=True, errors="coerce", format="ISO8601"
+    )
+    joined = store.join(closed_at.rename("closed"), on="_key", how="inner")
+    fetched = pd.to_datetime(
+        joined["fetchedUtc"], utc=True, errors="coerce", format="ISO8601"
+    )
+    settled = pd.to_datetime(
+        joined["settledDateUtc"], utc=True, errors="coerce", format="ISO8601"
+    )
+    # A plain dict: mapping onto a datetime Series with no matching keys
+    # makes pandas try to cast the result to float and raise.
+    latest_by_key = {str(k): v for k, v in rows_latest.items()}
+    latest = pd.to_datetime(
+        joined["_key"].map(lambda k: latest_by_key.get(k, pd.NaT)), utc=True
+    )
+    ok = (
+        joined["closed"].notna()
+        & fetched.notna()
+        & (fetched >= joined["closed"] + CONFIRMED_ZERO_AFTER)
+        & settled.notna()
+        & latest.notna()
+        & (settled >= latest)
+    )
+    return set(joined.loc[ok, "_key"])
+
+
+def _first_present(series: pd.Series) -> Any:
+    present = series.dropna()
+    present = present[present.astype(str).str.strip() != ""]
+    return present.iloc[0] if not present.empty else None
+
+
+def _finish_ready_markets(
+    ready: pd.DataFrame,
+    market_commission: Optional[pd.DataFrame],
+    *,
+    racecard: Optional[pd.DataFrame],
+    catalogue: Optional[pd.DataFrame],
+) -> tuple[pd.DataFrame, int]:
+    """
+    Turn the markets whose figure is final into feed rows.
+
+    Returns ``(feed, markets whose canonical sum differed from Betfair's
+    gross)``. An empty input is an empty feed with the full column set, so
+    a run that holds every market back still writes a well-formed file.
+    """
+    if ready.empty:
+        return pd.DataFrame(columns=FEED_COLUMNS), 0
+    # A market whose commission is known has a store row by construction;
+    # its gross and bet count come from there (see _store_by_key).
+    ready = ready.join(_store_by_key(market_commission), on="_key")
+    canonical_gross = ready["grossProfit"].astype(float).round(2)
+    has_store = ready["storeGross"].notna()
+    gross_mismatch = has_store & (
+        (ready["storeGross"].round(2) - canonical_gross).abs() > 0.005
+    )
+    ready.loc[has_store, "marketId"] = ready.loc[has_store, "storeMarketId"]
+    ready.loc[has_store, "grossProfit"] = ready.loc[has_store, "storeGross"]
+    with_count = has_store & ready["storeBetCount"].notna()
+    ready.loc[with_count, "betCount"] = ready.loc[with_count, "storeBetCount"]
+    ready["betCount"] = ready["betCount"].astype(int)
+    ready = resolve_market_names(ready, racecard=racecard, catalogue=catalogue)
+
+    settled_local = pd.to_datetime(ready["settled_dt_local"]).dt.tz_convert(SYDNEY_TZ)
+    ready["settledUtc"] = settled_local.dt.tz_convert("UTC").map(_fmt_utc)
+    ready["settledLocal"] = settled_local.dt.strftime("%Y-%m-%d %H:%M:%S")
+    ready["grossProfit"] = ready["grossProfit"].astype(float).round(2)
+    ready["commission"] = ready["commission"].astype(float).round(2)
+    ready["netProfit"] = (ready["grossProfit"] - ready["commission"]).round(2)
+    feed = (
+        ready.sort_values(["settledUtc", "marketId"])
+        .reindex(columns=FEED_COLUMNS)
+        .reset_index(drop=True)
+    )
+    return feed, int(gross_mismatch.sum())
+
+
+def build_market_results(
+    df_raw: pd.DataFrame,
+    *,
+    market_status: Optional[pd.DataFrame],
+    market_commission: Optional[pd.DataFrame],
+    racecard: Optional[pd.DataFrame],
+    catalogue: Optional[pd.DataFrame],
+    now: Optional[datetime] = None,
+) -> FeedResult:
+    """Build the feed and its meta from frames already in memory."""
+    now_utc = _now_utc(now)
+    normalized = normalize_cleared_orders_schema(df_raw)
+    settled = normalized.dropna(subset=["settled_dt_local"]).copy()
+    data_through = settled["settled_dt_utc"].max() if not settled.empty else None
+
+    final, pending_rows = apply_settlement_status(settled, market_status)
+    final = final.reset_index(drop=True)
+    commission = market_commission_frame(final, market_commission, market_status)
+
+    final["_key"] = _market_keys(final)
+    per_market = (
+        final.groupby("_key", sort=False)
+        .agg(
+            marketId=("marketId", _first_present),
+            eventTypeId=("eventTypeId", _first_present),
+            evt_eventName=("evt_eventName", _first_present),
+            mkt_marketName=("mkt_marketName", _first_present),
+            grossProfit=("profit", "sum"),
+            betCount=("profit", "size"),
+        )
+        .reset_index()
+        # Keys are strings on both sides; an empty frame would otherwise
+        # infer a numeric dtype and refuse the merge.
+        .astype({"_key": str})
+        .merge(commission.astype({"_key": str}), on="_key", how="left")
+    )
+    per_market["settled_dt_local"] = per_market["last_settled_local"]
+
+    latest_leg = final.groupby("_key")["settled_dt_local"].max()
+    confirmed_zero = _confirmed_zero_commission_keys(
+        market_commission, market_status, latest_leg
+    )
+    flip = per_market["unknown"].fillna(True).astype(bool) & per_market["_key"].isin(
+        confirmed_zero
+    )
+    per_market.loc[flip, ["unknown", "commission"]] = [False, 0.0]
+
+    blank_id = per_market["_key"].astype(str).str.startswith("blank:")
+    unknown = per_market["unknown"].fillna(True).astype(bool)
+    held = per_market.loc[unknown]
+    ready = per_market.loc[~unknown].copy()
+
+    feed, gross_mismatch_markets = _finish_ready_markets(
+        ready, market_commission, racecard=racecard, catalogue=catalogue
+    )
+
+    # Stuck commission: rows with no marketId can never be read, so they are
+    # counted separately rather than alerting on every run forever.
+    held_with_id = held.loc[~held["_key"].astype(str).str.startswith("blank:")]
+    oldest_unknown_hours: Optional[float] = None
+    if not held_with_id.empty:
+        oldest = pd.to_datetime(held_with_id["last_settled_local"]).min()
+        oldest_unknown_hours = round(
+            (now_utc - oldest.tz_convert("UTC").to_pydatetime()).total_seconds()
+            / 3600.0,
+            1,
+        )
+    pending_markets = (
+        int(pending_rows["marketId"].map(decimal_key).nunique())
+        if not pending_rows.empty
+        else 0
+    )
+    fallback = feed["nameSource"] == SOURCE_FALLBACK
+    unknown_country = fallback & feed["market"].astype(str).str.contains(
+        f"({UNKNOWN_COUNTRY})", regex=False
+    )
+    meta: dict[str, Any] = {
+        "schemaVersion": SCHEMA_VERSION,
+        "generatedUtc": _fmt_utc(now_utc),
+        "dataThroughUtc": _fmt_utc(data_through.to_pydatetime())
+        if data_through is not None and pd.notna(data_through)
+        else None,
+        "markets": int(len(feed)),
+        "settledFromLocal": feed["settledLocal"].min() if len(feed) else None,
+        "settledToLocal": feed["settledLocal"].max() if len(feed) else None,
+        "heldPendingMarkets": pending_markets,
+        "heldCommissionUnknownMarkets": int(len(held_with_id)),
+        "oldestCommissionUnknownHours": oldest_unknown_hours,
+        "heldNoMarketIdRows": int(blank_id.sum()),
+        "nameSources": {
+            k: int(v) for k, v in feed["nameSource"].value_counts().items()
+        },
+        "unknownCountryMarkets": int(unknown_country.sum()),
+        # Markets whose canonical per-bet sum differs from Betfair's
+        # whole-market gross, which the feed uses. Diagnostic only.
+        "canonicalGrossMismatchMarkets": gross_mismatch_markets,
+    }
+
+    warnings: list[str] = []
+    if (
+        oldest_unknown_hours is not None
+        and oldest_unknown_hours > STUCK_COMMISSION_HOURS
+    ):
+        warnings.append(
+            f"⚠️ Results feed: {len(held_with_id):,} market(s) held back for "
+            f"unknown commission, the oldest settled {oldest_unknown_hours:.0f}h "
+            f"ago; they stay off the dashboard until a run reads their commission."
+        )
+    message = (
+        f"Results feed: {len(feed):,} markets; held back "
+        f"{pending_markets:,} partially settled and {len(held_with_id):,} "
+        f"commission-unknown; names {meta['nameSources']}."
+    )
+    return FeedResult(feed=feed, meta=meta, message=message, warnings=warnings)
+
+
+def _load_canonical(results_dir: Path) -> pd.DataFrame:
+    path = Path(results_dir) / CANONICAL_FILENAME
+    if not path.exists():
+        raise FileNotFoundError(f"No canonical at {path}")
+    return pd.read_csv(
+        path,
+        dtype=str,
+        keep_default_na=False,
+        usecols=lambda c: c in _CANONICAL_COLUMNS,
+    )
+
+
+def _load_catalogue_cache(cache_dir: Path) -> Optional[pd.DataFrame]:
+    """The enrichment step's catalogue cache; ``None`` when absent or damaged."""
+    path = Path(cache_dir) / "market_catalogue_event_cache.csv"
+    if not path.exists():
+        return None
+    try:
+        return pd.read_csv(path, dtype=str, keep_default_na=False)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Could not read %s (%s: %s); racing names fall back without it.",
+            path.name,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def build_market_results_from_disk(
+    results_dir: Path, *, now: Optional[datetime] = None
+) -> FeedResult:
+    """
+    Build the feed from the files a run leaves in ``results_dir``.
+
+    An unreadable status or commission file raises: without the status a
+    pending outright would be published as final, and without commission
+    every market would be held back. The previous feed then stays in place
+    and ages, which the dashboard notices. A damaged racecard only costs
+    names, so it is read leniently and reported.
+    """
+    results_dir = Path(results_dir)
+    cache_dir = resolve_enrichment_cache_dir(results_dir)
+    market_status = load_market_status(resolve_status_path(cache_dir))
+    market_commission = load_market_commission(resolve_commission_path(cache_dir))
+    warnings: list[str] = []
+    try:
+        racecard = load_racecard(resolve_racecard_path(cache_dir))
+    except (OSError, ValueError) as exc:
+        racecard = None
+        warnings.append(
+            f"⚠️ Results feed: racecard unreadable ({type(exc).__name__}: {exc}); "
+            f"racing markets were named from the fallback."
+        )
+    df_raw = _load_canonical(results_dir)
+    df_raw = supplement_with_archived_legs(df_raw, market_status, results_dir)
+    result = build_market_results(
+        df_raw,
+        market_status=market_status,
+        market_commission=market_commission,
+        racecard=racecard,
+        catalogue=_load_catalogue_cache(cache_dir),
+        now=now,
+    )
+    result.warnings[:0] = warnings
+    return result
+
+
+def _replace_atomically(path: Path, payload: bytes) -> None:
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_bytes(payload)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def write_market_results(results_dir: Path, result: FeedResult) -> Path:
+    """
+    Write the CSV, then the meta that names its hash.
+
+    Each file is replaced atomically. A reader that lands between the two
+    replacements sees a hash mismatch and waits for the next run, rather
+    than publishing a new CSV against an old summary.
+    """
+    results_dir = Path(results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    csv_bytes = result.feed.to_csv(index=False).encode("utf-8")
+    meta = dict(result.meta, csvSha256=hashlib.sha256(csv_bytes).hexdigest())
+    feed_path = results_dir / FEED_FILENAME
+    _replace_atomically(feed_path, csv_bytes)
+    _replace_atomically(
+        results_dir / META_FILENAME,
+        (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+    return feed_path

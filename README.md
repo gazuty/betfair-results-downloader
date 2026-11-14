@@ -372,6 +372,31 @@ Both `--from` and `--to` are required and inclusive. Grouped rows are available 
 
 Exit codes: `0` = success · `1` = failure · `2` = bad arguments or configuration.
 
+### `racecard`
+
+**Status:** ✅ Implemented
+
+Captures the full website name of every racing market starting in the next 30 hours ("Horse Racing / Morphettville (AUS) 14th Nov : R7 1200m Hcp") into `<results_csv_dir>/.cache/racecard.csv`. Betfair stops naming a racing market once it settles (live check, 14 Nov 2026: 0 of 288 settled racing markets returned by `listMarketCatalogue`, even 2–6 hours after settlement), and `itemDescription` only gives "18:01 Morphettville" / "Win". So the names have to be taken before the race. Every `run` captures too. This command backs an hourly job that keeps names complete between the four daily runs:
+
+```bash
+python -m betfair_results_downloader racecard
+python -m betfair_results_downloader schedule install-racecard   # hourly at :30
+```
+
+A failure exits `1` and prints the reason. It does not post to Slack: each run captures as well and announces its own failure.
+
+### `export-market-results`
+
+**Status:** ✅ Implemented
+
+Rebuilds the dashboard's results feed (`market_results.csv` and `market_results.meta.json`, see [Outputs](#outputs)) from the files on disk. It makes no Betfair calls. Every run already does this, so the command is for a rebuild after a manual repair or on first install.
+
+```bash
+python -m betfair_results_downloader export-market-results
+```
+
+Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
+
 ### `audit`
 
 **Status:** ✅ Implemented
@@ -452,7 +477,11 @@ python -m betfair_results_downloader schedule install
 python -m betfair_results_downloader schedule status
 python -m betfair_results_downloader schedule uninstall
 python -m betfair_results_downloader schedule logs [--tail N]
+python -m betfair_results_downloader schedule install-racecard     # hourly racecard job
+python -m betfair_results_downloader schedule uninstall-racecard
 ```
+
+`schedule status` also reports whether the racecard job (`com.betfair.results.racecard`) is installed and loaded.
 
 **Optional install overrides:**
 
@@ -719,6 +748,12 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv.gz`. Dated gzip copies of the canonical for short-term rollback; only the newest `user.snapshot_retention_days` (default 14) are kept, older ones are deleted after each run.
 - **Yearly archives** — `cleared_orders_archive_YYYY.csv.gz`. Rows settled more than `user.canonical_archive_months` ago are moved here from the canonical, deduplicated on `betId`. Read them with `pandas.read_csv` directly (gzip is transparent).
 
+- **Results feed** — `market_results.csv` and `market_results.meta.json`, rebuilt at the end of every run. One row per finished market: `marketId`, `eventTypeId`, `sport`, `market` (the website-style name), `nameSource` (`racecard`, `catalogue`, `item_description` or `fallback`), `settledUtc`, `settledLocal` (Sydney), `betCount`, `grossProfit`, `commission`, `netProfit`. This is what the Betfair dashboard ingests in place of the website "Betting P&L" download. A market appears only once its figure is final, decided by the same code as `dm-report`:
+  - A partially settled outright is held back until Betfair closes it. It then appears once, for the whole market, at the observed close.
+  - A market whose commission is not yet known is held back until a later run reads it. A zero commission on a small win counts as final once it still reads zero 24 hours after the observed close.
+
+  Gross and bet count are Betfair's whole-market figures from the commission store, which matched the website download to the cent. A racing market the racecard missed is named from `itemDescription`, using the track earlier captures recorded for that venue, or country `Unknown` when the venue is ambiguous (Ascot, York). The meta records `generatedUtc`, `dataThroughUtc`, a `csvSha256` of the CSV, `schemaVersion`, and counts of held-back markets and name sources. A run warns when a market has waited more than 48 hours for its commission.
+
 ### Enrichment cache (`<results_csv_dir>/.cache/`)
 
 - `market_catalogue_event_cache.csv` — accumulating cache of market catalogue lookups
@@ -726,7 +761,9 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - `market_settlement_status.csv` — per-market settlement status observed via `listMarketBook`, columns `marketId`, `status`, `activeRunners`, `source` (`book` or `absent`), `checkedUtc`, `firstPendingUtc`, `closedObservedUtc`; used by `dm-report` to hold back partially settled markets (see `docs/openclaw-dm-reporting.md`)
 - `market_commission.csv` — per-market commission observed via `listClearedOrders` grouped by market, columns `marketId`, `eventTypeId`, `settledDateUtc`, `betCount`, `grossProfit`, `commission`, `fetchedUtc`; used by `dm-report` to show commission and net alongside gross (see `docs/openclaw-dm-reporting.md`)
 
-All four are git-ignored.
+- `racecard.csv` — forward racing card captured by `racecard` and every run, columns `marketId`, `eventTypeId`, `eventId`, `eventName`, `venue`, `countryCode`, `marketName`, `marketStartTime`, `capturedUtc`. Rows for markets never bet on are dropped 72 hours after their start.
+
+All five are git-ignored.
 
 **Note on enrichment:** Betfair commonly returns zero market catalogues for already-settled markets. The app will report `"API returned 0 catalogues (common for settled markets). Enriched from cache only."` This is expected behaviour, not an error.
 

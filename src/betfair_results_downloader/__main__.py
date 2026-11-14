@@ -5,8 +5,10 @@ Subcommands:
   auth-test     — cert-based non-interactive login test
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
   backfill      — explicit date-range download
+  racecard      — capture the forward racing card (full racing market names)
+  export-market-results — rebuild the dashboard results feed from disk
   audit         — report missing settled-date gaps in the canonical CSV
-  schedule      — install/uninstall/status/logs for the platform scheduled job
+  schedule      — install/uninstall/status/logs for the platform scheduled jobs
   dm-report     — render the OpenClaw daily DM report from local CSV results
 """
 
@@ -343,6 +345,94 @@ def _cmd_backfill_commission(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_racecard(_args: argparse.Namespace) -> int:
+    """
+    Capture the forward racing card into the racecard store.
+
+    The hourly job behind this keeps racing names complete between the four
+    daily runs: Betfair stops naming a racing market once it settles, so a
+    market loaded and run between two runs would otherwise only get the
+    fallback name. Deliberately quiet: a failure is printed and exits 1 but
+    does not post to Slack, because every run captures too and announces
+    its own failure, and an hourly alert would bury the ones that matter.
+
+    Exit codes: 0=success, 1=failure, 2=bad configuration.
+    """
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    creds, _schedule_cfg = _load_creds_and_schedule(validate=True)
+
+    from .commission import load_market_commission, resolve_commission_path
+    from .csv_utils import decimal_key
+    from .downloader_core import resolve_enrichment_cache_dir
+    from .paths import resolve_results_dir
+    from .racecard import update_racecard
+    from .scheduler.auth import build_api_client
+
+    cache_dir = resolve_enrichment_cache_dir(resolve_results_dir(creds))
+    try:
+        store = load_market_commission(resolve_commission_path(cache_dir))
+    except Exception as exc:
+        print(f"FAIL: commission store unreadable ({type(exc).__name__}: {exc})")
+        return 1
+    try:
+        client = build_api_client(creds.get("betfair") or {})
+    except Exception as exc:
+        print(f"FAIL: Betfair authentication failed: {exc}")
+        return 1
+    try:
+        result = update_racecard(
+            client=client,
+            cache_dir=cache_dir,
+            bet_market_keys=set(store["marketId"].map(decimal_key)),
+        )
+    except Exception as exc:
+        print(f"FAIL: racecard capture raised {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+    print(f"OK: {result.message}")
+    return 0
+
+
+def _cmd_export_market_results(_args: argparse.Namespace) -> int:
+    """
+    Rebuild the dashboard's results feed from the files on disk.
+
+    Makes no Betfair calls: it reads the canonical, the status and
+    commission stores and the racecard, and rewrites
+    ``market_results.csv`` and its meta. Every run does this already; the
+    command is for a rebuild after a manual repair or a first install.
+
+    Exit codes: 0=success, 1=failure, 2=bad configuration.
+    """
+    creds, _schedule_cfg = _load_creds_and_schedule(validate=False)
+
+    from .market_results import build_market_results_from_disk, write_market_results
+    from .paths import resolve_results_dir
+
+    results_dir = resolve_results_dir(creds)
+    try:
+        result = build_market_results_from_disk(results_dir)
+        path = write_market_results(results_dir, result)
+    except Exception as exc:
+        print(f"FAIL: results feed not rebuilt ({type(exc).__name__}: {exc})")
+        return 1
+    print(f"OK: {result.message} Written to {path}.")
+    for warning in result.warnings:
+        print(warning)
+    return 0
+
+
 def _cmd_audit(args: argparse.Namespace) -> int:
     """
     Report missing settled-date gaps in the canonical CSV.
@@ -657,6 +747,24 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         print(result["message"])
         return 0 if result["ok"] else 1
 
+    if action == "install-racecard":
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[2]
+        log_dir = Path(schedule_cfg.log_dir or str(repo_root / "outputs")).expanduser()
+        result = installer.install_racecard(
+            repo_root=repo_root,
+            venv_python_path=Path(getattr(args, "python", None) or sys.executable),
+            log_dir=log_dir,
+        )
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
+    if action == "uninstall-racecard":
+        result = installer.uninstall_racecard()
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
     if action == "status":
         info = installer.status()
         print(info["message"])
@@ -678,6 +786,11 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                     "  WARNING       : the installed schedule does not match "
                     "credentials.json; re-run 'schedule install' to reconcile."
                 )
+        rc = installer.racecard_status()
+        print(
+            f"  racecard job  : installed={rc['installed']} loaded={rc['loaded']}"
+            + ("" if rc["installed"] else " (run 'schedule install-racecard')")
+        )
         return 0
 
     if action == "logs":
@@ -751,6 +864,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         help="Inclusive end date (required)",
     )
+    sub.add_parser(
+        "racecard",
+        help="Capture the forward racing card so racing markets keep their full names.",
+    )
+    sub.add_parser(
+        "export-market-results",
+        help="Rebuild the dashboard results feed from the files on disk (no API calls).",
+    )
     au = sub.add_parser(
         "audit",
         help="Report missing settled-date gaps in the canonical CSV.",
@@ -790,7 +911,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "schedule",
         help="Install, remove, or inspect the platform scheduled job.",
     )
-    sch.add_argument("action", choices=["install", "uninstall", "status", "logs"])
+    sch.add_argument(
+        "action",
+        choices=[
+            "install",
+            "uninstall",
+            "install-racecard",
+            "uninstall-racecard",
+            "status",
+            "logs",
+        ],
+    )
     sch.add_argument(
         "--time",
         metavar="HH:MM",
@@ -823,6 +954,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_backfill(args)
     if args.command == "backfill-commission":
         return _cmd_backfill_commission(args)
+    if args.command == "racecard":
+        return _cmd_racecard(args)
+    if args.command == "export-market-results":
+        return _cmd_export_market_results(args)
     if args.command == "audit":
         return _cmd_audit(args)
     if args.command == "dm-report":
