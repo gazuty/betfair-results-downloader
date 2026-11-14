@@ -128,6 +128,9 @@ class DailyDmReport:
     # week_start). Rendered on Sundays in place of Week to date.
     last_week_start: datetime | None = None
     last_week: ProfitBreakdown | None = None
+    # Bet rows up to the report time whose profit did not parse. They count
+    # as $0.00 in every total, and the report says so.
+    unreadable_profit_rows: int = 0
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -212,6 +215,7 @@ def _format_report(
     year_start: datetime | None = None,
     last_week: ProfitBreakdown | None = None,
     last_week_start: datetime | None = None,
+    unreadable_profit_rows: int = 0,
 ) -> str:
     # Title and timestamp share the first line so a Slack push notification,
     # which previews only the start of the message, says which report it is.
@@ -228,6 +232,15 @@ def _format_report(
         lines.append("")
         lines.append(
             f"⚠️ Data may be stale — newest result is {_format_age(hours_stale)} old"
+        )
+    if unreadable_profit_rows:
+        # A damaged profit cell would otherwise be a silent $0.00 inside a
+        # total that reads as complete.
+        noun = "bet row has" if unreadable_profit_rows == 1 else "bet rows have"
+        lines.append("")
+        lines.append(
+            f"⚠️ {unreadable_profit_rows:,} {noun} an unreadable profit "
+            f"(counted as $0.00)"
         )
     lines += ["", _format_section_heading("Today", "since 12:00 AM")]
     lines += _format_breakdown_lines(day_to_date)
@@ -591,6 +604,8 @@ def build_daily_dm_report_from_dataframe(
             (report_dt_local - newest_any_sport).total_seconds() / 3600.0, 0.0
         )
 
+    unreadable_profit_rows = int(in_scope["profit_unreadable"].sum())
+
     week_start = _most_recent_sunday_start(report_dt_local)
     day_start = report_dt_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -651,6 +666,7 @@ def build_daily_dm_report_from_dataframe(
         year_start=year_start,
         last_week=last_week,
         last_week_start=last_week_start,
+        unreadable_profit_rows=unreadable_profit_rows,
     )
 
     return DailyDmReport(
@@ -671,6 +687,7 @@ def build_daily_dm_report_from_dataframe(
         year_to_date=year_to_date,
         last_week_start=last_week_start,
         last_week=last_week,
+        unreadable_profit_rows=unreadable_profit_rows,
     )
 
 

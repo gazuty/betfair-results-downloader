@@ -226,6 +226,16 @@ class LaunchdInstaller:
         PLIST_PATH.write_bytes(plist_bytes)
 
         uid = _get_gui_uid()
+        # Boot out any loaded copy first, as install_racecard does. Without
+        # this a reinstall with new times wrote the plist and then failed on
+        # "service already loaded": launchd kept running the old times while
+        # `schedule status`, which reads the file, reported the new ones.
+        # Failing because nothing was loaded is the normal first install.
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{LABEL}"],
+            capture_output=True,
+            text=True,
+        )
         result = subprocess.run(
             ["launchctl", "bootstrap", f"gui/{uid}", str(PLIST_PATH)],
             capture_output=True,

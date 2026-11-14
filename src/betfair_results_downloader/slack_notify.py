@@ -4,7 +4,7 @@ Post messages to Slack without an LLM agent in the path.
 Config is read from ``~/.betfair/slack.json`` first, falling back to a
 ``slack`` section in credentials.json. Either shape::
 
-    {"bot_token": "xoxb-...", "channel": "U0AMX1TM1M3", "enabled": true}
+    {"bot_token": "xoxb-...", "channel": "U0XXXXXXXXX", "enabled": true}
 
 The local-file path is preferred deliberately: it lives on local disk rather
 than in OneDrive, so a failure can still be announced even when

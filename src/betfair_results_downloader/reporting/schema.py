@@ -70,7 +70,10 @@ def normalize_cleared_orders_schema(df: pd.DataFrame) -> pd.DataFrame:
       - placed_dt_utc, settled_dt_utc (tz-aware)
       - placed_dt_local, settled_dt_local (Australia/Sydney)
       - settled_date_local (date)
-    Also ensures profit is numeric and adds outcome helpers.
+    Also ensures profit is numeric and adds outcome helpers. A profit
+    that does not parse counts as 0.0 so the sums still work, and is
+    flagged in ``profit_unreadable`` so a report can say how many rows
+    that was rather than present the total as complete.
     Adds 'sport' derived from eventTypeId.
     """
     out = df.copy()
@@ -92,9 +95,13 @@ def normalize_cleared_orders_schema(df: pd.DataFrame) -> pd.DataFrame:
 
     # Profit
     if "profit" in out.columns:
-        out["profit"] = pd.to_numeric(out["profit"], errors="coerce").fillna(0.0)
+        parsed = pd.to_numeric(out["profit"], errors="coerce")
+        out["profit_unreadable"] = parsed.isna()
+        out["profit"] = parsed.fillna(0.0)
     else:
+        # No profit column at all: every row's profit is unknown, not zero.
         out["profit"] = 0.0
+        out["profit_unreadable"] = True
 
     # Outcome helpers
     if "betOutcome" in out.columns:

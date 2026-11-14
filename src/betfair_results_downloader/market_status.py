@@ -550,8 +550,8 @@ def update_market_status(
         if status_cb:
             try:
                 status_cb(msg)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Market status callback failed: %s", exc)
 
     path = resolve_status_path(cache_dir)
     df_status = load_market_status(path)

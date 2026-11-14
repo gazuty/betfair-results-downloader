@@ -283,3 +283,66 @@ def test_status_does_not_crash_on_a_dash_pid(monkeypatch, tmp_path: Path) -> Non
     assert info["loaded"] is True
     assert info["pid"] is None
     assert info["last_exit"] is None
+
+
+# ---------------------------------------------------------------------------
+# install: a loaded job is replaced, not collided with
+# ---------------------------------------------------------------------------
+
+
+def _install_with(monkeypatch, tmp_path: Path, bootstrap_code: int = 0, **cfg):
+    """Run install() with launchctl recorded; returns (result, calls, plist)."""
+    import subprocess
+
+    from betfair_results_downloader.scheduler.installers import launchd
+
+    plist = tmp_path / "com.betfair.results.scheduler.plist"
+    monkeypatch.setattr(launchd, "PLIST_PATH", plist)
+    monkeypatch.setattr(launchd, "AGENTS_DIR", tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        if args[1] == "bootout":
+            # Not loaded: what launchctl says on a first install.
+            return subprocess.CompletedProcess(args, 3, "", "No such process")
+        return subprocess.CompletedProcess(args, bootstrap_code, "", "boom")
+
+    monkeypatch.setattr(launchd.subprocess, "run", fake_run)
+    result = LaunchdInstaller().install(
+        schedule_cfg=_cfg(**cfg),
+        repo_root=tmp_path,
+        venv_python_path=Path(sys.executable),
+        log_dir=tmp_path / "logs",
+    )
+    return result, calls, plist
+
+
+def test_install_boots_out_a_loaded_copy_before_bootstrapping(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """
+    Without the bootout a reinstall failed on "service already loaded" after
+    rewriting the plist: launchd kept the old times, the file showed the new.
+    """
+    result, calls, plist = _install_with(monkeypatch, tmp_path, primary_time="07:15")
+    assert result["ok"] is True
+    assert [c[1] for c in calls] == ["bootout", "bootstrap"]
+    assert calls[0][2].endswith(f"/{LABEL}")
+    assert calls[1][3] == str(plist)
+    written = plistlib.loads(plist.read_bytes())["StartCalendarInterval"]
+    assert {"Hour": 7, "Minute": 15} in written
+
+
+def test_a_first_install_succeeds_though_there_is_nothing_to_boot_out(
+    monkeypatch, tmp_path: Path
+) -> None:
+    result, calls, _plist = _install_with(monkeypatch, tmp_path)
+    assert result["ok"] is True and "Installed and loaded" in result["message"]
+    assert len(calls) == 2
+
+
+def test_a_failed_bootstrap_is_still_reported(monkeypatch, tmp_path: Path) -> None:
+    result, _calls, _plist = _install_with(monkeypatch, tmp_path, bootstrap_code=5)
+    assert result["ok"] is False
+    assert "launchctl bootstrap failed (exit 5): boom" in result["message"]
