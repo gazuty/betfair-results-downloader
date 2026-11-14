@@ -199,3 +199,44 @@ def test_concurrent_updates_both_land_in_the_store(tmp_path: Path) -> None:
     stored = load_racecard(resolve_racecard_path(tmp_path))
     assert set(stored["marketId"]) == {"1.111", "1.222"}
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_the_module_loads_and_updates_without_posix_locking(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Windows has no fcntl: the import must not fail, and an update still saves."""
+    from betfair_results_downloader import racecard as rc
+
+    monkeypatch.setattr(rc, "fcntl", None)
+    monkeypatch.setattr(rc, "msvcrt", None)
+    client = MagicMock()
+    client.betting.list_market_catalogue.return_value = [_cat("1.265396576")]
+    rc.update_racecard(
+        client=client, cache_dir=tmp_path, bet_market_keys=set(), now=NOW
+    )
+    assert load_racecard(resolve_racecard_path(tmp_path))["marketId"].tolist() == [
+        "1.265396576"
+    ]
+
+
+def test_importing_the_feed_does_not_need_fcntl(monkeypatch) -> None:
+    import builtins
+    import importlib
+    import sys
+
+    real_import = builtins.__import__
+
+    def no_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("No module named 'fcntl'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_fcntl)
+    for mod in (
+        "betfair_results_downloader.racecard",
+        "betfair_results_downloader.market_results",
+    ):
+        monkeypatch.delitem(sys.modules, mod, raising=False)
+    racecard = importlib.import_module("betfair_results_downloader.racecard")
+    importlib.import_module("betfair_results_downloader.market_results")
+    assert racecard.fcntl is None

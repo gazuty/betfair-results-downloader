@@ -26,7 +26,6 @@ dropped once it can no longer be bet on.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 from contextlib import contextmanager
@@ -44,6 +43,18 @@ from .csv_utils import decimal_key
 from .market_status import _fmt_utc, _now_utc, _parse_utc
 
 logger = logging.getLogger(__name__)
+
+# The store lock is advisory and platform-specific: flock on macOS/Linux,
+# msvcrt.locking on Windows (still documented for manual use). Imported
+# defensively so the module, and the feed that imports it, load anywhere.
+try:  # pragma: no cover - which branch runs depends on the platform
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
+try:  # pragma: no cover
+    import msvcrt
+except ImportError:  # pragma: no cover
+    msvcrt = None  # type: ignore[assignment]
 
 RACECARD_FILENAME = "racecard.csv"
 
@@ -281,12 +292,27 @@ def _store_lock(path: Path) -> Iterator[None]:
     """
     lock_path = Path(path).with_name(Path(path).name + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
+    with open(lock_path, "a+") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        elif msvcrt is not None:  # pragma: no cover - Windows only
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            logger.warning(
+                "No file locking on this platform; overlapping racecard "
+                "captures may lose one capture's rows until the next run."
+            )
             yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def update_racecard(
