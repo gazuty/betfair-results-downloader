@@ -70,6 +70,12 @@ STATUS_COLUMNS: list[str] = [
     # First time this market was observed CLOSED (or absent); empty while
     # pending.
     "closedObservedUtc",
+    # Most recent time this market was observed in a non-CLOSED state. With
+    # closedObservedUtc it brackets the real close, which lets the results
+    # feed tell a leg that settled as the market closed from an interim one
+    # (see market_results._settled_times). Empty on rows last seen pending
+    # before this column existed.
+    "lastPendingUtc",
 ]
 
 # listMarketBook is capped at 200 weight points per request. A bare book
@@ -484,6 +490,7 @@ def merge_statuses(
         if is_pending_status(obs.status):
             if not row["firstPendingUtc"]:
                 row["firstPendingUtc"] = now_str
+            row["lastPendingUtc"] = now_str
             row["closedObservedUtc"] = ""
         elif not row["closedObservedUtc"]:
             row["closedObservedUtc"] = now_str

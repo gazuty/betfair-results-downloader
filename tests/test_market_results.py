@@ -55,19 +55,25 @@ def _store(rows: list[tuple]) -> pd.DataFrame:
 
 
 def _status(rows: list[tuple], source: str = "book") -> pd.DataFrame:
-    """(marketId, status, firstPendingUtc, closedObservedUtc)."""
+    """
+    (marketId, status, firstPendingUtc, closedObservedUtc[, lastPendingUtc]).
+
+    Without the fifth value the row is as the status file held it before
+    ``lastPendingUtc`` was recorded: an empty cell.
+    """
     return pd.DataFrame(
         [
             {
-                "marketId": mid,
-                "status": st,
+                "marketId": row[0],
+                "status": row[1],
                 "activeRunners": "0",
                 "source": source,
                 "checkedUtc": "2026-11-14T11:00:00Z",
-                "firstPendingUtc": first,
-                "closedObservedUtc": closed,
+                "firstPendingUtc": row[2],
+                "closedObservedUtc": row[3],
+                "lastPendingUtc": row[4] if len(row) > 4 else "",
             }
-            for mid, st, first, closed in rows
+            for row in rows
         ],
         columns=STATUS_COLUMNS,
     )
@@ -198,10 +204,267 @@ def test_a_partially_settled_market_is_held_until_it_closes_then_counted_once() 
     )
     assert len(closed.feed) == 1
     row = closed.feed.iloc[0]
-    # The whole market, once, on the day the close was observed -- not the
-    # interim leg in one week and the whole market again in another.
+    # The whole market, once -- not the interim leg in one week and the
+    # whole market again in another -- dated at its last leg, which settled
+    # inside one run interval of the close being observed (this row predates
+    # lastPendingUtc), not at the run that noticed.
     assert row["netProfit"] == -9.71
-    assert row["settledUtc"] == "2026-03-16T08:00:00Z"
+    assert row["settledUtc"] == "2026-03-15T22:19:26Z"
+    assert row["settledLocal"] == "2026-03-16 09:19:26"
+
+
+def test_an_outright_whose_last_leg_is_days_older_than_its_close_appears_at_the_close() -> (
+    None
+):
+    # Every bet was on a runner eliminated early; the market closed days
+    # later without settling anything else for this account. Its last leg
+    # says nothing about when it closed, and dating it there would put it
+    # back in a week already published.
+    legs = [
+        ("1", "1.200", "3", "2026-03-12T13:43:05.000Z", "-9.71", "Players", "Winner")
+    ]
+    store = _store(
+        [
+            (
+                "1.200",
+                "3",
+                "2026-03-12T13:43:05.000Z",
+                "1",
+                "-9.71",
+                "0.00",
+                "2026-03-16T13:00:00Z",
+            )
+        ]
+    )
+    closed = _build(
+        _bets(legs),
+        store,
+        _status([("1.200", "CLOSED", "2026-03-12T19:00:00Z", "2026-03-16T08:00:00Z")]),
+    )
+    assert closed.feed.iloc[0]["settledUtc"] == "2026-03-16T08:00:00Z"
+
+
+def test_a_leg_settled_after_the_first_look_but_days_before_the_close_does_not_date_it() -> (
+    None
+):
+    # Seen open on the 12th, a second runner eliminated on the 13th, closed
+    # on the 16th: still an outright that finished days after its last leg.
+    legs = [
+        ("1", "1.200", "3", "2026-03-12T13:43:05.000Z", "-5.00", "Players", "Winner"),
+        ("2", "1.200", "3", "2026-03-13T22:00:00.000Z", "-4.71", "Players", "Winner"),
+    ]
+    store = _store(
+        [
+            (
+                "1.200",
+                "3",
+                "2026-03-13T22:00:00.000Z",
+                "2",
+                "-9.71",
+                "0.00",
+                "2026-03-16T13:00:00Z",
+            )
+        ]
+    )
+    closed = _build(
+        _bets(legs),
+        store,
+        _status([("1.200", "CLOSED", "2026-03-12T19:00:00Z", "2026-03-16T08:00:00Z")]),
+    )
+    assert closed.feed.iloc[0]["settledUtc"] == "2026-03-16T08:00:00Z"
+
+
+def _winner_market(last_leg: str, status_row: tuple) -> pd.Series:
+    """One two-leg Winner market, closed, with ``last_leg`` as its final leg."""
+    legs = [
+        ("1", "1.200", "2", "2026-03-10T10:00:00.000Z", "-5.00", "Open", "Winner"),
+        ("2", "1.200", "2", last_leg, "25.00", "Open", "Winner"),
+    ]
+    store = _store(
+        [("1.200", "2", last_leg, "2", "20.00", "1.08", "2026-03-20T00:00:00Z")]
+    )
+    return _build(_bets(legs), store, _status([status_row])).feed.iloc[0]
+
+
+def test_an_interim_leg_followed_by_a_run_that_still_saw_the_market_open() -> None:
+    """
+    The account's semi-finalist loses on Saturday 10:00; runs at 16:00 and
+    midnight still see the market open; the final settles and the close is
+    observed Sunday 07:00. The Saturday leg is only 21 hours before that,
+    but it is not the close, and dating the market there would put it back
+    in a day already published.
+    """
+    row = _winner_market(
+        "2026-03-14T10:00:00.000Z",
+        (
+            "1.200",
+            "CLOSED",
+            "2026-03-10T13:00:00Z",
+            "2026-03-15T07:00:00Z",
+            "2026-03-15T00:00:00Z",  # last seen open, 14 hours after the leg
+        ),
+    )
+    assert row["settledUtc"] == "2026-03-15T07:00:00Z"
+    assert row["netProfit"] == 18.92
+
+
+def test_a_leg_settled_after_the_market_was_last_seen_open_is_its_settlement() -> None:
+    row = _winner_market(
+        "2026-03-15T05:00:00.000Z",
+        (
+            "1.200",
+            "CLOSED",
+            "2026-03-10T13:00:00Z",
+            "2026-03-15T07:00:00Z",
+            "2026-03-15T00:00:00Z",
+        ),
+    )
+    assert row["settledUtc"] == "2026-03-15T05:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "last_leg,expected",
+    [
+        # Bets settle, then Betfair marks the market CLOSED: a leg up to an
+        # hour before the last open sighting is still the settlement.
+        ("2026-03-14T23:00:00.000Z", "2026-03-14T23:00:00Z"),
+        # One second older than that: an interim leg.
+        ("2026-03-14T22:59:59.000Z", "2026-03-15T07:00:00Z"),
+    ],
+)
+def test_the_settlement_lag_before_the_last_open_sighting(last_leg, expected) -> None:
+    row = _winner_market(
+        last_leg,
+        (
+            "1.200",
+            "CLOSED",
+            "2026-03-10T13:00:00Z",
+            "2026-03-15T07:00:00Z",
+            "2026-03-15T00:00:00Z",
+        ),
+    )
+    assert row["settledUtc"] == expected
+
+
+@pytest.mark.parametrize(
+    "last_leg,expected",
+    [
+        # No lastPendingUtc on the row: the last open sighting is taken as
+        # one run interval (10h) before the observed close, less the lag.
+        ("2026-03-14T20:00:00.000Z", "2026-03-14T20:00:00Z"),
+        ("2026-03-14T19:59:59.000Z", "2026-03-15T07:00:00Z"),
+    ],
+)
+def test_a_status_row_from_before_last_pending_was_recorded(last_leg, expected) -> None:
+    row = _winner_market(
+        last_leg,
+        ("1.200", "CLOSED", "2026-03-10T13:00:00Z", "2026-03-15T07:00:00Z"),
+    )
+    assert row["settledUtc"] == expected
+
+
+def test_a_closed_row_with_no_observed_close_is_left_at_its_last_leg() -> None:
+    # A hand-repaired row: seen pending, CLOSED, close time blank. Nothing
+    # was re-dated, so there is no observed close to choose against.
+    row = _winner_market(
+        "2026-03-14T10:00:00.000Z",
+        ("1.200", "CLOSED", "2026-03-10T13:00:00Z", "", "2026-03-15T00:00:00Z"),
+    )
+    assert row["settledUtc"] == "2026-03-14T10:00:00Z"
+
+
+def test_the_feed_is_sorted_by_the_time_it_publishes() -> None:
+    """A market moved to its leg's time must take its place in the order."""
+    legs = [
+        # Closed at first sight, settled between the other market's leg and
+        # its observed close.
+        ("1", "1.100", "1", "2026-03-15T06:00:00.000Z", "5.00", "A v B", "CS"),
+        ("2", "1.200", "2", "2026-03-15T05:00:00.000Z", "25.00", "Open", "Winner"),
+    ]
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-03-15T06:00:00.000Z",
+                "1",
+                "5.00",
+                "0.25",
+                "2026-03-20T00:00:00Z",
+            ),
+            (
+                "1.200",
+                "2",
+                "2026-03-15T05:00:00.000Z",
+                "1",
+                "25.00",
+                "1.35",
+                "2026-03-20T00:00:00Z",
+            ),
+        ]
+    )
+    status = _status(
+        [
+            ("1.100", "CLOSED", "", "2026-03-15T07:00:00Z"),
+            (
+                "1.200",
+                "CLOSED",
+                "2026-03-10T13:00:00Z",
+                "2026-03-15T07:00:00Z",
+                "2026-03-15T00:00:00Z",
+            ),
+        ]
+    )
+    feed = _build(_bets(legs), store, status).feed
+    assert feed["marketId"].tolist() == ["1.200", "1.100"]
+    assert feed["settledUtc"].is_monotonic_increasing
+
+
+def test_a_race_caught_mid_settlement_keeps_its_real_settled_time() -> None:
+    """
+    A run that lands between a void leg and the result sees the race open;
+    the next run sees it closed hours later. The feed must not stamp the
+    race with that run's time (23:00 one day became 06:00 the next).
+    """
+    legs = [
+        ("1", "1.300", "7", "2026-10-02T22:40:00.000Z", "0.00", "09:45 Taree", "Win"),
+        ("2", "1.300", "7", "2026-10-02T23:51:10.000Z", "27.48", "09:45 Taree", "Win"),
+    ]
+    store = _store(
+        [
+            (
+                "1.300",
+                "7",
+                "2026-10-02T23:51:10.000Z",
+                "2",
+                "27.48",
+                "1.98",
+                "2026-10-03T09:01:00Z",
+            )
+        ]
+    )
+    result = _build(
+        _bets(legs),
+        store,
+        _status(
+            [
+                (
+                    "1.300",
+                    "CLOSED",
+                    "2026-10-02T23:00:20Z",
+                    "2026-10-03T09:00:28Z",
+                    "2026-10-02T23:00:20Z",
+                )
+            ]
+        ),
+    )
+    row = result.feed.iloc[0]
+    assert row["settledUtc"] == "2026-10-02T23:51:10Z"
+    assert (row["grossProfit"], row["commission"], row["netProfit"]) == (
+        27.48,
+        1.98,
+        25.5,
+    )
 
 
 def test_unknown_commission_is_held_back_not_published_as_zero() -> None:
@@ -1083,3 +1346,110 @@ def test_an_archive_only_outright_under_a_year_old_still_needs_a_status_row() ->
     )
     result = _build(bets, store, status=None)
     assert result.feed.empty and result.meta["heldStatusUncheckedMarkets"] == 1
+
+
+# -----------------------------
+# lastDownloadUtc: a rebuild from disk is not a download
+# -----------------------------
+
+
+def _one_market_dir(tmp_path: Path) -> Path:
+    bets = _bets(
+        [("1", "1.100", "1", "2026-11-14T07:00:00.000Z", "5.0", "A v B", "CS")]
+    )
+    bets.to_csv(tmp_path / "cleared_orders_cleaned.csv", index=False)
+    cache = tmp_path / ".cache"
+    save_market_status(_closed_for(bets), resolve_status_path(cache))
+    save_market_commission(
+        _store(
+            [
+                (
+                    "1.100",
+                    "1",
+                    "2026-11-14T07:00:00.000Z",
+                    "1",
+                    "5.00",
+                    "0.25",
+                    "2026-11-14T08:00:00Z",
+                )
+            ]
+        ),
+        resolve_commission_path(cache),
+    )
+    return tmp_path
+
+
+def _meta(directory: Path) -> dict:
+    return json.loads((directory / META_FILENAME).read_text())
+
+
+def test_a_run_stamps_the_download_and_a_rebuild_from_disk_carries_it(tmp_path) -> None:
+    d = _one_market_dir(tmp_path)
+    ran = datetime(2026, 11, 14, 8, 0, tzinfo=timezone.utc)
+    write_market_results(
+        d, build_market_results_from_disk(d, now=ran), downloaded_at=ran
+    )
+    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"
+
+    # Two days later the downloader has stopped and someone rebuilds by hand.
+    later = datetime(2026, 11, 16, 9, 30, tzinfo=timezone.utc)
+    write_market_results(d, build_market_results_from_disk(d, now=later))
+    meta = _meta(d)
+    assert meta["generatedUtc"] == "2026-11-16T09:30:00Z"
+    assert meta["lastDownloadUtc"] == "2026-11-14T08:00:00Z", (
+        "a rebuild must not make a stopped downloader look fresh"
+    )
+
+    # And again: carried through the .prev generation too.
+    write_market_results(d, build_market_results_from_disk(d, now=later))
+    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"
+
+
+def test_a_feed_written_before_the_stamp_existed_does_not_vouch_for_a_download(
+    tmp_path,
+) -> None:
+    """
+    Before the field existed, export-market-results advanced generatedUtc
+    too, so an old meta's generatedUtc may itself be a rebuild on a stopped
+    installation. Rebuilding again must not record it as a download.
+    """
+    d = _one_market_dir(tmp_path)
+    ran = datetime(2026, 11, 14, 8, 0, tzinfo=timezone.utc)
+    write_market_results(
+        d, build_market_results_from_disk(d, now=ran), downloaded_at=ran
+    )
+    old = _meta(d)
+    del old["lastDownloadUtc"]  # as every meta on disk was before this change
+    (d / META_FILENAME).write_text(json.dumps(old))
+
+    later = datetime(2026, 11, 14, 9, 30, tzinfo=timezone.utc)
+    write_market_results(d, build_market_results_from_disk(d, now=later))
+    meta = _meta(d)
+    assert "lastDownloadUtc" in meta and meta["lastDownloadUtc"] is None
+
+    # The next run settles it.
+    write_market_results(
+        d, build_market_results_from_disk(d, now=later), downloaded_at=later
+    )
+    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T09:30:00Z"
+
+
+def test_a_first_feed_built_from_disk_has_never_been_downloaded(tmp_path) -> None:
+    d = _one_market_dir(tmp_path)
+    write_market_results(d, build_market_results_from_disk(d, now=NOW))
+    meta = _meta(d)
+    assert "lastDownloadUtc" in meta and meta["lastDownloadUtc"] is None
+
+
+def test_the_download_stamp_survives_a_missing_current_meta(tmp_path) -> None:
+    """Only the .prev pair is readable: its stamp is still carried forward."""
+    d = _one_market_dir(tmp_path)
+    ran = datetime(2026, 11, 14, 8, 0, tzinfo=timezone.utc)
+    write_market_results(
+        d, build_market_results_from_disk(d, now=ran), downloaded_at=ran
+    )
+    later = datetime(2026, 11, 14, 9, 0, tzinfo=timezone.utc)
+    write_market_results(d, build_market_results_from_disk(d, now=later))  # makes .prev
+    (d / META_FILENAME).write_text("{not json")
+    write_market_results(d, build_market_results_from_disk(d, now=later))
+    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"

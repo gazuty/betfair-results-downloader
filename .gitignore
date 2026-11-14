@@ -42,6 +42,8 @@ tmp_fix_customer_order_ref.patch
 outputs/
 data/
 *.csv
+# The feed contract shared with betfair-dashboard-py: invented data, kept in git.
+!tests/fixtures/feed_contract/*.csv
 *.csv.gz
 *.parquet
 *.feather

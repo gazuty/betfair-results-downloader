@@ -8,8 +8,9 @@ files:
 - ``market_results.csv`` -- one row per market, columns
   :data:`FEED_COLUMNS`. Settled times are given in UTC and, to match the
   website download the dashboard's history came from, as naive Sydney time.
-- ``market_results.meta.json`` -- when the feed was built, a SHA-256 of
-  the CSV, and what was held back. A reader checks the hash so it never
+- ``market_results.meta.json`` -- when the feed was built, when a run last
+  downloaded from Betfair (``lastDownloadUtc``, which a rebuild from disk
+  does not advance), a SHA-256 of the CSV, and what was held back. A reader checks the hash so it never
   pairs a new CSV with an old summary, and can skip a publish when the
   hash is unchanged.
 
@@ -23,10 +24,11 @@ than it about status (see _hold_unchecked):
 
 - A partially settled market (an outright still being settled leg by leg)
   is held back until Betfair closes it. It then appears once, for the whole
-  market, at the moment the close was observed (see
-  :func:`~.reporting.daily_dm_report.apply_settlement_status`). The website
-  download instead caught the interim legs in one week and the full market
-  again in a later one, which double-counted it.
+  market, at its close: the time of its last settled leg when no run saw
+  the market still open after that leg, otherwise the moment the close was
+  observed (see :func:`_settled_times`). The website download instead caught the interim
+  legs in one week and the full market again in a later one, which
+  double-counted it.
 - A market whose commission is not yet known is held back until a later
   run reads it (see :func:`~.reporting.daily_dm_report.market_commission_frame`).
   Publishing its gross would overstate it, and publishing gross less zero
@@ -67,6 +69,7 @@ from .market_status import (
     DEFAULT_ABSENT_RECHECK_HOURS,
     RACING_EVENT_TYPE_IDS,
     SOURCE_ABSENT,
+    is_pending_status,
     _fmt_utc,
     _now_utc,
     load_market_status,
@@ -100,8 +103,8 @@ FEED_COLUMNS: list[str] = [
     "market",
     # racecard | catalogue | item_description | fallback (see market_names)
     "nameSource",
-    # The market's last settled leg, or the observed close of a market that
-    # was ever partially settled.
+    # The market's last settled leg; for a market still seen open by a run
+    # after that leg, the moment the close was observed.
     "settledUtc",
     "settledLocal",
     "betCount",
@@ -136,6 +139,17 @@ STUCK_COMMISSION_HOURS = 48
 # within hours, so an old unrecorded race predates status tracking and is
 # final.
 STATUS_REQUIRED_DAYS = 14
+
+
+# Betfair settles a market's bets and marks the market CLOSED a little
+# apart: on the live store, races whose bets settled at 22:58 were still
+# open to the 23:00 run. A last leg settled this long before the market was
+# last seen open is still taken as its settlement (see _settled_times).
+SETTLEMENT_LAG = pd.Timedelta(hours=1)
+
+# The longest gap between two scheduled runs (09:00 to 19:00), standing in
+# for the last open sighting on status rows that predate lastPendingUtc.
+LONGEST_RUN_GAP = pd.Timedelta(hours=10)
 
 
 @dataclass
@@ -345,6 +359,97 @@ def load_previous_feed(results_dir: Path) -> Optional[pd.DataFrame]:
     return pd.read_csv(BytesIO(payload), dtype=str, keep_default_na=False)
 
 
+def _settled_times(per_market: pd.DataFrame, market_status: Optional[pd.DataFrame]):
+    """
+    When each market settled, for the feed's ``settledUtc``/``settledLocal``.
+
+    ``last_settled_local`` (from the commission frame) is already right for
+    a market closed at first sight: its last leg. For a market that was seen
+    partially settled and later closed it is the moment a run *observed* the
+    close. That is the best date for an outright whose last leg for this
+    account settled long before the market closed: it appears at its close,
+    not back in a week long since published. But it is a run time, up to
+    ten hours after the fact, and most markets ever seen open are not
+    outrights: of 36 on the live store on 2026-11-15, about 20 were ordinary
+    races and correct-score markets a run happened to catch between the
+    bets settling and Betfair marking the market CLOSED, 11 of them pushed
+    onto the next day.
+
+    The status file brackets the real close between the last run that saw
+    the market open and the first that saw it closed. If the last leg
+    settled after that last open sighting, or at most
+    :data:`SETTLEMENT_LAG` before it, nothing shows the market staying open
+    after the leg, and the leg is taken as the settlement. A leg older than
+    that was followed by a run that still saw the market open, so it was an
+    interim leg, and the observed close stands.
+
+    Accepted: an outright's interim leg that settles within the lag before
+    a run, with the market closing before the next run, is dated at that
+    leg, at most one run interval before the true close.
+    """
+    settled = per_market["last_settled_local"].copy()
+    if market_status is None or market_status.empty or per_market.empty:
+        return settled
+    brackets = _close_brackets(market_status)
+    for idx, key, last_leg in zip(
+        per_market.index, per_market["_key"], per_market["lastLegUtc"]
+    ):
+        bracket = brackets.get(key)
+        if bracket is None or pd.isna(last_leg):
+            continue
+        last_seen_open, observed_close = bracket
+        if last_seen_open - SETTLEMENT_LAG <= last_leg <= observed_close:
+            settled.at[idx] = last_leg.tz_convert(SYDNEY_TZ)
+    return settled
+
+
+def _close_brackets(
+    market_status: pd.DataFrame,
+) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    """
+    ``key -> (last seen open, close first observed)`` for every market that
+    was seen partially settled and has since been observed CLOSED: the same
+    markets :func:`~.reporting.daily_dm_report.apply_settlement_status`
+    re-dates to the observed close.
+
+    A row last seen open before ``lastPendingUtc`` was recorded has no such
+    time. The run before the one that observed the close must have seen the
+    market open, so the open sighting is taken as one run interval
+    (:data:`LONGEST_RUN_GAP`) before the observed close. That is this
+    deployment's cadence, not a fact about every schedule: where runs were
+    further apart, the true sighting was earlier, a real closing leg can
+    fall outside the stand-in bracket, and the market keeps the observed
+    close it had before this rule existed. The stand-in can only fail in
+    that direction, never by dating a market at an interim leg, and it
+    applies only to rows closed before the column was recorded.
+    """
+
+    def column(name: str) -> pd.Series:
+        if name not in market_status.columns:
+            return pd.Series(
+                pd.NaT, index=market_status.index, dtype="datetime64[ns, UTC]"
+            )
+        return pd.to_datetime(
+            market_status[name], utc=True, errors="coerce", format="ISO8601"
+        )
+
+    keys = market_status["marketId"].fillna("").astype(str).map(decimal_key)
+    closed = ~market_status["status"].map(is_pending_status)
+    first_pending, last_pending, observed = (
+        column("firstPendingUtc"),
+        column("lastPendingUtc"),
+        column("closedObservedUtc"),
+    )
+    out: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for key, is_closed, first, last, close in zip(
+        keys, closed, first_pending, last_pending, observed
+    ):
+        if not key or not is_closed or pd.isna(first) or pd.isna(close):
+            continue
+        out[key] = (last if pd.notna(last) else close - LONGEST_RUN_GAP, close)
+    return out
+
+
 def _first_present(series: pd.Series) -> Any:
     present = series.dropna()
     present = present[present.astype(str).str.strip() != ""]
@@ -437,6 +542,7 @@ def build_market_results(
             mkt_marketName=("mkt_marketName", _first_present),
             grossProfit=("profit", "sum"),
             betCount=("profit", "size"),
+            lastLegUtc=("settled_dt_utc", "max"),
         )
         .reset_index()
         # Keys are strings on both sides; an empty frame would otherwise
@@ -444,7 +550,7 @@ def build_market_results(
         .astype({"_key": str})
         .merge(commission.astype({"_key": str}), on="_key", how="left")
     )
-    per_market["settled_dt_local"] = per_market["last_settled_local"]
+    per_market["settled_dt_local"] = _settled_times(per_market, market_status)
 
     blank_id = per_market["_key"].astype(str).str.startswith("blank:")
     unknown = per_market["unknown"].fillna(True).astype(bool)
@@ -698,9 +804,43 @@ def _replace_atomically(path: Path, payload: bytes) -> None:
             tmp_path.unlink()
 
 
-def write_market_results(results_dir: Path, result: FeedResult) -> Path:
+def _previous_last_download(results_dir: Path) -> Optional[str]:
+    """
+    When the feed on disk says a run last downloaded from Betfair; ``None``
+    when it does not say.
+
+    A meta written before ``lastDownloadUtc`` existed does not say: its
+    ``generatedUtc`` was advanced by ``export-market-results`` as well as by
+    runs, so a feed rebuilt by hand on a stopped installation would pass it
+    off as a download. Unknown stays unknown until a run stamps it.
+    """
+    for name in (META_FILENAME, PREV_META_FILENAME):
+        try:
+            meta = json.loads((Path(results_dir) / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(meta, dict) and "lastDownloadUtc" in meta:
+            return meta["lastDownloadUtc"]
+    return None
+
+
+def write_market_results(
+    results_dir: Path,
+    result: FeedResult,
+    *,
+    downloaded_at: Optional[datetime] = None,
+) -> Path:
     """
     Write the CSV, then the meta that names its hash.
+
+    ``downloaded_at`` is given by a run, which has just read Betfair, and
+    becomes the meta's ``lastDownloadUtc``. A rebuild from disk
+    (``export-market-results``) leaves it out and the previous value is
+    carried forward: ``generatedUtc`` moves on every write, so a reader
+    that judged freshness by it would take a rebuilt feed for proof that
+    the downloader is still running. ``lastDownloadUtc`` is ``null`` when
+    no run has stamped a feed here yet, which includes a rebuild of a feed
+    written before the field existed.
 
     Each file is replaced atomically. A reader that lands between the two
     replacements sees a hash mismatch and waits for the next run, rather
@@ -723,8 +863,17 @@ def write_market_results(results_dir: Path, result: FeedResult) -> Path:
             results_dir / PREV_META_FILENAME,
             (json.dumps(meta_now, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
+    last_download = (
+        _fmt_utc(_now_utc(downloaded_at))
+        if downloaded_at is not None
+        else _previous_last_download(results_dir)
+    )
     csv_bytes = result.feed.to_csv(index=False).encode("utf-8")
-    meta = dict(result.meta, csvSha256=hashlib.sha256(csv_bytes).hexdigest())
+    meta = dict(
+        result.meta,
+        csvSha256=hashlib.sha256(csv_bytes).hexdigest(),
+        lastDownloadUtc=last_download,
+    )
     _replace_atomically(feed_path, csv_bytes)
     _replace_atomically(
         meta_path,

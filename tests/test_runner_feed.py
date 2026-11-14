@@ -223,3 +223,28 @@ def test_a_failed_status_check_keeps_the_previous_feed(tmp_path: Path) -> None:
     assert result.ok and result.status == "success"
     assert "settlement status check failed" in result.message
     assert (tmp_path / FEED_FILENAME).read_text() == "previous"
+
+
+def test_a_run_stamps_its_download_and_an_export_afterwards_does_not(
+    tmp_path, monkeypatch
+) -> None:
+    import json
+
+    from betfair_results_downloader.__main__ import main
+
+    client = _client()
+    p1, p2, p3, p4 = _patches(tmp_path, _window(), client)
+    before = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with p1, p2, p3, p4:
+        _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
+    stamped = json.loads((tmp_path / META_FILENAME).read_text())["lastDownloadUtc"]
+    assert stamped >= before, "a run has just downloaded: the stamp is now"
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.__main__._load_creds_and_schedule",
+        lambda validate=False: (_creds(tmp_path), ScheduleConfig()),
+    )
+    assert main(["export-market-results"]) == 0
+    assert (
+        json.loads((tmp_path / META_FILENAME).read_text())["lastDownloadUtc"] == stamped
+    )
