@@ -240,10 +240,44 @@ def test_a_market_stuck_without_commission_past_48_hours_warns() -> None:
     assert len(result.warnings) == 1 and "76h ago" in result.warnings[0]
 
 
-def test_a_zero_commission_confirmed_a_day_after_close_is_final() -> None:
-    # $0.40 is above the 15-cent placeholder threshold, so this is the
-    # feed's safety net: a rate lower than any seen yet. Still zero a day
-    # after the observed close means it is Betfair's final answer.
+def test_a_zero_commission_above_15_cents_stays_held_however_late_it_is_read() -> None:
+    # The feed and the DM report use one rule: above 15 cents a zero is
+    # always the pre-close placeholder, even read days after the close.
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.500",
+                "7",
+                "2026-10-28T04:12:07.000Z",
+                "412.00",
+                "15:12 Bendigo",
+                "Win",
+            )
+        ]
+    )
+    status = _status([("1.500", "CLOSED", "", "2026-10-28T08:00:20Z")])
+    store = _store(
+        [
+            (
+                "1.500",
+                "7",
+                "2026-10-28T04:12:07.000Z",
+                "24",
+                "412.00",
+                "0.00",
+                "2026-11-10T22:00:21Z",
+            )
+        ]
+    )
+    result = _build(bets, store, status)
+    assert result.feed.empty
+    assert result.meta["heldCommissionUnknownMarkets"] == 1
+    assert "held back for unknown commission" in result.warnings[0]
+
+
+def test_a_small_zero_confirmed_after_settlement_is_published() -> None:
+    # Market 1.264531699: won $0.11, still $0.00 thirteen days after closing.
     bets = _bets(
         [
             (
@@ -251,33 +285,28 @@ def test_a_zero_commission_confirmed_a_day_after_close_is_final() -> None:
                 "1.264531699",
                 "7",
                 "2026-10-28T04:12:07.000Z",
-                "0.40",
+                "0.11",
                 "15:12 Bendigo",
                 "Win",
             )
         ]
     )
-    status = _status([("1.264531699", "CLOSED", "", "2026-10-28T08:00:20Z")])
-
-    read_late = _store(
+    store = _store(
         [
             (
                 "1.264531699",
                 "7",
                 "2026-10-28T04:12:07.000Z",
                 "24",
-                "0.40",
+                "0.11",
                 "0.00",
                 "2026-11-10T22:00:21Z",
             )
         ]
     )
-    accepted = _build(bets, read_late, status)
-    assert accepted.feed["netProfit"].tolist() == [0.40]
-
-    read_early = read_late.assign(fetchedUtc="2026-10-28T09:00:00Z")
-    held = _build(bets, read_early, status)
-    assert held.feed.empty and held.meta["heldCommissionUnknownMarkets"] == 1
+    assert _build(bets, store).feed["netProfit"].tolist() == [0.11]
+    early = store.assign(fetchedUtc="2026-10-28T05:00:00Z")
+    assert _build(bets, early).feed.empty
 
 
 def test_a_zero_on_a_market_that_was_ever_pending_stays_unknown() -> None:
@@ -970,7 +999,7 @@ def test_rereading_archives_keeps_carried_rows_and_adds_only_new_markets(
         ]
     )
     backfilled = _bets(
-        [("2", "1.900", "2", "2025-11-25T08:00:00.000Z", "6.0", "Open 2025", "Winner")]
+        [("2", "1.900", "2", "2025-10-25T08:00:00.000Z", "6.0", "Open 2025", "Winner")]
     )
     recent = _bets(
         [
@@ -1032,3 +1061,25 @@ def test_rereading_archives_keeps_carried_rows_and_adds_only_new_markets(
     by_id = result.feed.set_index("marketId")["netProfit"].to_dict()
     assert by_id == {"1.100": 9.5, "1.800": 3.8, "1.900": 5.7}
     assert result.meta["carriedForwardMarkets"] == 1
+
+
+def test_an_archive_only_outright_under_a_year_old_still_needs_a_status_row() -> None:
+    # A shorter canonical_archive_months can archive a still-open outright.
+    bets = _bets(
+        [("1", "1.950", "2", "2026-06-01T08:00:00.000Z", "6.0", "Open 2026", "Winner")]
+    ).assign(_fromArchive="1")
+    store = _store(
+        [
+            (
+                "1.950",
+                "2",
+                "2026-06-01T08:00:00.000Z",
+                "1",
+                "6.00",
+                "0.30",
+                "2026-09-13T10:00:00Z",
+            )
+        ]
+    )
+    result = _build(bets, store, status=None)
+    assert result.feed.empty and result.meta["heldStatusUncheckedMarkets"] == 1

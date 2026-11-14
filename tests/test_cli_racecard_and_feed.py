@@ -140,3 +140,49 @@ def test_uninstall_racecard_removes_the_plist(tmp_path: Path, monkeypatch) -> No
     with patch.object(launchd, "RACECARD_PLIST_PATH", target):
         assert launchd.LaunchdInstaller().uninstall_racecard()["ok"]
     assert not target.exists()
+
+
+class _FakeInstaller:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def install_racecard(self, **kwargs):
+        self.calls.append("install_racecard")
+        return {"ok": True, "message": "installed racecard"}
+
+    def uninstall_racecard(self):
+        self.calls.append("uninstall_racecard")
+        return {"ok": True, "message": "uninstalled racecard"}
+
+    def status(self):
+        return {"installed": False, "message": "scheduler not installed"}
+
+    def racecard_status(self):
+        return {"installed": True, "loaded": True}
+
+
+def test_schedule_dispatches_the_racecard_actions(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    _use_creds(monkeypatch, tmp_path)
+    fake = _FakeInstaller()
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.installers.get_installer", lambda: fake
+    )
+    assert main(["schedule", "install-racecard"]) == 0
+    assert main(["schedule", "uninstall-racecard"]) == 0
+    assert fake.calls == ["install_racecard", "uninstall_racecard"]
+    out = capsys.readouterr().out
+    assert "installed racecard" in out and "uninstalled racecard" in out
+
+
+def test_schedule_status_reports_the_racecard_job(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    _use_creds(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.installers.get_installer",
+        lambda: _FakeInstaller(),
+    )
+    assert main(["schedule", "status"]) == 0
+    assert "racecard job  : installed=True loaded=True" in capsys.readouterr().out

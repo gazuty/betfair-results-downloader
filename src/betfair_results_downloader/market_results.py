@@ -41,8 +41,9 @@ import hashlib
 import json
 from io import BytesIO
 import logging
+import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -135,10 +136,6 @@ STUCK_COMMISSION_HOURS = 48
 # final.
 STATUS_REQUIRED_DAYS = 14
 
-# How long after an observed close a zero commission must still read zero
-# before the feed accepts it as final (see _confirmed_zero_commission_keys).
-CONFIRMED_ZERO_AFTER = timedelta(hours=24)
-
 
 @dataclass
 class FeedResult:
@@ -192,79 +189,6 @@ def _store_by_key(market_commission: Optional[pd.DataFrame]) -> pd.DataFrame:
     return store.set_index("_key")[columns]
 
 
-def _confirmed_zero_commission_keys(
-    market_commission: Optional[pd.DataFrame],
-    market_status: Optional[pd.DataFrame],
-    rows_latest: pd.Series,
-) -> set[str]:
-    """
-    Markets whose zero commission is Betfair's final answer, not the
-    pre-close placeholder :func:`market_commission_frame` takes it for.
-
-    The placeholder rule treats a zero against a win above 15 cents as
-    unknown, because a partially settled market reports 0.0 until it
-    closes. That is right for a read taken before the close, but Betfair
-    rounds commission to the nearest cent, so a win at a rate below any
-    seen so far can still genuinely be charged nothing. Market 1.264531699
-    ($0.11 won, still $0.00 thirteen days after it closed) showed the
-    threshold was once too low. This is the safety net for the next such
-    case: without it the market would be held back, and alerted on,
-    forever.
-
-    A zero is accepted only when all of these hold: the market was never
-    seen partially settled, the status step saw it CLOSED, the store row
-    was read at least :data:`CONFIRMED_ZERO_AFTER` after that, and the
-    store row covers the canonical's latest leg. ``rows_latest`` maps the
-    numeric key to that latest leg (tz-aware).
-    """
-    if (
-        market_commission is None
-        or market_commission.empty
-        or market_status is None
-        or market_status.empty
-    ):
-        return set()
-    store = market_commission.copy()
-    store["_key"] = store["marketId"].fillna("").astype(str).map(decimal_key)
-    store = store[store["_key"] != ""].drop_duplicates(subset=["_key"], keep="last")
-    amount = pd.to_numeric(store["commission"], errors="coerce")
-    store = store.loc[amount == 0.0]
-    if store.empty:
-        return set()
-    status = market_status.copy()
-    status["_key"] = status["marketId"].fillna("").astype(str).map(decimal_key)
-    status = status[status["_key"] != ""].drop_duplicates(subset=["_key"], keep="last")
-    status = status.loc[
-        (status["status"].astype(str).str.upper() == "CLOSED")
-        & (status["firstPendingUtc"].fillna("").astype(str) == "")
-    ].set_index("_key")
-    closed_at = pd.to_datetime(
-        status["closedObservedUtc"], utc=True, errors="coerce", format="ISO8601"
-    )
-    joined = store.join(closed_at.rename("closed"), on="_key", how="inner")
-    fetched = pd.to_datetime(
-        joined["fetchedUtc"], utc=True, errors="coerce", format="ISO8601"
-    )
-    settled = pd.to_datetime(
-        joined["settledDateUtc"], utc=True, errors="coerce", format="ISO8601"
-    )
-    # A plain dict: mapping onto a datetime Series with no matching keys
-    # makes pandas try to cast the result to float and raise.
-    latest_by_key = {str(k): v for k, v in rows_latest.items()}
-    latest = pd.to_datetime(
-        joined["_key"].map(lambda k: latest_by_key.get(k, pd.NaT)), utc=True
-    )
-    ok = (
-        joined["closed"].notna()
-        & fetched.notna()
-        & (fetched >= joined["closed"] + CONFIRMED_ZERO_AFTER)
-        & settled.notna()
-        & latest.notna()
-        & (settled >= latest)
-    )
-    return set(joined.loc[ok, "_key"])
-
-
 def _hold_unchecked(
     final: pd.DataFrame,
     market_status: Optional[pd.DataFrame],
@@ -293,7 +217,13 @@ def _hold_unchecked(
         if ARCHIVED_COLUMN in final.columns
         else pd.Series(False, index=final.index)
     )
-    archive_only = from_archive.groupby(keys).transform("all")
+    # Final without a status row only if genuinely old, whatever
+    # user.canonical_archive_months is set to: a shorter window could
+    # archive a still-open outright within months.
+    archive_cutoff = pd.Timestamp(now_utc) - pd.Timedelta(days=ARCHIVE_FINAL_DAYS)
+    archive_only = from_archive.groupby(keys).transform("all") & (
+        latest < archive_cutoff
+    )
     needs_row = (~racing | (latest >= cutoff)) & ~archive_only
     unchecked = (keys != "") & ~keys.isin(recorded) & needs_row
     provisional = keys.isin(_provisional_absent_keys(market_status, now_utc))
@@ -515,15 +445,6 @@ def build_market_results(
     )
     per_market["settled_dt_local"] = per_market["last_settled_local"]
 
-    latest_leg = final.groupby("_key")["settled_dt_local"].max()
-    confirmed_zero = _confirmed_zero_commission_keys(
-        market_commission, market_status, latest_leg
-    )
-    flip = per_market["unknown"].fillna(True).astype(bool) & per_market["_key"].isin(
-        confirmed_zero
-    )
-    per_market.loc[flip, ["unknown", "commission"]] = [False, 0.0]
-
     blank_id = per_market["_key"].astype(str).str.startswith("blank:")
     unknown = per_market["unknown"].fillna(True).astype(bool)
     held = per_market.loc[unknown]
@@ -645,6 +566,10 @@ ARCHIVE_GLOB = "cleared_orders_archive_*.csv.gz"
 # tracking never had one.
 ARCHIVED_COLUMN = "_fromArchive"
 
+# An archive-only market counts as final without a status row only when its
+# latest leg is at least this old (see _hold_unchecked).
+ARCHIVE_FINAL_DAYS = 365
+
 
 def archive_signature(results_dir: Path) -> list[list[Any]]:
     """Name, size and modification time of every yearly archive, sorted."""
@@ -758,7 +683,9 @@ def build_market_results_from_disk(
 
 
 def _replace_atomically(path: Path, payload: bytes) -> None:
-    tmp_path = path.with_name(path.name + ".tmp")
+    # The pid keeps a manual export-market-results and a scheduled run from
+    # sharing one temp file; the hash check covers an interleaved pair.
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp_path.write_bytes(payload)
         tmp_path.replace(path)

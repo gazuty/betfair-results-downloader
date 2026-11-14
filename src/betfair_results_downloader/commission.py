@@ -102,9 +102,11 @@ DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 # rounds to zero depends on the market's rate, which is not stored. Three
 # bands:
 #
-# - up to GENUINE_ZERO_MAX_GROSS (10 cents): zero is genuine at any rate up
-#   to about 5%; 212 of 217 zero-commission wins checked on 2026-09-13
-#   were here, the other 5 the open outrights. Accepted at once, as before.
+# - up to GENUINE_ZERO_MAX_GROSS (10 cents): accepted at once, as before.
+#   Zero is genuine here at rates up to about 5%; at higher rates a
+#   pre-close placeholder could be taken as final, an error of at most one
+#   cent per market. 212 of 217 zero-commission wins checked on 2026-09-13
+#   were in this band; the other 5 were the open outrights.
 # - up to PLACEHOLDER_MIN_GROSS (15 cents): zero is genuine at the lowest
 #   rates (0.005 / 0.0331 is just over 15 cents) but not at the median, so
 #   it is accepted only from a read taken CONFIRM_ZERO_AFTER the market's
