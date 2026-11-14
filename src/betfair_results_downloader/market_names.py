@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Optional
 
 import pandas as pd
@@ -55,6 +55,7 @@ _RACING_IDS = {EVENTTYPE_HORSES, EVENTTYPE_GREYHOUNDS}
 # itemDescription prefixes racing events with the start time in the
 # account's time zone: "18:01 Morphettville".
 _RE_EVENT_TIME = re.compile(r"^\d{1,2}:\d{2}\s+")
+_RE_EVENT_TIME_PARTS = re.compile(r"^(\d{1,2}):(\d{2})\s")
 
 # The trailing date on a racecard event name: "Morphettville (AUS) 14th Nov".
 _RE_EVENT_DATE = re.compile(r"\s+\d{1,2}(?:st|nd|rd|th)\s+[A-Za-z]{3}$")
@@ -123,22 +124,56 @@ def _by_key(frame: Optional[pd.DataFrame], columns: list[str]) -> dict[str, dict
     return out
 
 
+# Venues the website history (Jan 2025 - Nov 2026) shows with racing in two
+# countries. Never resolved from a single sighting: the store may only have
+# seen one side so far (unbet racecard rows are pruned after three days).
+KNOWN_MULTI_COUNTRY_VENUES = frozenset(
+    {"Ascot", "Hamilton", "Illawarra Grange", "Newcastle", "Sandown", "Warwick", "York"}
+)
+
+# A racecard track usable as venue evidence: no brackets (UK/IRE) or a
+# country code ("(AUS)", "(US)"). Pool-bet events such as "Romford (F/C)"
+# share the venue but are not a second country, so they are skipped rather
+# than making every Romford race ambiguous.
+_RE_COUNTRY_TRACK = re.compile(r"^[^()]+(?:\s\([A-Z]{2,3}\))?$")
+_RE_BRACKETS = re.compile(r"\s*\([^)]*\)")
+
+
 def learn_venue_tracks(
     markets: pd.DataFrame, racecard: Optional[pd.DataFrame]
 ) -> dict[tuple[int, str], str]:
     """
-    ``(eventTypeId, itemDescription venue) -> racecard track`` for venues
-    that only ever mapped to one track.
+    ``(eventTypeId, venue) -> racecard track`` for venues that only ever
+    mapped to one track.
 
-    Learned from markets that have both an ``itemDescription`` event and a
-    racecard capture. ``markets`` needs ``_key``, ``eventTypeId`` and
-    ``evt_eventName``. A venue seen with two tracks (Ascot UK and Ascot
-    AUS) is left out, so the fallback names it Unknown instead of guessing.
+    Evidence comes from two places, and a venue that maps to more than one
+    track in either is ambiguous:
+
+    - every racecard row, bet on or not, under both its catalogue venue and
+      its bare track name -- so seeing Ascot (AUS) and Ascot (UK) on the
+      card is enough, even if only one of them was ever bet on;
+    - markets that have both a racecard capture and an ``itemDescription``
+      event, which teach the short names ``itemDescription`` uses
+      ("Evangeline" for "Evangeline Downs (US)").
+
+    :data:`KNOWN_MULTI_COUNTRY_VENUES` are never resolved. ``markets`` needs
+    ``_key``, ``eventTypeId`` and ``evt_eventName``.
     """
-    cards = _by_key(racecard, ["eventName"])
-    if not cards:
+    if racecard is None or racecard.empty:
         return {}
     seen: dict[tuple[int, str], set[str]] = defaultdict(set)
+    for et, event_name, venue in zip(
+        racecard["eventTypeId"], racecard["eventName"], racecard["venue"]
+    ):
+        numeric = _event_type_int(et)
+        track = racecard_track(event_name)
+        if numeric is None or not track or not _RE_COUNTRY_TRACK.match(track):
+            continue
+        for name in {_clean(venue), _RE_BRACKETS.sub("", track).strip()}:
+            if name:
+                seen[(numeric, name)].add(track)
+
+    cards = _by_key(racecard, ["eventName"])
     for key, et, desc in zip(
         markets["_key"], markets["eventTypeId"], markets["evt_eventName"]
     ):
@@ -148,8 +183,38 @@ def learn_venue_tracks(
         track = racecard_track(card["eventName"]) if card else ""
         if numeric is None or not venue or not track:
             continue
+        if not _RE_COUNTRY_TRACK.match(track):
+            continue
         seen[(numeric, venue)].add(track)
-    return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1}
+    return {
+        k: next(iter(v))
+        for k, v in seen.items()
+        if len(v) == 1 and k[1] not in KNOWN_MULTI_COUNTRY_VENUES
+    }
+
+
+def fallback_event_day(event_desc: Any, settled: pd.Timestamp) -> date:
+    """
+    The event date for a fallback name: the day the race was advertised to
+    start, not the day it settled.
+
+    ``itemDescription`` gives the start time in the account's time zone
+    (Sydney), "23:59 Bendigo"; a race that starts before midnight and
+    settles after it belongs to the earlier day's card. Without a start
+    time the settled date is the best available. For an overseas meeting
+    the website's date is the venue's local date, which a fallback cannot
+    know; the dashboard drops the date from track names, so this only
+    affects how the name reads.
+    """
+    match = _RE_EVENT_TIME_PARTS.match(_clean(event_desc))
+    if not match:
+        return settled.date()
+    start = settled.replace(
+        hour=int(match.group(1)), minute=int(match.group(2)), second=0, microsecond=0
+    )
+    if start > settled:
+        start -= timedelta(days=1)
+    return start.date()
 
 
 def resolve_market_names(
@@ -202,7 +267,11 @@ def resolve_market_names(
                 track = venue_tracks.get((_event_type_int(et), venue))
                 if not track:
                     track = f"{venue or 'Unknown'} ({UNKNOWN_COUNTRY})"
-                when = f" {website_day(settled.date())}" if pd.notna(settled) else ""
+                when = (
+                    f" {website_day(fallback_event_day(item_event, settled))}"
+                    if pd.notna(settled)
+                    else ""
+                )
                 event, market, source = (
                     f"{track}{when}",
                     item_market,

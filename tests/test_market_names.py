@@ -70,8 +70,16 @@ def _markets(rows: list[tuple]) -> pd.DataFrame:
 
 
 def _racecard(rows: list[tuple]) -> pd.DataFrame:
-    """(marketId, eventName, marketName)."""
-    return pd.DataFrame(rows, columns=["marketId", "eventName", "marketName"])
+    """(marketId, eventName, marketName[, eventTypeId[, venue]]); horses by default."""
+    full = []
+    for row in rows:
+        mid, event, market, *rest = row
+        et = rest[0] if rest else "7"
+        venue = rest[1] if len(rest) > 1 else event.split(" (")[0].rsplit(" ", 2)[0]
+        full.append((mid, event, market, et, venue))
+    return pd.DataFrame(
+        full, columns=["marketId", "eventName", "marketName", "eventTypeId", "venue"]
+    )
 
 
 def test_racing_prefers_the_racecard_then_the_catalogue() -> None:
@@ -81,7 +89,9 @@ def test_racing_prefers_the_racecard_then_the_catalogue() -> None:
             ("1.2", "4339", "19:00 The Meadows", "Win", "2026-11-02 22:57"),
         ]
     )
-    racecard = _racecard([("1.1", "Morphettville (AUS) 14th Nov", "R7 1200m Hcp")])
+    racecard = _racecard(
+        [("1.1", "Morphettville (AUS) 14th Nov", "R7 1200m Hcp", "7", "Morphettville")]
+    )
     catalogue = pd.DataFrame(
         [("1.2", "The Meadows (AUS) 2nd Nov", "R12 525m Gr5")],
         columns=["marketId", "evt_eventName", "mkt_marketName"],
@@ -104,7 +114,9 @@ def test_the_fallback_uses_the_track_learned_for_that_venue() -> None:
             ("1.2", "7", "07:00 Del Mar", "Win", "2026-08-02 07:03"),
         ]
     )
-    racecard = _racecard([("1.1", "Del Mar (US) 31st Jul", "R3 6f Mdn")])
+    racecard = _racecard(
+        [("1.1", "Del Mar (US) 31st Jul", "R3 6f Mdn", "7", "Del Mar")]
+    )
     out = resolve_market_names(markets, racecard=racecard, catalogue=None)
 
     assert out.loc[1, "market"] == "Horse Racing / Del Mar (US) 2nd Aug : Win"
@@ -153,3 +165,57 @@ def test_sports_use_the_item_description_names() -> None:
         "Golf / PGA The Players Championship 2026 : Winner",
     ]
     assert set(out["nameSource"]) == {"item_description"}
+
+
+def test_an_unbet_racecard_row_is_enough_to_make_a_venue_ambiguous() -> None:
+    # Only the AUS meeting was bet on; the card also listed a US meeting of
+    # the same name, which the fallback must not ignore.
+    markets = _markets(
+        [
+            ("1.1", "7", "13:00 Bendigo", "Win", "2026-10-01 13:05"),
+            ("1.2", "7", "09:00 Bendigo", "Win", "2026-10-02 09:05"),
+        ]
+    )
+    racecard = _racecard(
+        [
+            ("1.1", "Bendigo (AUS) 1st Oct", "R1 1100m Mdn", "7", "Bendigo"),
+            ("9.9", "Bendigo (US) 1st Oct", "R1 6f Mdn", "7", "Bendigo"),
+        ]
+    )
+    out = resolve_market_names(markets, racecard=racecard, catalogue=None)
+    assert out.loc[1, "market"] == "Horse Racing / Bendigo (Unknown) 2nd Oct : Win"
+
+
+def test_a_known_two_country_venue_is_never_resolved_from_one_sighting() -> None:
+    markets = _markets(
+        [
+            ("1.1", "7", "13:00 York", "Win", "2026-10-01 13:05"),
+            ("1.2", "7", "14:00 York", "Win", "2026-10-02 14:05"),
+        ]
+    )
+    racecard = _racecard([("1.1", "York (AUS) 1st Oct", "R1 1000m", "7", "York")])
+    out = resolve_market_names(markets, racecard=racecard, catalogue=None)
+    assert out.loc[1, "market"] == "Horse Racing / York (Unknown) 2nd Oct : Win"
+
+
+def test_pool_bet_events_do_not_make_a_venue_ambiguous() -> None:
+    markets = _markets(
+        [
+            ("1.1", "4339", "20:00 Romford", "Win", "2026-11-14 20:05"),
+            ("1.2", "4339", "21:00 Romford", "Win", "2026-11-14 21:05"),
+        ]
+    )
+    racecard = _racecard(
+        [
+            ("1.1", "Romford 14th Nov", "A10 400m", "4339", "Romford"),
+            ("9.9", "Romford (F/C) 14th Nov", "Forecast", "4339", "Romford"),
+        ]
+    )
+    out = resolve_market_names(markets, racecard=racecard, catalogue=None)
+    assert out.loc[1, "market"] == "Greyhound Racing / Romford 14th Nov : Win"
+
+
+def test_a_race_started_before_midnight_keeps_the_earlier_date() -> None:
+    markets = _markets([("1.1", "7", "23:59 Nowhere", "Win", "2026-10-02 00:03")])
+    out = resolve_market_names(markets, racecard=None, catalogue=None)
+    assert out.loc[0, "market"] == "Horse Racing / Nowhere (Unknown) 1st Oct : Win"
