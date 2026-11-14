@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from io import BytesIO
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -77,6 +78,9 @@ logger = logging.getLogger(__name__)
 
 FEED_FILENAME = "market_results.csv"
 META_FILENAME = "market_results.meta.json"
+# The last consistent generation, kept so an interrupted write can heal.
+PREV_FEED_FILENAME = "market_results.prev.csv"
+PREV_META_FILENAME = "market_results.prev.meta.json"
 
 # Bumped whenever a column is added, removed or changes meaning; the
 # dashboard refuses a version it does not know.
@@ -345,30 +349,57 @@ def _carry_forward(
     return merged.reindex(columns=FEED_COLUMNS), len(keep)
 
 
+def _read_consistent_pair(
+    feed_path: Path, meta_path: Path
+) -> Optional[tuple[bytes, dict]]:
+    """The pair's bytes and meta when both exist, parse and agree; else None."""
+    if not feed_path.exists() or not meta_path.exists():
+        return None
+    try:
+        payload = feed_path.read_bytes()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if hashlib.sha256(payload).hexdigest() != meta.get("csvSha256"):
+        return None
+    return payload, meta
+
+
 def load_previous_feed(results_dir: Path) -> Optional[pd.DataFrame]:
     """
     The feed last written, for carrying aged-out markets forward.
 
-    ``None`` when there is none yet. A feed that does not match its meta
-    or is of another schema raises: rebuilding without it would silently
-    drop every market that has aged out of the canonical.
+    ``None`` when no feed has been written yet. If the current pair does not
+    agree (a run died between its two replacements), the previous
+    generation that :func:`write_market_results` keeps is used instead, so
+    an interrupted write heals on the next run. Raises when neither pair is
+    usable, or the feed is of another schema: rebuilding without it would
+    silently drop every market that has aged out of the canonical.
     """
-    feed_path = Path(results_dir) / FEED_FILENAME
-    meta_path = Path(results_dir) / META_FILENAME
-    if not feed_path.exists():
+    results_dir = Path(results_dir)
+    current = (results_dir / FEED_FILENAME, results_dir / META_FILENAME)
+    previous = (results_dir / PREV_FEED_FILENAME, results_dir / PREV_META_FILENAME)
+    if not any(path.exists() for path in (*current, *previous)):
         return None
-    payload = feed_path.read_bytes()
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    pair = _read_consistent_pair(*current)
+    if pair is None:
+        pair = _read_consistent_pair(*previous)
+        if pair is None:
+            raise ValueError(
+                "Previous feed does not match its meta and no consistent earlier "
+                "generation is kept; not carrying it forward."
+            )
+        logger.warning(
+            "Results feed and its meta disagree (an interrupted write); "
+            "rebuilding from the previous generation."
+        )
+    payload, meta = pair
     if meta.get("schemaVersion") != SCHEMA_VERSION:
         raise ValueError(
             f"Previous feed is schema {meta.get('schemaVersion')!r}, expected "
             f"{SCHEMA_VERSION}; not carrying it forward."
         )
-    if hashlib.sha256(payload).hexdigest() != meta.get("csvSha256"):
-        raise ValueError(
-            "Previous feed does not match its meta; not carrying it forward."
-        )
-    return pd.read_csv(feed_path, dtype=str, keep_default_na=False)
+    return pd.read_csv(BytesIO(payload), dtype=str, keep_default_na=False)
 
 
 def _first_present(series: pd.Series) -> Any:
@@ -644,15 +675,29 @@ def write_market_results(results_dir: Path, result: FeedResult) -> Path:
     Each file is replaced atomically. A reader that lands between the two
     replacements sees a hash mismatch and waits for the next run, rather
     than publishing a new CSV against an old summary.
+
+    Before replacing them, a consistent current pair is copied to
+    ``market_results.prev.*``. If the process dies between the two
+    replacements, the next run rebuilds from that generation (see
+    :func:`load_previous_feed`) and rewrites both, so the mismatch heals.
     """
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
+    feed_path = results_dir / FEED_FILENAME
+    meta_path = results_dir / META_FILENAME
+    current = _read_consistent_pair(feed_path, meta_path)
+    if current is not None:
+        payload, meta_now = current
+        _replace_atomically(results_dir / PREV_FEED_FILENAME, payload)
+        _replace_atomically(
+            results_dir / PREV_META_FILENAME,
+            (json.dumps(meta_now, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        )
     csv_bytes = result.feed.to_csv(index=False).encode("utf-8")
     meta = dict(result.meta, csvSha256=hashlib.sha256(csv_bytes).hexdigest())
-    feed_path = results_dir / FEED_FILENAME
     _replace_atomically(feed_path, csv_bytes)
     _replace_atomically(
-        results_dir / META_FILENAME,
+        meta_path,
         (json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("utf-8"),
     )
     return feed_path

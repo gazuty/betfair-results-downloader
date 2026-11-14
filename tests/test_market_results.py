@@ -800,3 +800,50 @@ def test_a_damaged_previous_feed_stops_the_rebuild(tmp_path: Path) -> None:
     # Rebuilding without it would silently drop every aged-out market.
     with pytest.raises(ValueError, match="does not match"):
         build_market_results_from_disk(tmp_path, now=NOW)
+
+
+def test_an_interrupted_write_heals_from_the_previous_generation(
+    tmp_path: Path,
+) -> None:
+    bets = _bets(
+        [
+            (
+                "1",
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "10.00",
+                "0.50",
+                "2026-11-14T09:00:00Z",
+            )
+        ]
+    )
+    _seed_disk(tmp_path, bets, store)
+    write_market_results(tmp_path, build_market_results_from_disk(tmp_path, now=NOW))
+    write_market_results(tmp_path, build_market_results_from_disk(tmp_path, now=NOW))
+    assert (tmp_path / "market_results.prev.csv").exists()
+
+    # The run died after replacing the CSV and before replacing the meta.
+    (tmp_path / FEED_FILENAME).write_text("half-written\n")
+
+    rebuilt = build_market_results_from_disk(tmp_path, now=NOW)
+    write_market_results(tmp_path, rebuilt)
+    meta = json.loads((tmp_path / META_FILENAME).read_text())
+    assert (
+        meta["csvSha256"]
+        == hashlib.sha256((tmp_path / FEED_FILENAME).read_bytes()).hexdigest()
+    )
+    assert rebuilt.feed["netProfit"].tolist() == [9.5]
