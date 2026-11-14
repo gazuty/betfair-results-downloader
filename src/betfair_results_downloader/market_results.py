@@ -415,7 +415,13 @@ def _close_brackets(
     A row last seen open before ``lastPendingUtc`` was recorded has no such
     time. The run before the one that observed the close must have seen the
     market open, so the open sighting is taken as one run interval
-    (:data:`LONGEST_RUN_GAP`) before the observed close.
+    (:data:`LONGEST_RUN_GAP`) before the observed close. That is this
+    deployment's cadence, not a fact about every schedule: where runs were
+    further apart, the true sighting was earlier, a real closing leg can
+    fall outside the stand-in bracket, and the market keeps the observed
+    close it had before this rule existed. The stand-in can only fail in
+    that direction, never by dating a market at an interim leg, and it
+    applies only to rows closed before the column was recorded.
     """
 
     def column(name: str) -> pd.Series:
@@ -800,23 +806,21 @@ def _replace_atomically(path: Path, payload: bytes) -> None:
 
 def _previous_last_download(results_dir: Path) -> Optional[str]:
     """
-    When the feed on disk says a run last downloaded from Betfair.
+    When the feed on disk says a run last downloaded from Betfair; ``None``
+    when it does not say.
 
-    A meta written before ``lastDownloadUtc`` existed has only
-    ``generatedUtc``, which then meant the same thing for a run's feed, so
-    it stands in. ``None`` when there is no readable meta at all.
+    A meta written before ``lastDownloadUtc`` existed does not say: its
+    ``generatedUtc`` was advanced by ``export-market-results`` as well as by
+    runs, so a feed rebuilt by hand on a stopped installation would pass it
+    off as a download. Unknown stays unknown until a run stamps it.
     """
     for name in (META_FILENAME, PREV_META_FILENAME):
         try:
             meta = json.loads((Path(results_dir) / name).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(meta, dict):
-            continue
-        if "lastDownloadUtc" in meta:
+        if isinstance(meta, dict) and "lastDownloadUtc" in meta:
             return meta["lastDownloadUtc"]
-        if meta.get("generatedUtc"):
-            return meta["generatedUtc"]
     return None
 
 
@@ -835,7 +839,8 @@ def write_market_results(
     carried forward: ``generatedUtc`` moves on every write, so a reader
     that judged freshness by it would take a rebuilt feed for proof that
     the downloader is still running. ``lastDownloadUtc`` is ``null`` when
-    no run has written a feed here yet.
+    no run has stamped a feed here yet, which includes a rebuild of a feed
+    written before the field existed.
 
     Each file is replaced atomically. A reader that lands between the two
     replacements sees a hash mismatch and waits for the next run, rather

@@ -391,7 +391,7 @@ A failure exits `1` and prints the reason. It does not post to Slack: each run c
 
 **Status:** ✅ Implemented
 
-Rebuilds the dashboard's results feed (`market_results.csv` and `market_results.meta.json`, see [Outputs](#outputs)) from the files on disk. It makes no Betfair calls. Every run already does this, so the command is for a rebuild after a manual repair or on first install. Because it downloads nothing, it leaves the meta's `lastDownloadUtc` where the last run put it: the dashboard judges the feed's age by that, so a rebuild cannot make a stopped downloader look fresh.
+Rebuilds the dashboard's results feed (`market_results.csv` and `market_results.meta.json`, see [Outputs](#outputs)) from the files on disk. It makes no Betfair calls. Every run already does this, so the command is for a rebuild after a manual repair or on first install. Because it downloads nothing, it leaves the meta's `lastDownloadUtc` where the last run put it (`null` if no run has stamped the feed yet, in which case the dashboard waits for one): the dashboard judges the feed's age by that, so a rebuild cannot make a stopped downloader look fresh.
 
 ```bash
 python -m betfair_results_downloader export-market-results

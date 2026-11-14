@@ -1405,9 +1405,14 @@ def test_a_run_stamps_the_download_and_a_rebuild_from_disk_carries_it(tmp_path) 
     assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"
 
 
-def test_a_feed_written_before_the_stamp_existed_lends_its_generated_time(
+def test_a_feed_written_before_the_stamp_existed_does_not_vouch_for_a_download(
     tmp_path,
 ) -> None:
+    """
+    Before the field existed, export-market-results advanced generatedUtc
+    too, so an old meta's generatedUtc may itself be a rebuild on a stopped
+    installation. Rebuilding again must not record it as a download.
+    """
     d = _one_market_dir(tmp_path)
     ran = datetime(2026, 11, 14, 8, 0, tzinfo=timezone.utc)
     write_market_results(
@@ -1419,7 +1424,14 @@ def test_a_feed_written_before_the_stamp_existed_lends_its_generated_time(
 
     later = datetime(2026, 11, 14, 9, 30, tzinfo=timezone.utc)
     write_market_results(d, build_market_results_from_disk(d, now=later))
-    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"
+    meta = _meta(d)
+    assert "lastDownloadUtc" in meta and meta["lastDownloadUtc"] is None
+
+    # The next run settles it.
+    write_market_results(
+        d, build_market_results_from_disk(d, now=later), downloaded_at=later
+    )
+    assert _meta(d)["lastDownloadUtc"] == "2026-11-14T09:30:00Z"
 
 
 def test_a_first_feed_built_from_disk_has_never_been_downloaded(tmp_path) -> None:
