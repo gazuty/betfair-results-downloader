@@ -186,8 +186,10 @@ settled in the last fortnight that has no usable row in the store, newest
 first and capped at 2,000 per run. A stored row that predates a leg the
 canonical holds counts as unread for that purpose (the step failed when
 that leg settled), and so does a row that shows zero commission against a
-win of more than 10 cents (below that, 5% of the win rounds to 0.00, so the
-zero is genuine): Betfair charges on
+win of more than 10 cents that has not been confirmed (Betfair rounds
+commission to the nearest cent: a zero is genuine up to 10 cents, accepted
+from 10 to 15 cents once read a day after settlement, since only the lowest
+rates round that to zero, and never genuine above 15 cents): Betfair charges on
 every winning market, so that reading is the pre-close placeholder of a
 market the status step had not yet recorded as pending (it had failed that
 run), and it is read again until the final figure appears.
@@ -197,9 +199,10 @@ A market counts as **commission unknown** when the store has no row for it;
 when — for a market the status file ever saw pending — its row was read
 before the close was observed (a stale `0.0` placeholder); when the store
 row predates a leg the canonical already holds; when the row shows zero
-commission against a win of more than 10 cents (Betfair charges on every
-such win, so that is a pre-close placeholder; smaller wins round to a
-genuine 0.00); or when the store row's
+commission against a win above 15 cents, or against a 10-to-15-cent win
+read less than a day after settlement (either may be the pre-close
+placeholder; Betfair rounds commission to the nearest cent, so smaller wins
+can genuinely be charged 0.00); or when the store row's
 settlement is after the report's `--at` cutoff. Unknown markets
 contribute `$0.00` to their section's commission and net, and the section
 adds a line saying how many markets are unknown:

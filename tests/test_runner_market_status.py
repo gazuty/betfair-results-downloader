@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from betfair_results_downloader.config import ScheduleConfig
 from betfair_results_downloader.downloader_core import (
@@ -31,6 +32,21 @@ from betfair_results_downloader.scheduler.runner import _run_pipeline
 
 FROM_DT = datetime(2026, 6, 6, 17, 30, tzinfo=timezone.utc)
 TO_DT = datetime(2026, 6, 6, 19, 30, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_racecard_and_feed():
+    """
+    Keep these tests on the step they cover. The racecard and results-feed
+    steps that follow it have their own wiring tests in
+    test_runner_feed.py; here they would only add warnings about a
+    canonical these stubbed runs never write.
+    """
+    with (
+        patch.object(runner, "_refresh_racecard", return_value=None),
+        patch.object(runner, "_publish_market_results", return_value=[]),
+    ):
+        yield
 
 
 def _creds(tmp_path: Path) -> dict:

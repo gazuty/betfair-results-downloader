@@ -465,11 +465,28 @@ def test_recent_seed_asks_for_the_full_spelling_of_a_damaged_id() -> None:
 
 
 def test_placeholder_rule_ignores_wins_too_small_to_be_charged() -> None:
-    """9 cents at 5.4% rounds to a 0.00 charge; that zero is final."""
+    """
+    Betfair rounds commission to the nearest cent. Up to 10 cents a zero is
+    genuine; from 10 to 15 cents it is genuine only at the lowest rates, so
+    it counts once read a day after settlement; above that it never is.
+    """
+    settled = "2026-10-28T04:12:07Z"
     assert cm.is_placeholder_commission("412.00", "0.00")
-    assert cm.is_placeholder_commission(0.11, 0)
+    assert cm.is_placeholder_commission(
+        0.16, 0, fetched_utc="2026-11-10T22:00:21Z", settled_utc=settled
+    )
     assert not cm.is_placeholder_commission("0.09", "0.00")
     assert not cm.is_placeholder_commission("0.10", "0.00")
+    # Market 1.264531699: won $0.11, still $0.00 thirteen days after closing.
+    assert not cm.is_placeholder_commission(
+        0.11, 0, fetched_utc="2026-11-10T22:00:21Z", settled_utc=settled
+    )
+    # The same zero read an hour after settlement may be the pre-close
+    # placeholder: at the median 5.45%, a $0.12 win is charged $0.01.
+    assert cm.is_placeholder_commission(
+        0.12, 0, fetched_utc="2026-10-28T05:12:07Z", settled_utc=settled
+    )
+    assert cm.is_placeholder_commission(0.12, 0)  # no read times: not confirmed
     assert not cm.is_placeholder_commission("-6.50", "0.00")
     assert not cm.is_placeholder_commission("412.00", "22.00")
     assert not cm.is_placeholder_commission("", "0.00")
@@ -507,6 +524,36 @@ def test_recent_seed_rereads_a_winning_market_stored_with_zero_commission() -> N
         {
             "marketId": "1.300",
             "grossProfit": "0.09",
+            "commission": "0.00",
+            "fetchedUtc": "2026-09-12T12:00:00Z",
+        },
+    )
+
+    assert cm.select_recent_unknown_markets(canonical, store, now=NOW) == ["1.100"]
+
+
+def test_recent_seed_rereads_a_mid_band_zero_until_it_is_confirmed() -> None:
+    """
+    A 12-cent win read an hour after settlement may be the pre-close
+    placeholder (at 5.45% it is charged 0.01); a 12-cent win whose zero was
+    read a day later is final.
+    """
+    canonical = _canonical(
+        ("1.100", "2026-09-12T10:00:00Z"),
+        ("1.200", "2026-09-11T10:00:00Z"),
+    )
+    store = _commission_frame(
+        {
+            "marketId": "1.100",
+            "settledDateUtc": "2026-09-12T10:00:00Z",
+            "grossProfit": "0.12",
+            "commission": "0.00",
+            "fetchedUtc": "2026-09-12T11:00:00Z",
+        },
+        {
+            "marketId": "1.200",
+            "settledDateUtc": "2026-09-11T10:00:00Z",
+            "grossProfit": "0.12",
             "commission": "0.00",
             "fetchedUtc": "2026-09-12T12:00:00Z",
         },

@@ -306,6 +306,97 @@ def _refresh_market_commission(
         return warning
 
 
+def _refresh_racecard(
+    client: Any,
+    results_dir: Path,
+    status_cb: Optional[Any] = None,
+) -> Optional[str]:
+    """
+    Capture the forward racecard so this run's upcoming racing markets keep
+    their full website names (see racecard).
+
+    Supplementary like the status step: never raises. Returns a ⚠️ warning
+    on failure; the hourly racecard job and the next run capture again, and
+    until then a market that settles unseen is named from the fallback.
+    """
+    try:
+        from ..commission import (  # noqa: PLC0415
+            load_market_commission,
+            resolve_commission_path,
+        )
+        from ..csv_utils import decimal_key  # noqa: PLC0415
+        from ..downloader_core import resolve_enrichment_cache_dir  # noqa: PLC0415
+        from ..racecard import update_racecard  # noqa: PLC0415
+
+        cache_dir = resolve_enrichment_cache_dir(results_dir)
+        store = load_market_commission(resolve_commission_path(cache_dir))
+        rc = update_racecard(
+            client=client,
+            cache_dir=cache_dir,
+            bet_market_keys=set(store["marketId"].map(decimal_key)),
+            status_cb=status_cb,
+        )
+        logger.info("Racecard result: %s", rc.message)
+        if rc.truncated_slices:
+            return f"⚠️ {rc.message}"
+        return None
+    except Exception as exc:
+        warning = (
+            f"⚠️ Racecard capture failed ({type(exc).__name__}: {exc}); racing "
+            f"markets that settle before the next capture are named from the "
+            f"fallback, with country Unknown where the venue is ambiguous."
+        )
+        logger.warning(warning)
+        return warning
+
+
+def _publish_market_results(
+    results_dir: Path,
+    status_cb: Optional[Any] = None,
+    *,
+    status_failed: bool = False,
+) -> list[str]:
+    """
+    Rebuild the results feed the dashboard reads (see market_results).
+
+    Runs last, after the status and commission steps, so it sees this
+    run's settlements and closes. Never raises: on failure the previous
+    feed stays in place and ages, and the returned ⚠️ warning reaches
+    Slack. Also returns the feed's own warnings (a market stuck without
+    commission).
+
+    Skipped when this run's status step failed. The status file is then
+    stale for this window, and a market that has just started settling in
+    stages would be published as final; the previous feed is kept instead.
+    """
+    if status_failed:
+        warning = (
+            "⚠️ Results feed not rebuilt because the settlement status check "
+            "failed; the dashboard keeps the previous feed until a run succeeds."
+        )
+        logger.warning(warning)
+        return [warning]
+    try:
+        from ..market_results import (  # noqa: PLC0415
+            build_market_results_from_disk,
+            write_market_results,
+        )
+
+        result = build_market_results_from_disk(results_dir)
+        path = write_market_results(results_dir, result)
+        logger.info("%s Written to %s.", result.message, path)
+        if status_cb:
+            status_cb(result.message)
+        return list(result.warnings)
+    except Exception as exc:
+        warning = (
+            f"⚠️ Results feed not rebuilt ({type(exc).__name__}: {exc}); the "
+            f"dashboard keeps the previous feed until a run succeeds."
+        )
+        logger.warning(warning)
+        return [warning]
+
+
 def _run_pipeline(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
@@ -395,7 +486,15 @@ def _run_pipeline_inner(
                 schedule_cfg.chunk_days,
                 None,
             )
-            empty_warnings = [w for w in (status_warning, commission_warning) if w]
+            racecard_warning = _refresh_racecard(client, results_dir)
+            # A quiet run still rebuilds the feed: it is the run that sees an
+            # outright close or a late commission land.
+            feed_warnings = _publish_market_results(
+                results_dir, status_failed=status_warning is not None
+            )
+            empty_warnings = [
+                w for w in (status_warning, commission_warning, racecard_warning) if w
+            ] + feed_warnings
             warn_suffix = (" " + " ".join(empty_warnings)) if empty_warnings else ""
             return RunResult(
                 ok=True,
@@ -488,9 +587,21 @@ def _run_pipeline_inner(
             _say,
         )
 
+        racecard_warning = _refresh_racecard(client, results_dir, _say)
+        feed_warnings = _publish_market_results(
+            results_dir, _say, status_failed=status_warning is not None
+        )
+
         run_warnings = [
-            w for w in (backup_warning, status_warning, commission_warning) if w
-        ]
+            w
+            for w in (
+                backup_warning,
+                status_warning,
+                commission_warning,
+                racecard_warning,
+            )
+            if w
+        ] + feed_warnings
         warn_suffix = (" " + " ".join(run_warnings)) if run_warnings else ""
 
         max_settled_at_utc = _extract_max_settled_at_utc(df_co)

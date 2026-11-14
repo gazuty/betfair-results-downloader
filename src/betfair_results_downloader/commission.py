@@ -95,12 +95,28 @@ DEFAULT_MAX_RECENT_UNKNOWN = 2_000
 
 # A winning market whose stored commission is zero is a pre-close
 # placeholder (Betfair charges on every win), unless the win is so small
-# that the charge rounds to nothing: 9 cents at 5.4% is 0.0049, reported
-# as 0.00. Above this gross a zero cannot be a genuine charge. Verified on
-# the live store on 2026-09-13: of 217 winning markets with zero
-# commission, 212 had gross at or below 9 cents and the other 5 were the
-# open outrights.
-PLACEHOLDER_MIN_GROSS = 0.10
+# that the charge rounds to nothing. Betfair rounds commission to the
+# nearest cent: under half a cent is 0.00, from half a cent 0.01 (7-cent
+# wins were charged 0.01). On the live store on 2026-11-14 wins of $1 or
+# more paid 3.31%-10.4% (median 5.45%), so whether a small win's charge
+# rounds to zero depends on the market's rate, which is not stored. Three
+# bands:
+#
+# - up to GENUINE_ZERO_MAX_GROSS (10 cents): accepted at once, as before.
+#   Zero is genuine here at rates up to about 5%; at higher rates a
+#   pre-close placeholder could be taken as final, an error of at most one
+#   cent per market. 212 of 217 zero-commission wins checked on 2026-09-13
+#   were in this band; the other 5 were the open outrights.
+# - up to PLACEHOLDER_MIN_GROSS (15 cents): zero is genuine at the lowest
+#   rates (0.005 / 0.0331 is just over 15 cents) but not at the median, so
+#   it is accepted only from a read taken CONFIRM_ZERO_AFTER the market's
+#   last leg settled -- by then a pre-close placeholder has been replaced.
+#   Market 1.264531699 ($0.11, still $0.00 thirteen days after closing) is
+#   the case that showed 10 cents alone was too tight.
+# - above that: zero is always the placeholder; the market is read again.
+GENUINE_ZERO_MAX_GROSS = 0.10
+PLACEHOLDER_MIN_GROSS = 0.15
+CONFIRM_ZERO_AFTER = timedelta(hours=24)
 
 # The store is never pruned: the report's Year to date section reads a
 # full year of it, and a year of markets is a few megabytes of CSV.
@@ -110,19 +126,36 @@ PLACEHOLDER_MIN_GROSS = 0.10
 DEFAULT_REQUERY_BATCH = 50
 
 
-def is_placeholder_commission(gross: Any, commission: Any) -> bool:
+def is_placeholder_commission(
+    gross: Any,
+    commission: Any,
+    *,
+    fetched_utc: Any = None,
+    settled_utc: Any = None,
+) -> bool:
     """
-    True when a stored zero commission cannot be the final figure: the
-    market won more than :data:`PLACEHOLDER_MIN_GROSS`, so Betfair must
-    charge on it. Non-numeric inputs are never a placeholder; a missing
-    amount is reported as unknown by other means.
+    True when a stored zero commission cannot yet be taken as final (see
+    the bands above :data:`GENUINE_ZERO_MAX_GROSS`). ``fetched_utc`` and
+    ``settled_utc`` are the store row's read time and last settled leg;
+    without both, a zero in the middle band stays a placeholder. Non-numeric
+    amounts are never a placeholder; a missing amount is reported as unknown
+    by other means.
     """
     try:
         if pd.isna(gross) or pd.isna(commission):
             return False
-        return float(commission) == 0.0 and float(gross) > PLACEHOLDER_MIN_GROSS
+        won, charged = float(gross), float(commission)
     except (TypeError, ValueError):
         return False
+    if charged != 0.0 or won <= GENUINE_ZERO_MAX_GROSS:
+        return False
+    if won > PLACEHOLDER_MIN_GROSS:
+        return True
+    read_at = pd.to_datetime(fetched_utc, utc=True, errors="coerce")
+    settled_at = pd.to_datetime(settled_utc, utc=True, errors="coerce")
+    if pd.isna(read_at) or pd.isna(settled_at):
+        return True
+    return read_at - settled_at < CONFIRM_ZERO_AFTER
 
 
 @dataclass(frozen=True)
@@ -413,8 +446,8 @@ def select_recent_unknown_markets(
 
     A row that predates a leg the canonical holds is not usable: the step
     failed when that leg settled, and the report treats the row as stale.
-    Nor is a row showing a win above :data:`PLACEHOLDER_MIN_GROSS` with
-    zero commission. Betfair charges on every such win, so that reading is
+    Nor is a row showing zero commission on a win where that zero may be a
+    placeholder (:func:`is_placeholder_commission`). Betfair charges on every such win, so that reading is
     its pre-close placeholder -- stored when the status step had failed and so
     had not yet recorded the market as pending. If the market then closed
     before the next run, the status file only ever saw it CLOSED and the
@@ -437,12 +470,15 @@ def select_recent_unknown_markets(
         amounts = pd.to_numeric(df_commission["commission"], errors="coerce")
         gross = pd.to_numeric(df_commission["grossProfit"], errors="coerce")
         covered = _parse_utc(df_commission["settledDateUtc"])
-        for mid, amount, won, upto in zip(
-            df_commission["marketId"], amounts, gross, covered
+        read_at = _parse_utc(df_commission["fetchedUtc"])
+        for mid, amount, won, upto, read in zip(
+            df_commission["marketId"], amounts, gross, covered, read_at
         ):
             if pd.isna(amount):
                 continue
-            if is_placeholder_commission(won, amount):
+            if is_placeholder_commission(
+                won, amount, fetched_utc=read, settled_utc=upto
+            ):
                 continue  # placeholder on a winning market: read it again
             known[decimal_key(_cell(mid))] = upto
 

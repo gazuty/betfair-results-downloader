@@ -27,6 +27,18 @@ LABEL = "com.betfair.results.scheduler"
 AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = AGENTS_DIR / f"{LABEL}.plist"
 
+# The hourly racecard capture (see racecard). Its own job, not extra times on
+# the scheduler: a capture is one login and a few catalogue calls, while a
+# scheduled run downloads, rewrites the canonical and publishes to Azure.
+RACECARD_LABEL = "com.betfair.results.racecard"
+RACECARD_PLIST_PATH = AGENTS_DIR / f"{RACECARD_LABEL}.plist"
+
+# Half past every hour, clear of the scheduled runs on the hour. A
+# StartCalendarInterval with only a Minute key fires every hour; racing runs
+# around the clock in Sydney time (UK and US meetings run overnight), so
+# there are no quiet hours to skip.
+RACECARD_MINUTE = 30
+
 
 def _parse_hh_mm(time_str: str) -> tuple[int, int]:
     """Parse 'HH:MM' into (hour, minute). Raises ValueError on bad input."""
@@ -97,6 +109,30 @@ def build_plist(
         "StartCalendarInterval": intervals,
         "StandardOutPath": str(log_dir / "launchd.out.log"),
         "StandardErrorPath": str(log_dir / "launchd.err.log"),
+        "RunAtLoad": False,
+        "KeepAlive": False,
+    }
+
+
+def build_racecard_plist(
+    repo_root: Path,
+    venv_python_path: Path,
+    log_dir: Path,
+) -> dict[str, Any]:
+    """The plist dict for the hourly racecard job."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "Label": RACECARD_LABEL,
+        "ProgramArguments": [
+            str(venv_python_path),
+            "-m",
+            "betfair_results_downloader",
+            "racecard",
+        ],
+        "WorkingDirectory": str(repo_root),
+        "StartCalendarInterval": [{"Minute": RACECARD_MINUTE}],
+        "StandardOutPath": str(log_dir / "racecard.out.log"),
+        "StandardErrorPath": str(log_dir / "racecard.err.log"),
         "RunAtLoad": False,
         "KeepAlive": False,
     }
@@ -253,6 +289,106 @@ class LaunchdInstaller:
             "ok": True,
             "message": f"Uninstalled {LABEL}. Plist removed from {PLIST_PATH}.",
         }
+
+    def install_racecard(
+        self,
+        repo_root: Path,
+        venv_python_path: Path | None = None,
+        log_dir: Path | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Write the racecard plist and (re)load it.
+
+        Any loaded copy is booted out first, so re-running the install after
+        a repo move or a Python change replaces the job instead of failing
+        on "service already loaded".
+        """
+        py_path = Path(venv_python_path or sys.executable)
+        log = log_dir or (repo_root / "outputs")
+        if dry_run:
+            return {
+                "ok": True,
+                "plist_path": str(RACECARD_PLIST_PATH),
+                "message": (
+                    f"Dry run: would write {RACECARD_PLIST_PATH} and load it via launchctl."
+                ),
+            }
+        plist_bytes = plistlib.dumps(
+            build_racecard_plist(repo_root, py_path, log), fmt=plistlib.FMT_XML
+        )
+        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        RACECARD_PLIST_PATH.write_bytes(plist_bytes)
+        uid = _get_gui_uid()
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{RACECARD_LABEL}"],
+            capture_output=True,
+            text=True,
+        )
+        result = subprocess.run(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(RACECARD_PLIST_PATH)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return {
+                "ok": False,
+                "plist_path": str(RACECARD_PLIST_PATH),
+                "message": (
+                    f"Plist written to {RACECARD_PLIST_PATH} but launchctl bootstrap "
+                    f"failed (exit {result.returncode}): {result.stderr.strip()}"
+                ),
+            }
+        return {
+            "ok": True,
+            "plist_path": str(RACECARD_PLIST_PATH),
+            "message": (
+                f"Installed and loaded: {RACECARD_LABEL} (hourly at "
+                f":{RACECARD_MINUTE:02d}). Plist at {RACECARD_PLIST_PATH}."
+            ),
+        }
+
+    def uninstall_racecard(self, dry_run: bool = False) -> dict[str, Any]:
+        """Unload the racecard job and remove its plist."""
+        if not RACECARD_PLIST_PATH.exists():
+            return {
+                "ok": True,
+                "message": (
+                    f"Plist not found at {RACECARD_PLIST_PATH} — nothing to uninstall."
+                ),
+            }
+        if dry_run:
+            return {
+                "ok": True,
+                "message": (
+                    f"Dry run: would unload {RACECARD_LABEL} and remove "
+                    f"{RACECARD_PLIST_PATH}."
+                ),
+            }
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{_get_gui_uid()}/{RACECARD_LABEL}"],
+            capture_output=True,
+            text=True,
+        )
+        RACECARD_PLIST_PATH.unlink(missing_ok=True)
+        return {
+            "ok": True,
+            "message": f"Uninstalled {RACECARD_LABEL}. Plist removed.",
+        }
+
+    def racecard_status(self) -> dict[str, Any]:
+        """Whether the racecard job is installed and loaded."""
+        installed = RACECARD_PLIST_PATH.exists()
+        loaded = False
+        if installed:
+            result = subprocess.run(
+                ["launchctl", "list"], capture_output=True, text=True
+            )
+            loaded = any(
+                line.split()[-1:] == [RACECARD_LABEL]
+                for line in result.stdout.splitlines()
+            )
+        return {"installed": installed, "loaded": loaded}
 
     def status(self) -> dict[str, Any]:
         """

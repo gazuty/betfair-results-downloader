@@ -427,7 +427,9 @@ def market_commission_frame(
             # placeholder of a market the status step never saw pending
             # (see commission); the seed re-reads it, and until then it is
             # not a figure. Wins too small to be charged keep their zero.
-            if pd.notna(amount) and not is_placeholder_commission(won, amount):
+            if pd.notna(amount) and not is_placeholder_commission(
+                won, amount, fetched_utc=ts, settled_utc=settled
+            ):
                 commission[key] = float(amount)
             if pd.notna(ts):
                 fetched[key] = ts
