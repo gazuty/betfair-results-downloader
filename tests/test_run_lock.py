@@ -8,6 +8,7 @@ refused by it must have changed nothing.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -136,10 +137,64 @@ def test_a_killed_holder_leaves_no_stale_lock(tmp_path) -> None:
         pass
 
 
-def test_without_fcntl_the_command_runs_unlocked_and_says_so(
+class _FakeMsvcrt:
+    """
+    ``msvcrt.locking`` as Windows behaves: a byte range locked through one
+    handle refuses a non-blocking lock through another with EACCES.
+    """
+
+    LK_NBLCK = 2
+    LK_UNLCK = 0
+
+    def __init__(self) -> None:
+        self.held: dict[tuple[int, int], int] = {}
+
+    def locking(self, fd: int, mode: int, nbytes: int) -> None:
+        assert nbytes == 1
+        key = (os.fstat(fd).st_ino, os.lseek(fd, 0, os.SEEK_CUR))
+        if mode == self.LK_UNLCK:
+            assert self.held.pop(key) == fd
+        elif self.held.setdefault(key, fd) != fd:
+            raise PermissionError(13, "Permission denied")
+
+
+@pytest.fixture
+def windows(monkeypatch) -> _FakeMsvcrt:
+    fake = _FakeMsvcrt()
+    monkeypatch.setattr(run_lock, "fcntl", None)
+    monkeypatch.setattr(run_lock, "msvcrt", fake)
+    return fake
+
+
+def test_on_windows_a_second_command_is_refused_and_told_who_holds_it(
+    tmp_path, windows
+) -> None:
+    with pipeline_lock(tmp_path, command="run"):
+        # The locked byte is far past the note, which must stay readable.
+        assert [offset for _ino, offset in windows.held] == [1 << 30]
+        with pytest.raises(PipelineBusy, match=r"held by pid \d+ \(run, started "):
+            with pipeline_lock(tmp_path, command="backfill"):
+                pytest.fail("the second command must not run")
+    assert windows.held == {}
+    assert (tmp_path / LOCK_FILENAME).read_text() == ""
+    with pipeline_lock(tmp_path, command="backfill"):
+        pass
+
+
+def test_on_windows_the_lock_is_released_when_the_block_raises(
+    tmp_path, windows
+) -> None:
+    with pytest.raises(ValueError):
+        with pipeline_lock(tmp_path, command="run"):
+            raise ValueError("pipeline failed")
+    assert windows.held == {}
+
+
+def test_without_any_locking_the_command_runs_unlocked_and_says_so(
     tmp_path, monkeypatch, caplog
 ) -> None:
     monkeypatch.setattr(run_lock, "fcntl", None)
+    monkeypatch.setattr(run_lock, "msvcrt", None)
     ran = False
     with caplog.at_level("WARNING"):
         with pipeline_lock(tmp_path, command="run"):
