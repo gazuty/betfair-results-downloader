@@ -80,7 +80,10 @@ def test_the_report_counts_unreadable_rows_and_says_so() -> None:
     assert report.unreadable_profit_rows == 2
     assert report.day_to_date.total_profit == 10.0
     lines = report.text.splitlines()
-    warning = "⚠️ 2 bet rows have an unreadable profit (counted as $0.00)"
+    warning = (
+        "⚠️ 2 bet rows have an unreadable profit (counted as $0.00); "
+        "oldest settled 6 June 2026"
+    )
     # Under the title and above the first section, where it is read first.
     assert lines.index(warning) < lines.index("*Today* (since 12:00 AM)")
 
@@ -97,7 +100,22 @@ def test_a_clean_canonical_carries_no_warning() -> None:
         _rows(["10.0", "-3.5"]), report_dt=REPORT_DT
     )
     assert report.unreadable_profit_rows == 0
+    assert report.unreadable_profit_oldest is None
     assert "unreadable profit" not in report.text
+
+
+def test_the_warning_dates_a_damaged_row_outside_the_sections_shown() -> None:
+    # One damaged row from February: every report carries the warning, and
+    # none of the day or week sections contains the row, so the date is the
+    # only clue to where it is.
+    frame = _rows(["10.0", ""])
+    frame.loc[1, "settledDate"] = "2026-02-03T01:00:00Z"
+    report = build_daily_dm_report_from_dataframe(frame, report_dt=REPORT_DT)
+    assert report.unreadable_profit_oldest.date().isoformat() == "2026-02-03"
+    assert (
+        "⚠️ 1 bet row has an unreadable profit (counted as $0.00); "
+        "oldest settled 3 February 2026"
+    ) in report.text
 
 
 def test_rows_settled_after_the_report_time_are_not_counted() -> None:

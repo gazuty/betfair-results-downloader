@@ -480,6 +480,8 @@ python -m betfair_results_downloader schedule status
 python -m betfair_results_downloader schedule uninstall
 python -m betfair_results_downloader schedule logs [--tail N]
 python -m betfair_results_downloader schedule install-racecard     # hourly racecard job
+# Either install replaces a copy that is already loaded, which stops a run in
+# progress: reinstall between the scheduled times.
 python -m betfair_results_downloader schedule uninstall-racecard
 ```
 
@@ -868,7 +870,7 @@ settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 
 - **A market sits in "Pending" for weeks** — expected for outrights (tournament winners, season markets): Betfair settles losers early and the market only closes at the final. Inspect `<results_csv_dir>/.cache/market_settlement_status.csv`; `status` OPEN with `activeRunners > 0` confirms it. The run log's "Oldest pending market first seen N day(s) ago" line tracks it.
 - **A sport line appears one day and not the next** — only sports with a settlement in the window get a line; Horses and Greyhounds are always shown.
-- **"⚠️ N bet rows have an unreadable profit (counted as $0.00)"** — that many rows in the canonical have a profit that is blank or not a number, so every total that includes them is off by their real amount. The canonical is damaged at those rows; re-download their dates with `backfill` (rows are replaced by `betId`).
+- **"⚠️ N bet rows have an unreadable profit (counted as $0.00); oldest settled <date>"** — that many rows in the canonical have a profit that is blank or not a number, so every total that includes them is off by their real amount. The canonical is damaged at those rows; re-download their dates with `backfill` (rows are replaced by `betId`).
 - **Yesterday differs between the 6:00 AM and 7:35 PM reports** — it should not; both cover the same closed day. A difference means a market closed in between and was counted on its close day, or a late download filled in yesterday's rows.
 - **"Commission unknown for N markets" in a section** — those markets have no trustworthy row yet in `<results_csv_dir>/.cache/market_commission.csv`: either nothing has been read for them, or they were only read before they closed (a partially settled market reports commission `0.0` until it closes). They are counted as $0.00 commission until the next run re-reads them; run `backfill-commission` to fill the gap immediately instead of waiting.
 

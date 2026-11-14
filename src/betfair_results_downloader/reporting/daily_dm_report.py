@@ -131,6 +131,8 @@ class DailyDmReport:
     # Bet rows up to the report time whose profit did not parse. They count
     # as $0.00 in every total, and the report says so.
     unreadable_profit_rows: int = 0
+    # When the oldest of them settled, so the warning says where to look.
+    unreadable_profit_oldest: datetime | None = None
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -216,6 +218,7 @@ def _format_report(
     last_week: ProfitBreakdown | None = None,
     last_week_start: datetime | None = None,
     unreadable_profit_rows: int = 0,
+    unreadable_profit_oldest: datetime | None = None,
 ) -> str:
     # Title and timestamp share the first line so a Slack push notification,
     # which previews only the start of the message, says which report it is.
@@ -238,9 +241,17 @@ def _format_report(
         # total that reads as complete.
         noun = "bet row has" if unreadable_profit_rows == 1 else "bet rows have"
         lines.append("")
+        # The count covers every row up to the report time, which can be
+        # months outside the sections shown; the date says where it is.
+        where = (
+            f"; oldest settled {unreadable_profit_oldest.day} "
+            f"{unreadable_profit_oldest.strftime('%B %Y')}"
+            if unreadable_profit_oldest is not None
+            else ""
+        )
         lines.append(
             f"⚠️ {unreadable_profit_rows:,} {noun} an unreadable profit "
-            f"(counted as $0.00)"
+            f"(counted as $0.00){where}"
         )
     lines += ["", _format_section_heading("Today", "since 12:00 AM")]
     lines += _format_breakdown_lines(day_to_date)
@@ -604,7 +615,13 @@ def build_daily_dm_report_from_dataframe(
             (report_dt_local - newest_any_sport).total_seconds() / 3600.0, 0.0
         )
 
-    unreadable_profit_rows = int(in_scope["profit_unreadable"].sum())
+    unreadable = in_scope.loc[in_scope["profit_unreadable"]]
+    unreadable_profit_rows = len(unreadable)
+    unreadable_profit_oldest = (
+        unreadable["settled_dt_local"].min().to_pydatetime()
+        if unreadable_profit_rows
+        else None
+    )
 
     week_start = _most_recent_sunday_start(report_dt_local)
     day_start = report_dt_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -667,6 +684,7 @@ def build_daily_dm_report_from_dataframe(
         last_week=last_week,
         last_week_start=last_week_start,
         unreadable_profit_rows=unreadable_profit_rows,
+        unreadable_profit_oldest=unreadable_profit_oldest,
     )
 
     return DailyDmReport(
@@ -688,6 +706,7 @@ def build_daily_dm_report_from_dataframe(
         last_week_start=last_week_start,
         last_week=last_week,
         unreadable_profit_rows=unreadable_profit_rows,
+        unreadable_profit_oldest=unreadable_profit_oldest,
     )
 
 
