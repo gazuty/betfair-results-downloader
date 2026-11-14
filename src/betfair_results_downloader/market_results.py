@@ -288,7 +288,13 @@ def _hold_unchecked(
         .str.strip()
         .isin(RACING_EVENT_TYPE_IDS)
     )
-    needs_row = ~racing | (latest >= cutoff)
+    from_archive = (
+        final[ARCHIVED_COLUMN].fillna("").astype(str) == "1"
+        if ARCHIVED_COLUMN in final.columns
+        else pd.Series(False, index=final.index)
+    )
+    archive_only = from_archive.groupby(keys).transform("all")
+    needs_row = (~racing | (latest >= cutoff)) & ~archive_only
     unchecked = (keys != "") & ~keys.isin(recorded) & needs_row
     provisional = keys.isin(_provisional_absent_keys(market_status, now_utc))
     # A non-racing market closed only by absence is not yet confirmed: one
@@ -298,7 +304,9 @@ def _hold_unchecked(
     # leg recently. A long-finished market absent from the book on its
     # first check is closed in fact, and is published.
     was_pending = keys.isin(_ever_pending_keys(market_status))
-    unconfirmed = provisional & ~racing & (was_pending | (latest >= cutoff))
+    unconfirmed = (
+        provisional & ~racing & (was_pending | (latest >= cutoff)) & ~archive_only
+    )
     held = unchecked | unconfirmed
     return final.loc[~held], int(keys[held].nunique())
 
@@ -630,6 +638,13 @@ def _load_catalogue_cache(cache_dir: Path) -> Optional[pd.DataFrame]:
 
 ARCHIVE_GLOB = "cleared_orders_archive_*.csv.gz"
 
+# Marks rows read from the yearly archives for a market the feed never had.
+# Every leg of such a market settled more than the archive window ago (a
+# year by default), so it is final whether or not a status row survives:
+# CLOSED rows are pruned after 400 days, and history from before status
+# tracking never had one.
+ARCHIVED_COLUMN = "_fromArchive"
+
 
 def archive_signature(results_dir: Path) -> list[list[Any]]:
     """Name, size and modification time of every yearly archive, sorted."""
@@ -700,28 +715,41 @@ def build_market_results_from_disk(
         )
     df_raw = _load_canonical(results_dir)
     df_raw = supplement_with_archived_legs(df_raw, market_status, results_dir)
+    previous_feed = load_previous_feed(results_dir)
     # Archived markets reach the feed once, when the archives change: the
     # yearly roll moves bets out of the canonical, and a backfill of old
     # dates writes ordinary markets straight into an archive, so neither
-    # would otherwise ever have a feed row to carry forward. Unchanged
-    # archives are already in the previous feed and are not read again.
+    # would otherwise ever have a feed row to carry forward. Only markets
+    # the feed has never had are added. A market already in it keeps its
+    # carried row, which was built while its bets and status were current.
+    # Unchanged archives are not read again.
     signature = archive_signature(results_dir)
     if signature and signature != _previous_archive_signature(results_dir):
         from .downloader_core import _rows_not_already_held  # noqa: PLC0415
 
-        extra = _rows_not_already_held(df_raw, _load_archives(results_dir))
-        if len(extra):
-            df_raw = pd.concat([df_raw, extra], ignore_index=True)
-        logger.info(
-            "Results feed: read the yearly archives (%d new row(s)).", len(extra)
-        )
+        archived = _load_archives(results_dir)
+        if not archived.empty:
+            known = set(df_raw["marketId"].fillna("").astype(str).map(decimal_key))
+            if previous_feed is not None and not previous_feed.empty:
+                known |= set(previous_feed["marketId"].astype(str).map(decimal_key))
+            keys = archived["marketId"].fillna("").astype(str).map(decimal_key)
+            new_markets = archived.loc[(keys != "") & ~keys.isin(known)]
+            extra = _rows_not_already_held(df_raw, new_markets).assign(
+                **{ARCHIVED_COLUMN: "1"}
+            )
+            if len(extra):
+                df_raw = pd.concat([df_raw, extra], ignore_index=True)
+            logger.info(
+                "Results feed: read the yearly archives; %d new archived market(s).",
+                extra["marketId"].nunique() if len(extra) else 0,
+            )
     result = build_market_results(
         df_raw,
         market_status=market_status,
         market_commission=market_commission,
         racecard=racecard,
         catalogue=_load_catalogue_cache(cache_dir),
-        previous_feed=load_previous_feed(results_dir),
+        previous_feed=previous_feed,
         now=now,
     )
     result.meta["archiveSignature"] = signature

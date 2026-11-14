@@ -947,3 +947,88 @@ def test_a_market_older_than_betfairs_commission_reach_is_counted_not_alerted() 
     assert result.meta["heldCommissionUnreachableMarkets"] == 1
     assert result.meta["heldCommissionUnknownMarkets"] == 0
     assert result.warnings == []
+
+
+def test_rereading_archives_keeps_carried_rows_and_adds_only_new_markets(
+    tmp_path: Path,
+) -> None:
+    """
+    An archive change must not rebuild markets the feed already carries
+    (their CLOSED status may have been pruned), only add new ones.
+    """
+    carried = _bets(
+        [
+            (
+                "1",
+                "1.800",
+                "1",
+                "2025-11-20T08:00:00.000Z",
+                "4.0",
+                "G v H",
+                "Correct Score",
+            )
+        ]
+    )
+    backfilled = _bets(
+        [("2", "1.900", "2", "2025-11-25T08:00:00.000Z", "6.0", "Open 2025", "Winner")]
+    )
+    recent = _bets(
+        [
+            (
+                "3",
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "10.0",
+                "A v B",
+                "Correct Score",
+            )
+        ]
+    )
+    store = _store(
+        [
+            (
+                "1.100",
+                "1",
+                "2026-11-14T08:00:00.000Z",
+                "1",
+                "10.00",
+                "0.50",
+                "2026-11-14T09:00:00Z",
+            ),
+            (
+                "1.800",
+                "1",
+                "2025-11-20T08:00:00.000Z",
+                "1",
+                "4.00",
+                "0.20",
+                "2026-09-13T10:00:00Z",
+            ),
+            (
+                "1.900",
+                "2",
+                "2025-11-25T08:00:00.000Z",
+                "1",
+                "6.00",
+                "0.30",
+                "2026-09-13T10:00:00Z",
+            ),
+        ]
+    )
+    # The previous feed already carries 1.800 (built while it was current).
+    _seed_disk(tmp_path, pd.concat([recent, carried]), store)
+    write_market_results(tmp_path, build_market_results_from_disk(tmp_path, now=NOW))
+
+    # Later: 1.800's bets are archived and its status row pruned; a backfill
+    # adds 1.900 straight into the archive, also with no status row.
+    recent.to_csv(tmp_path / "cleared_orders_cleaned.csv", index=False)
+    save_market_status(_closed_for(recent), resolve_status_path(tmp_path / ".cache"))
+    pd.concat([carried, backfilled]).to_csv(
+        tmp_path / "cleared_orders_archive_2025.csv.gz", index=False
+    )
+
+    result = build_market_results_from_disk(tmp_path, now=NOW)
+    by_id = result.feed.set_index("marketId")["netProfit"].to_dict()
+    assert by_id == {"1.100": 9.5, "1.800": 3.8, "1.900": 5.7}
+    assert result.meta["carriedForwardMarkets"] == 1
