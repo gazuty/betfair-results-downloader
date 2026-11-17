@@ -788,6 +788,38 @@ def test_a_retry_with_an_unresolvable_results_directory_still_claims_first(
     assert failures_in_a_row(log_dir) == 2
 
 
+def test_a_retry_whose_outcome_could_not_be_written_is_still_counted_by_its_claim(
+    posted, monkeypatch, tmp_path
+) -> None:
+    """
+    The claim reached the disk; the final record did not. The claim stands
+    for the failure, so the alert must give the count and the next retry,
+    not say that this attempt went uncounted and retries have stopped.
+    """
+    from betfair_results_downloader.scheduler import state
+
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [{"kind": "scheduled", **FAILED}])
+    real_append = state.append_run_history
+
+    def outcome_write_fails(directory, record, **kw):
+        if record.get("phase") == "started":
+            return real_append(directory, record, **kw)
+        return False
+
+    monkeypatch.setattr(runner, "append_run_history", outcome_write_fails)
+    failing = RunResult(ok=False, status="failed", message="auth", retry_wanted=True)
+    code, ran = _real_retry(
+        monkeypatch, log_dir, tmp_path / "results", pipeline=failing
+    )
+    assert code == 1 and ran.call_count == 1
+    assert [r.get("phase") for r in _records(log_dir)] == [None, "started"]
+    assert failures_in_a_row(log_dir) == 2
+    assert "Failure 2 of 6 in a row; it will be retried on the hour." in posted[0]
+    assert "could not be written" not in posted[0]
+
+
 def test_a_scheduled_run_computes_its_window_after_it_has_the_lock(tmp_path) -> None:
     """
     A scheduled run that waited behind a retry must not download the window

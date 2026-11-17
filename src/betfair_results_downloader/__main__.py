@@ -289,12 +289,22 @@ def _run_and_announce(
         # the only failure known.
         return max(failures_in_a_row(log_dir), 1) if log_dir else 1
 
+    claimed = False
+
     def claim() -> bool:
         # Called by run_scheduled once it holds the pipeline lock.
+        nonlocal claimed
         decision = claim_attempt(log_dir)
         if not decision.run:
             print(decision.reason)
+        claimed = decision.run
         return decision.run
+
+    def counted(outcome_recorded: bool) -> bool:
+        # A retry's claim is already on disk and counts as the failure even
+        # if its outcome could not be written after it, so the hourly job
+        # will see it. Only an attempt with no record at all is uncounted.
+        return outcome_recorded or claimed
 
     try:
         if retry and log_dir:
@@ -322,7 +332,7 @@ def _run_and_announce(
                 "retry_wanted": True,
             },
         )
-        note = _retry_note(failures_now(), _retry_job_ready(), recorded)
+        note = _retry_note(failures_now(), _retry_job_ready(), counted(recorded))
         print(note)
         if post:
             _post_to_slack(
@@ -342,7 +352,9 @@ def _run_and_announce(
         return 0
 
     note = (
-        _retry_note(failures_now(), _retry_job_ready(), result.history_recorded)
+        _retry_note(
+            failures_now(), _retry_job_ready(), counted(result.history_recorded)
+        )
         if result.retry_wanted
         else ""
     )
