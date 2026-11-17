@@ -89,21 +89,23 @@ def _attempts_newest_first(log_dir: str | Path) -> list[dict]:
 def _without_completed_claims(newest_first: list[dict]) -> list[dict]:
     """
     Drop each retry's "started" claim once its outcome has been recorded
-    after it, so one retry is one attempt. A claim with no outcome (the
-    retry crashed, or its final record could not be written) stays, and
-    counts as the failure it stands for.
+    straight after it, so one retry is one attempt. A claim with no outcome
+    (the retry crashed, or its final record could not be written) stays,
+    and counts as the failure it stands for.
+
+    Worked through in the order the records were written, so that one
+    outcome settles exactly one claim: a dangling claim followed by a later
+    retry's claim and outcome is still one failure of its own.
     """
     kept: list[dict] = []
-    for record in newest_first:
-        is_claim = record.get("phase") == PHASE_STARTED
-        outcome_follows = (
-            bool(kept)
-            and kept[-1].get("kind") == KIND_RETRY
-            and kept[-1].get("phase") != PHASE_STARTED
+    for record in reversed(newest_first):
+        is_outcome = (
+            record.get("kind") == KIND_RETRY and record.get("phase") != PHASE_STARTED
         )
-        if is_claim and outcome_follows:
-            continue
+        if is_outcome and kept and kept[-1].get("phase") == PHASE_STARTED:
+            kept.pop()
         kept.append(record)
+    kept.reverse()
     return kept
 
 

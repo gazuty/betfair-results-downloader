@@ -358,24 +358,42 @@ def _run_and_announce(
         if result.retry_wanted
         else ""
     )
+    delivered = not result.retry_wanted
+    # A recovery is only announced once it is on record. If this success
+    # could not be written, the history still ends in the earlier failure
+    # (or this retry's claim) and the hourly job will run again; saying
+    # "recovered" would be contradicted an hour later.
     recovered_from = (
-        failures_before_latest(log_dir) if log_dir and not result.retry_wanted else 0
+        failures_before_latest(log_dir)
+        if log_dir and delivered and result.history_recorded
+        else 0
     )
     recovered = (
         f"Recovered after {recovered_from} failed attempt(s)." if recovered_from else ""
     )
+    unrecorded = ""
+    if delivered and not result.history_recorded and log_dir:
+        pending = failures_in_a_row(log_dir)
+        if pending:
+            unrecorded = (
+                "⚠️ This run delivered but could not be written to "
+                "run_history.jsonl (see the log), so the history still shows "
+                f"{pending} failure(s) in a row and a retry may run again."
+            )
 
     if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")
-        for line in (note, recovered):
+        for line in (note, recovered, unrecorded):
             if line:
                 print(line)
         # A success can still carry a warning. It must reach Slack from
         # here: a low disk gave this pipeline both of its incidents, and a
         # warning that only lands in scheduler stdout is not a warning. A
         # run that asks for a retry is announced even if it carries none.
-        if ("⚠️" in result.message or result.retry_wanted) and post:
-            body = "\n".join(line for line in (result.message, note, recovered) if line)
+        if ("⚠️" in result.message or result.retry_wanted or unrecorded) and post:
+            body = "\n".join(
+                line for line in (result.message, note, recovered, unrecorded) if line
+            )
             _post_to_slack(
                 _alert_text(
                     f":warning: Betfair scheduled run succeeded with a warning\n{body}"

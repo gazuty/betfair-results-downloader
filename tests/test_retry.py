@@ -712,8 +712,25 @@ def test_a_retry_stands_down_if_another_attempt_delivered_before_it_got_the_lock
             ],
             0,
         ),
+        # One outcome settles one claim: a dangling claim from an earlier
+        # retry is still a failure of its own after a later retry fails.
+        (
+            [
+                FAILED,
+                {"kind": "retry", "phase": "started", "retry_wanted": True},
+                {"kind": "retry", "phase": "started", "retry_wanted": True},
+                {"kind": "retry", "status": "failed", "retry_wanted": True},
+            ],
+            3,
+        ),
     ],
-    ids=["claim+failure", "dangling-claim", "claim-then-scheduled", "claim+success"],
+    ids=[
+        "claim+failure",
+        "dangling-claim",
+        "claim-then-scheduled",
+        "claim+success",
+        "dangling-then-claim+failure",
+    ],
 )
 def test_a_claim_and_its_outcome_count_as_one_attempt(
     tmp_path, records, expected
@@ -818,6 +835,44 @@ def test_a_retry_whose_outcome_could_not_be_written_is_still_counted_by_its_clai
     assert failures_in_a_row(log_dir) == 2
     assert "Failure 2 of 6 in a row; it will be retried on the hour." in posted[0]
     assert "could not be written" not in posted[0]
+
+
+def test_dangling_claims_still_reach_the_limit(tmp_path) -> None:
+    """Outcomes that never get written must not let retries run past six."""
+    claim = {"kind": "retry", "phase": "started", "retry_wanted": True}
+    history = [{"kind": "scheduled", **FAILED}] + [claim] * 5
+    assert failures_in_a_row(_history(tmp_path, history)) == 6
+    assert decide_retry(tmp_path).run is False
+
+
+def test_a_success_that_could_not_be_recorded_is_not_announced_as_a_recovery(
+    posted, monkeypatch, tmp_path
+) -> None:
+    """
+    The retry delivered, but its outcome did not reach the history, which
+    still ends in its claim. Another retry will run; "recovered" now would
+    be contradicted an hour later.
+    """
+    from betfair_results_downloader.scheduler import state
+
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [{"kind": "scheduled", **FAILED}])
+    real_append = state.append_run_history
+
+    def outcome_write_fails(directory, record, **kw):
+        if record.get("phase") == "started":
+            return real_append(directory, record, **kw)
+        return False
+
+    monkeypatch.setattr(runner, "append_run_history", outcome_write_fails)
+    code, ran = _real_retry(monkeypatch, log_dir, tmp_path / "results")
+    assert code == 0 and ran.call_count == 1
+    assert len(posted) == 1
+    assert "recovered" not in posted[0].lower()
+    assert "delivered but could not be written to run_history.jsonl" in posted[0]
+    assert "2 failure(s) in a row and a retry may run again" in posted[0]
+    assert decide_retry(log_dir).run is True
 
 
 def test_a_scheduled_run_computes_its_window_after_it_has_the_lock(tmp_path) -> None:
