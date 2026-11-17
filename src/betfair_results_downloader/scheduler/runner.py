@@ -823,45 +823,41 @@ def run_scheduled(
     One scheduled attempt: preflight, gap detection, the pipeline, then the
     checkpoint and the history record.
 
-    The pipeline lock is held from before the pipeline starts until the
-    attempt has been written to the history. Releasing it earlier would
-    let another attempt take the lock and start while this one's result
-    was still unrecorded.
+    Everything from the disk preflight to the history record happens under
+    the pipeline lock. Two attempts can start together (launchd starts a
+    missed scheduled run and a retry at once after a wake), and each of
+    these would go wrong outside it:
+
+    - The window is computed from the checkpoint. Computed before waiting
+      for the lock, it would be the window the other attempt has just
+      downloaded; computed after, it starts where that attempt stopped.
+    - The history record must be written before the lock is released, or
+      the other attempt could start while this one's result was unknown.
 
     ``claim`` makes this a retry (see :mod:`.retry`):
 
     - It does not wait for the lock. If another downloader command holds
       it, that command is the attempt, and a ``busy`` result is returned
       with nothing recorded.
-    - With the lock held it calls ``claim()``, which looks at the history
-      again and records that the retry has started. If that returns False
-      the retry is no longer due, or could not be counted, and a
-      ``superseded`` result is returned without running the pipeline.
-
-    So a scheduled run and a retry started together (launchd does that
-    after a wake) cost one pipeline run, not two, and no false failure.
+    - With the lock held, and before anything else can record a failure,
+      it calls ``claim()``, which looks at the history again and records
+      that the retry has started. If that returns False the retry is no
+      longer due, or could not be counted, and a ``superseded`` result is
+      returned without running the pipeline.
     """
     from .retry import KIND_RETRY, KIND_SCHEDULED  # noqa: PLC0415
 
     is_retry = claim is not None
     kind = KIND_RETRY if is_retry else KIND_SCHEDULED
+    command = "retry" if is_retry else "run"
     scheduler_now = get_scheduler_now(schedule_cfg)
     today_local = scheduler_now.today_local
     today_utc = scheduler_now.today_utc
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
-    # The resolved directory, not the raw config: an empty results_csv_dir
-    # falls back to the OneDrive default, which can sit on a different
-    # filesystem from the working directory.
-    disk_ok, disk_warning = _preflight_disk(creds)
-    if not disk_ok:
-        logger.error(disk_warning)
-        result = RunResult(
-            ok=False, status="failed", message=disk_warning, retry_wanted=True
-        )
-        # The refusal is the new failure mode; it belongs in the operational
-        # record alongside every other scheduled failure.
+    def record_refusal(result: RunResult) -> RunResult:
+        """Record an attempt that never reached the pipeline."""
         result.history_recorded = append_run_history(
             str(log_dir),
             {
@@ -877,12 +873,36 @@ def run_scheduled(
         )
         return result
 
-    logger.info("Computing incremental backfill window...")
-    from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
-    logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
+    def attempt(*, lock_held: bool) -> RunResult:
+        # The resolved directory, not the raw config: an empty
+        # results_csv_dir falls back to the OneDrive default, which can sit
+        # on a different filesystem from the working directory.
+        disk_ok, disk_warning = _preflight_disk(creds)
+        if not disk_ok:
+            logger.error(disk_warning)
+            # The refusal is a failure mode of its own; it belongs in the
+            # operational record alongside every other scheduled failure.
+            return record_refusal(
+                RunResult(
+                    ok=False, status="failed", message=disk_warning, retry_wanted=True
+                )
+            )
 
-    def record(result: RunResult) -> RunResult:
-        """Write the checkpoint, the markers and the history for ``result``."""
+        logger.info("Computing incremental backfill window...")
+        from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(
+            creds, schedule_cfg
+        )
+        logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
+
+        if lock_held:
+            result = _run_pipeline(
+                creds, schedule_cfg, from_dt_utc, to_dt_utc, hold_lock=False
+            )
+        else:
+            result = _run_pipeline(
+                creds, schedule_cfg, from_dt_utc, to_dt_utc, command=command
+            )
+
         if disk_warning:
             # Attached before state and history are written: the operational
             # record must carry the same warning the operator is alerted with
@@ -959,16 +979,13 @@ def run_scheduled(
         )
         return result
 
-    command = "retry" if is_retry else "run"
     try:
         results_dir = _resolve_results_dir(creds)
     except Exception:
         # A malformed paths section. There is no directory to lock; the
         # pipeline reports the configuration error as a failed run, as it
         # did before the lock existed.
-        return record(
-            _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc, command=command)
-        )
+        return attempt(lock_held=False)
 
     try:
         with pipeline_lock(
@@ -984,11 +1001,7 @@ def run_scheduled(
                     superseded=True,
                     message="Retry stood down: no longer due.",
                 )
-            return record(
-                _run_pipeline(
-                    creds, schedule_cfg, from_dt_utc, to_dt_utc, hold_lock=False
-                )
-            )
+            return attempt(lock_held=True)
     except PipelineBusy as exc:
         logger.error("%s", exc)
         busy = RunResult(
@@ -1002,7 +1015,7 @@ def run_scheduled(
             logger.info("Another downloader command is running; the retry stands down.")
             return busy
         # A scheduled run that never got the lock is a failed attempt.
-        return record(busy)
+        return record_refusal(busy)
 
 
 def run_backfill(

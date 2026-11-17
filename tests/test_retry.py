@@ -648,24 +648,29 @@ def test_a_retry_that_cannot_claim_its_attempt_does_not_run(
     assert len(_records(log_dir)) == 2, "nothing was written, and nothing was run"
 
 
+def _stale_first_look(monkeypatch) -> None:
+    """The retry command's first look at the history still saw a failure."""
+    from betfair_results_downloader.scheduler import retry as policy
+
+    first = iter([policy.RetryDecision(True, 1, "Retrying: stale first look.")])
+    real_decide = policy.decide_retry
+    monkeypatch.setattr(
+        policy, "decide_retry", lambda d: next(first, None) or real_decide(d)
+    )
+
+
 def test_a_retry_stands_down_if_another_attempt_delivered_before_it_got_the_lock(
     posted, monkeypatch, tmp_path, capsys
 ) -> None:
     """
     A scheduled run started at the same moment finishes and records its
-    success while the retry is still preparing. The retry looked at the
+    success while the retry is still starting. The retry looked at the
     history before that; it must look again once it holds the lock.
     """
     (tmp_path / "logs").mkdir()
-    log_dir = _history(tmp_path / "logs", [FAILED])
-
-    def the_other_attempt_finishes() -> None:
-        with (log_dir / "run_history.jsonl").open("a") as fh:
-            fh.write(json.dumps({"kind": "scheduled", **OK}) + "\n")
-
-    code, ran = _real_retry(
-        monkeypatch, log_dir, tmp_path / "results", window=the_other_attempt_finishes
-    )
+    log_dir = _history(tmp_path / "logs", [FAILED, {"kind": "scheduled", **OK}])
+    _stale_first_look(monkeypatch)
+    code, ran = _real_retry(monkeypatch, log_dir, tmp_path / "results")
     assert code == 0 and ran.call_count == 0
     assert posted == []
     assert "No retry pending" in capsys.readouterr().out
@@ -734,6 +739,94 @@ def test_five_failed_retries_after_a_failure_reach_the_limit(
     assert failures_in_a_row(log_dir) == 6
     assert "That is 6 failures in a row: hourly retries have stopped." in posted[-1]
     assert len(posted) == 5
+
+
+def test_a_scheduled_run_computes_its_window_after_it_has_the_lock(tmp_path) -> None:
+    """
+    A scheduled run that waited behind a retry must not download the window
+    it worked out before waiting, which the retry has just covered. The
+    window comes from the checkpoint, so it is computed under the lock.
+    """
+    results = tmp_path / "results"
+    order: list[str] = []
+
+    def window(*_a, **_k):
+        try:
+            with pipeline_lock(results, command="retry"):
+                order.append("window computed with the lock free")
+        except Exception:
+            order.append("window computed under the lock")
+        return (FROM_DT, TO_DT, "gap")
+
+    def preflight(*_a, **_k):
+        try:
+            with pipeline_lock(results, command="retry"):
+                order.append("preflight with the lock free")
+        except Exception:
+            order.append("preflight under the lock")
+        return (True, None)
+
+    done = RunResult(ok=True, status="success", message="done")
+    with (
+        patch.object(runner, "_preflight_disk", side_effect=preflight),
+        patch.object(runner, "compute_backfill_window", side_effect=window),
+        patch.object(runner, "upsert_schedule_state", return_value=False),
+        patch.object(runner, "write_today_success_marker"),
+        patch.object(runner, "_run_pipeline", return_value=done),
+    ):
+        runner.run_scheduled(
+            {"paths": {"results_csv_dir": str(results)}},
+            ScheduleConfig(log_dir=str(tmp_path)),
+        )
+    assert order == ["preflight under the lock", "window computed under the lock"]
+
+
+def test_a_retry_that_is_no_longer_due_records_no_disk_failure(
+    posted, monkeypatch, tmp_path, capsys
+) -> None:
+    """
+    Another attempt delivers while the retry is starting, and the disk is
+    critically low. The retry must look at the history before the disk
+    check can record a failure, or it would turn a clean history back into
+    a pending one and alert for nothing.
+    """
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [FAILED, {"kind": "scheduled", **OK}])
+    _stale_first_look(monkeypatch)
+    creds = {"paths": {"results_csv_dir": str(tmp_path / "results")}}
+    monkeypatch.setattr(
+        cli,
+        "_load_creds_and_schedule",
+        lambda *a, **k: (creds, ScheduleConfig(log_dir=str(log_dir))),
+    )
+    with patch.object(
+        runner, "_preflight_disk", return_value=(False, "Disk critically low")
+    ) as preflight:
+        assert main(["retry"]) == 0
+    preflight.assert_not_called()
+    assert posted == []
+    assert failures_in_a_row(log_dir) == 0 and len(_records(log_dir)) == 2
+
+
+def test_a_retry_refused_for_disk_space_is_one_counted_attempt(
+    posted, monkeypatch, tmp_path
+) -> None:
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [{"kind": "scheduled", **FAILED}])
+    creds = {"paths": {"results_csv_dir": str(tmp_path / "results")}}
+    monkeypatch.setattr(
+        cli,
+        "_load_creds_and_schedule",
+        lambda *a, **k: (creds, ScheduleConfig(log_dir=str(log_dir))),
+    )
+    with patch.object(
+        runner, "_preflight_disk", return_value=(False, "Disk critically low")
+    ):
+        assert main(["retry"]) == 1
+    # The claim and the refusal are one attempt: two failures in a row now.
+    assert failures_in_a_row(log_dir) == 2
+    assert "Failure 2 of 6 in a row" in posted[0]
 
 
 def test_a_scheduled_run_keeps_the_lock_until_its_result_is_recorded(tmp_path) -> None:
