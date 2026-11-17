@@ -17,6 +17,8 @@ count and re-arms the retries.
 The state is the run history itself: each scheduled or retry attempt
 records ``retry_wanted``, and the count is the number of trailing records
 that asked. There is no separate state file to fall out of step with it.
+The price is that the limit depends on that file being writable, so the
+retry job refuses to run while it is not (see :func:`decide_retry`).
 """
 
 from __future__ import annotations
@@ -108,11 +110,34 @@ def failures_before_latest(log_dir: str | Path) -> int:
     return _asked_in_a_row(_attempts_newest_first(log_dir)[1:])
 
 
+def history_writable(log_dir: str | Path) -> bool:
+    """True when an attempt made now could be recorded in the history."""
+    try:
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        with (Path(log_dir) / HISTORY_FILENAME).open("a", encoding="utf-8"):
+            pass
+    except OSError:
+        return False
+    return True
+
+
 def decide_retry(log_dir: str | Path) -> RetryDecision:
     """Whether the hourly job should run the pipeline now, and why."""
     failures = failures_in_a_row(log_dir)
     if failures == 0:
         return RetryDecision(False, 0, "No retry pending: the last run delivered.")
+    if not history_writable(log_dir):
+        # The six-in-a-row limit is counted from the history. If attempts
+        # cannot be recorded the count never moves, and a pending record
+        # would have the pipeline run and alert every hour without end. A
+        # retry that cannot be counted is not made; scheduled runs go on.
+        return RetryDecision(
+            False,
+            failures,
+            f"Not retrying: {HISTORY_FILENAME} in {log_dir} cannot be written, so "
+            f"attempts cannot be counted against the limit of "
+            f"{MAX_FAILURES_IN_A_ROW}. The next attempt is the next scheduled run.",
+        )
     if failures >= MAX_FAILURES_IN_A_ROW:
         return RetryDecision(
             False,

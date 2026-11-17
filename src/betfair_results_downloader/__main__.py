@@ -233,8 +233,8 @@ def _retry_note(failures: int, retry_job_ready: bool, recorded: bool = True) -> 
         # retry here would be one nothing is going to keep.
         return (
             "This attempt could not be written to run_history.jsonl (see the "
-            "log), so the hourly retry will not see it: the next attempt is the "
-            "next scheduled run."
+            "log), so it cannot be counted. Hourly retries stand down while the "
+            "history cannot be written; the next attempt is the next scheduled run."
         )
     if failures >= MAX_FAILURES_IN_A_ROW:
         return (
@@ -408,6 +408,9 @@ def _cmd_retry(args: argparse.Namespace) -> int:
     decision = decide_retry(_resolve_log_dir(creds, schedule_cfg))
     print(decision.reason)
     if not decision.run:
+        # Standing down is not a failure of this command; the reason is in
+        # retry.out.log, and the scheduled run's own alert has already said
+        # when the history could not be written.
         return 0
     return _run_and_announce(args, creds, schedule_cfg, retry=True)
 
