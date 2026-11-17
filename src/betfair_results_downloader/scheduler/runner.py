@@ -54,6 +54,10 @@ class RunResult:
     # True when the pipeline did not start because another downloader
     # command held the lock.
     busy: bool = False
+    # False when the attempt could not be written to run_history.jsonl.
+    # The hourly retry reads only that file, so such an attempt is not
+    # retried and the alert must not promise that it will be.
+    history_recorded: bool = True
 
 
 # Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
@@ -834,7 +838,7 @@ def run_scheduled(
         )
         # The refusal is the new failure mode; it belongs in the operational
         # record alongside every other scheduled failure.
-        append_run_history(
+        result.history_recorded = append_run_history(
             str(log_dir),
             {
                 "retry_wanted": True,
@@ -907,7 +911,7 @@ def run_scheduled(
         result.ok and result.status == "success"
     )
 
-    append_run_history(
+    result.history_recorded = append_run_history(
         str(log_dir),
         {
             "retry_wanted": result.retry_wanted,

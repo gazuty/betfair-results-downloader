@@ -224,10 +224,18 @@ def _log_dir_for_retries(creds: dict, schedule_cfg) -> str | None:
         return None
 
 
-def _retry_note(failures: int, retry_job_ready: bool) -> str:
+def _retry_note(failures: int, retry_job_ready: bool, recorded: bool = True) -> str:
     """What happens next after a run that asked for a retry."""
     from .scheduler.retry import MAX_FAILURES_IN_A_ROW
 
+    if not recorded:
+        # The retry job's only state is the run history. A promise of a
+        # retry here would be one nothing is going to keep.
+        return (
+            "This attempt could not be written to run_history.jsonl (see the "
+            "log), so the hourly retry will not see it: the next attempt is the "
+            "next scheduled run."
+        )
     if failures >= MAX_FAILURES_IN_A_ROW:
         return (
             f"That is {failures} failures in a row: hourly retries have stopped. "
@@ -289,11 +297,10 @@ def _run_and_announce(
         print(msg)
         # run_scheduled did not get as far as recording the attempt; without
         # a record the hourly retry would not know this one failed.
-        if log_dir:
-            append_run_history(
-                log_dir, {"status": "failed", "message": msg, "retry_wanted": True}
-            )
-        note = _retry_note(failures_now(), _retry_job_ready())
+        recorded = bool(log_dir) and append_run_history(
+            log_dir, {"status": "failed", "message": msg, "retry_wanted": True}
+        )
+        note = _retry_note(failures_now(), _retry_job_ready(), recorded)
         print(note)
         if post:
             _post_to_slack(
@@ -309,7 +316,9 @@ def _run_and_announce(
         return 0
 
     note = (
-        _retry_note(failures_now(), _retry_job_ready()) if result.retry_wanted else ""
+        _retry_note(failures_now(), _retry_job_ready(), result.history_recorded)
+        if result.retry_wanted
+        else ""
     )
     recovered_from = (
         failures_before_latest(log_dir) if log_dir and not result.retry_wanted else 0

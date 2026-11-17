@@ -508,6 +508,70 @@ def test_retry_with_unloadable_credentials_exits_2_without_posting(
     assert stopped.value.code == 2 and posted == []
 
 
+def test_append_run_history_reports_whether_it_wrote(tmp_path) -> None:
+    from betfair_results_downloader.scheduler.state import append_run_history
+
+    assert append_run_history(tmp_path, {"status": "success"}) is True
+    blocked = tmp_path / "a-file"
+    blocked.write_text("not a directory")
+    assert append_run_history(blocked, {"status": "failed"}) is False
+    assert append_run_history("", {"status": "failed"}) is False
+
+
+def _blocked_log_dir(monkeypatch, tmp_path: Path, creds: dict) -> Path:
+    """A log directory that cannot be written: a file stands where it should be."""
+    blocked = tmp_path / "logs"
+    blocked.write_text("not a directory")
+    monkeypatch.setattr(
+        cli,
+        "_load_creds_and_schedule",
+        lambda *a, **k: (creds, ScheduleConfig(log_dir=str(blocked))),
+    )
+    return blocked
+
+
+def test_an_attempt_that_could_not_be_recorded_does_not_promise_a_retry(
+    posted, monkeypatch, tmp_path
+) -> None:
+    """
+    Real run_scheduled. The retry job reads only the history, so when the
+    record cannot be written the alert must say no retry will follow.
+    """
+    _retry_job(monkeypatch, installed=True)
+    creds = {"paths": {"results_csv_dir": str(tmp_path / "results")}}
+    blocked = _blocked_log_dir(monkeypatch, tmp_path, creds)
+    failed = RunResult(ok=False, status="failed", message="auth", retry_wanted=True)
+    with (
+        patch.object(runner, "_run_pipeline", return_value=failed),
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(
+            runner, "compute_backfill_window", return_value=(FROM_DT, TO_DT, "gap")
+        ),
+    ):
+        assert main(["run"]) == 1
+    assert "could not be written to run_history.jsonl" in posted[0]
+    assert "retried on the hour" not in posted[0]
+    assert "Failure 1 of 6" not in posted[0]
+    assert decide_retry(blocked).run is False
+
+
+def test_a_run_that_raises_and_cannot_be_recorded_says_so_too(
+    posted, monkeypatch, tmp_path
+) -> None:
+    _retry_job(monkeypatch, installed=True)
+    _blocked_log_dir(monkeypatch, tmp_path, {"paths": {}})
+
+    def boom(*_a, **_k):
+        raise RuntimeError("gap detection exploded")
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.runner.run_scheduled", boom
+    )
+    assert main(["run"]) == 1
+    assert "could not be written to run_history.jsonl" in posted[0]
+    assert "retried on the hour" not in posted[0]
+
+
 def test_a_plist_that_is_installed_but_not_loaded_promises_no_retry(
     posted, creds_ok, monkeypatch
 ) -> None:

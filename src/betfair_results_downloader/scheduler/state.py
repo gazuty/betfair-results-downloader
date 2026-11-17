@@ -256,10 +256,18 @@ WHEN NOT MATCHED THEN
         return False
 
 
-def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
+def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> bool:
+    """
+    Append one record to ``run_history.jsonl``; True when it was written.
+
+    Never raises: the history must not be what fails a run. The result
+    matters to the hourly retry, whose only state is this file: an attempt
+    that could not be recorded will not be retried, and the caller must not
+    tell anyone that it will.
+    """
     if not log_dir:
         logger.debug("append_run_history: log_dir empty, skipping.")
-        return
+        return False
 
     try:
         log_path = Path(log_dir)
@@ -272,6 +280,8 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
             fh.write(json.dumps(record, default=str) + "\n")
     except Exception as exc:
         logger.warning("Failed to append to run_history.jsonl: %s", exc)
+        return False
+    return True
 
 
 def _marker_filename(marker_date: date, marker_namespace: str = "local") -> str:
