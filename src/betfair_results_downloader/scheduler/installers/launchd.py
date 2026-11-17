@@ -40,6 +40,13 @@ RACECARD_PLIST_PATH = AGENTS_DIR / f"{RACECARD_LABEL}.plist"
 # there are no quiet hours to skip.
 RACECARD_MINUTE = 30
 
+# The hourly retry (see scheduler.retry): its own job so the scheduler's four
+# times stay what `schedule status` reports, and so it can be removed without
+# touching them. On the hour, clear of the racecard capture at half past.
+RETRY_LABEL = "com.betfair.results.retry"
+RETRY_PLIST_PATH = AGENTS_DIR / f"{RETRY_LABEL}.plist"
+RETRY_MINUTE = 0
+
 
 def _parse_hh_mm(time_str: str) -> tuple[int, int]:
     """Parse 'HH:MM' into (hour, minute). Raises ValueError on bad input."""
@@ -134,6 +141,44 @@ def build_racecard_plist(
         "StartCalendarInterval": [{"Minute": RACECARD_MINUTE}],
         "StandardOutPath": str(log_dir / "racecard.out.log"),
         "StandardErrorPath": str(log_dir / "racecard.err.log"),
+        "RunAtLoad": False,
+        "KeepAlive": False,
+    }
+
+
+def _scheduled_hours(schedule_cfg: ScheduleConfig) -> set[int]:
+    return {entry["Hour"] for entry in _build_calendar_intervals(schedule_cfg)}
+
+
+def build_retry_plist(
+    schedule_cfg: ScheduleConfig,
+    repo_root: Path,
+    venv_python_path: Path,
+    log_dir: Path,
+) -> dict[str, Any]:
+    """
+    The plist dict for the hourly retry job: on the hour, every hour that
+    has no scheduled run. In an hour that has one, that run is the attempt,
+    and a retry beside it would only queue behind the pipeline lock.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    busy = _scheduled_hours(schedule_cfg)
+    return {
+        "Label": RETRY_LABEL,
+        "ProgramArguments": [
+            str(venv_python_path),
+            "-m",
+            "betfair_results_downloader",
+            "retry",
+        ],
+        "WorkingDirectory": str(repo_root),
+        "StartCalendarInterval": [
+            {"Hour": hour, "Minute": RETRY_MINUTE}
+            for hour in range(24)
+            if hour not in busy
+        ],
+        "StandardOutPath": str(log_dir / "retry.out.log"),
+        "StandardErrorPath": str(log_dir / "retry.err.log"),
         "RunAtLoad": False,
         "KeepAlive": False,
     }
@@ -399,6 +444,84 @@ class LaunchdInstaller:
             "ok": True,
             "message": f"Uninstalled {RACECARD_LABEL}. Plist removed.",
         }
+
+    def install_retry(
+        self,
+        schedule_cfg: ScheduleConfig,
+        repo_root: Path,
+        venv_python_path: Path | None = None,
+        log_dir: Path | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Write the retry plist and (re)load it. Reinstall after changing the
+        scheduled times: the retry hours are the ones those times leave free.
+        """
+        py_path = Path(venv_python_path or sys.executable)
+        log = log_dir or (repo_root / "outputs")
+        if dry_run:
+            return {
+                "ok": True,
+                "plist_path": str(RETRY_PLIST_PATH),
+                "message": (
+                    f"Dry run: would write {RETRY_PLIST_PATH} and load it via launchctl."
+                ),
+            }
+        plist = build_retry_plist(schedule_cfg, repo_root, py_path, log)
+        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        RETRY_PLIST_PATH.write_bytes(plistlib.dumps(plist, fmt=plistlib.FMT_XML))
+        failure = _replace_loaded_job(RETRY_LABEL, RETRY_PLIST_PATH)
+        if failure:
+            return {
+                "ok": False,
+                "plist_path": str(RETRY_PLIST_PATH),
+                "message": failure,
+            }
+        hours = [entry["Hour"] for entry in plist["StartCalendarInterval"]]
+        return {
+            "ok": True,
+            "plist_path": str(RETRY_PLIST_PATH),
+            "message": (
+                f"Installed and loaded: {RETRY_LABEL} (on the hour, {len(hours)} "
+                f"hours a day; not at the scheduled hours "
+                f"{sorted(_scheduled_hours(schedule_cfg))}). "
+                f"Plist at {RETRY_PLIST_PATH}."
+            ),
+        }
+
+    def uninstall_retry(self, dry_run: bool = False) -> dict[str, Any]:
+        """Unload the retry job and remove its plist."""
+        if not RETRY_PLIST_PATH.exists():
+            return {
+                "ok": True,
+                "message": f"Plist not found at {RETRY_PLIST_PATH} — nothing to uninstall.",
+            }
+        if dry_run:
+            return {
+                "ok": True,
+                "message": f"Dry run: would unload {RETRY_LABEL} and remove {RETRY_PLIST_PATH}.",
+            }
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{_get_gui_uid()}/{RETRY_LABEL}"],
+            capture_output=True,
+            text=True,
+        )
+        RETRY_PLIST_PATH.unlink(missing_ok=True)
+        return {"ok": True, "message": f"Uninstalled {RETRY_LABEL}. Plist removed."}
+
+    def retry_status(self) -> dict[str, Any]:
+        """Whether the retry job is installed and loaded."""
+        installed = RETRY_PLIST_PATH.exists()
+        loaded = False
+        if installed:
+            result = subprocess.run(
+                ["launchctl", "list"], capture_output=True, text=True
+            )
+            loaded = any(
+                line.split()[-1:] == [RETRY_LABEL]
+                for line in result.stdout.splitlines()
+            )
+        return {"installed": installed, "loaded": loaded}
 
     def racecard_status(self) -> dict[str, Any]:
         """Whether the racecard job is installed and loaded."""

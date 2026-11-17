@@ -4,6 +4,7 @@ Package CLI entry point.
 Subcommands:
   auth-test     — cert-based non-interactive login test
   run           — one scheduled download (gap-detect, fetch, enrich, CSV, Azure)
+  retry         — run again if the last attempt did not deliver (hourly job)
   backfill      — explicit date-range download
   backfill-commission — read per-market commission for a date range
   racecard      — capture the forward racing card (full racing market names)
@@ -161,7 +162,85 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args, validate=True, context="scheduled run"
     )
 
+    return _run_and_announce(args, creds, schedule_cfg)
+
+
+# Slack accepts far more, but an alert is read on a phone. Errors are already
+# shortened where they are raised (error_text.brief_error); this is the
+# backstop for anything that slips through.
+_ALERT_MAX_CHARS = 3000
+
+
+def _alert_text(text: str) -> str:
+    if len(text) <= _ALERT_MAX_CHARS:
+        return text
+    return text[:_ALERT_MAX_CHARS].rstrip() + " … (truncated; full text in the log)"
+
+
+def _retry_context(creds: dict, schedule_cfg) -> tuple[str | None, int, bool]:
+    """
+    ``(log_dir, failures in a row so far, hourly retry job installed)``.
+
+    Only used to word the alert, so nothing here may stop a run: when the
+    history cannot be located the count is zero and the reason is printed.
+    """
+    try:
+        from .scheduler.retry import failures_in_a_row
+        from .scheduler.runner import _resolve_log_dir
+
+        log_dir = str(_resolve_log_dir(creds, schedule_cfg))
+        failures = failures_in_a_row(log_dir)
+    except Exception as exc:
+        print(f"WARN: could not read the run history for retries ({exc}).")
+        return None, 0, False
+    try:
+        from .scheduler.installers import get_installer
+
+        installed = bool(get_installer().retry_status()["installed"])
+    except Exception:
+        # No installer on this platform, or launchctl unavailable.
+        installed = False
+    return log_dir, failures, installed
+
+
+def _retry_note(failures: int, retry_job_installed: bool) -> str:
+    """What happens next after a run that asked for a retry."""
+    from .scheduler.retry import MAX_FAILURES_IN_A_ROW
+
+    if failures >= MAX_FAILURES_IN_A_ROW:
+        return (
+            f"That is {failures} failures in a row: hourly retries have stopped. "
+            f"The next attempt is the next scheduled run."
+        )
+    if not retry_job_installed:
+        return (
+            f"Failure {failures} of {MAX_FAILURES_IN_A_ROW} in a row. The hourly "
+            f"retry job is not installed (schedule install-retry), so the next "
+            f"attempt is the next scheduled run."
+        )
+    return (
+        f"Failure {failures} of {MAX_FAILURES_IN_A_ROW} in a row; it will be "
+        f"retried on the hour."
+    )
+
+
+def _run_and_announce(args: argparse.Namespace, creds: dict, schedule_cfg) -> int:
+    """
+    Run the scheduled pipeline once and announce the outcome; shared by
+    ``run`` and ``retry``.
+
+    Every non-success outcome reaches Slack, shortened, with a line saying
+    whether and when it will be retried. A success that follows failures
+    is announced once, so the last word in the channel is not a failure.
+
+    Exit codes: 0=success, 1=failure.
+    """
+    from .error_text import brief_error
     from .scheduler.runner import run_scheduled
+    from .scheduler.state import append_run_history
+
+    post = getattr(args, "post_slack", True)
+    log_dir, failures_before, retry_job_installed = _retry_context(creds, schedule_cfg)
 
     try:
         result = run_scheduled(creds, schedule_cfg)
@@ -170,20 +249,53 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # malformed optional section (a `paths` that is a string, say) passes
         # validation and then raises during gap detection. Announcing by
         # default means nothing may exit on a traceback.
-        msg = f"FAIL: scheduled run raised {type(exc).__name__}: {exc}"
+        import logging
+
+        logging.getLogger(__name__).exception("Scheduled run raised.")
+        msg = f"FAIL: scheduled run raised {brief_error(exc)}"
         print(msg)
-        if getattr(args, "post_slack", True):
-            _post_to_slack(f":warning: Betfair scheduled run failed\n{msg}", creds)
+        # run_scheduled did not get as far as recording the attempt; without
+        # a record the hourly retry would not know this one failed.
+        if log_dir:
+            append_run_history(
+                log_dir, {"status": "failed", "message": msg, "retry_wanted": True}
+            )
+        note = _retry_note(failures_before + 1, retry_job_installed)
+        print(note)
+        if post:
+            _post_to_slack(
+                _alert_text(f":warning: Betfair scheduled run failed\n{msg}\n{note}"),
+                creds,
+            )
         return 1
+
+    note = (
+        _retry_note(failures_before + 1, retry_job_installed)
+        if result.retry_wanted
+        else ""
+    )
 
     if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")
-        # A success can still carry a disk warning. It must reach Slack from
+        if note:
+            print(note)
+        # A success can still carry a warning. It must reach Slack from
         # here: a low disk gave this pipeline both of its incidents, and a
         # warning that only lands in scheduler stdout is not a warning.
-        if "⚠️" in result.message and getattr(args, "post_slack", True):
+        if "⚠️" in result.message and post:
+            body = f"{result.message}\n{note}" if note else result.message
             _post_to_slack(
-                f":warning: Betfair scheduled run succeeded with a warning\n{result.message}",
+                _alert_text(
+                    f":warning: Betfair scheduled run succeeded with a warning\n{body}"
+                ),
+                creds,
+            )
+        elif failures_before and not result.retry_wanted and post:
+            _post_to_slack(
+                _alert_text(
+                    f":white_check_mark: Betfair scheduled run recovered after "
+                    f"{failures_before} failed attempt(s)\n{result.message}"
+                ),
                 creds,
             )
         return 0
@@ -191,21 +303,59 @@ def _cmd_run(args: argparse.Namespace) -> int:
     label = "PARTIAL" if result.ok else "FAIL"
     lines = [f"{label} ({result.status}): {result.message}"]
     lines.extend(f"  - {err}" for err in result.errors)
+    if note:
+        lines.append(note)
     for line in lines:
         print(line)
 
-    if getattr(args, "post_slack", True):
+    if post:
         _post_to_slack(
-            ":warning: Betfair scheduled run "
-            + ("completed with problems" if result.ok else "failed")
-            + "\n"
-            + "\n".join(lines),
+            _alert_text(
+                ":warning: Betfair scheduled run "
+                + ("completed with problems" if result.ok else "failed")
+                + "\n"
+                + "\n".join(lines)
+            ),
             creds,
         )
 
     # A partial run is not a success: exiting 0 hides an Azure publish failure
     # from launchd and from any monitoring built on the exit code.
     return 1
+
+
+def _cmd_retry(args: argparse.Namespace) -> int:
+    """
+    Run the scheduled pipeline again if the last attempt did not deliver.
+
+    Behind the hourly ``com.betfair.results.retry`` job (``schedule
+    install-retry``), which fires on the hours with no scheduled run. Most
+    hours there is nothing to do and this exits at once without logging in
+    to Betfair. It runs while the most recent attempts asked for a retry,
+    and stops after six in a row (see ``scheduler.retry``).
+
+    A configuration that cannot be loaded exits 2 without a Slack post: the
+    scheduled run announces that, and an hourly repeat would bury it.
+
+    Exit codes: 0=nothing to do or success, 1=failure, 2=bad configuration.
+    """
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    creds, schedule_cfg = _load_creds_and_schedule(validate=True)
+
+    from .scheduler.retry import decide_retry
+    from .scheduler.runner import _resolve_log_dir
+
+    decision = decide_retry(_resolve_log_dir(creds, schedule_cfg))
+    print(decision.reason)
+    if not decision.run:
+        return 0
+    return _run_and_announce(args, creds, schedule_cfg)
 
 
 def _cmd_backfill(args: argparse.Namespace) -> int:
@@ -703,7 +853,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     Install, uninstall, query status, or show logs for the platform scheduler.
 
     Actions: install | uninstall | install-racecard | uninstall-racecard |
-    status | logs [--tail N]
+    install-retry | uninstall-retry | status | logs [--tail N]
     """
     import logging
 
@@ -783,6 +933,25 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         print(result["message"])
         return 0 if result["ok"] else 1
 
+    if action == "install-retry":
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[2]
+        log_dir = Path(schedule_cfg.log_dir or str(repo_root / "outputs")).expanduser()
+        result = installer.install_retry(
+            schedule_cfg=schedule_cfg,
+            repo_root=repo_root,
+            venv_python_path=Path(sys.executable),
+            log_dir=log_dir,
+        )
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
+    if action == "uninstall-retry":
+        result = installer.uninstall_retry()
+        print(result["message"])
+        return 0 if result["ok"] else 1
+
     if action == "status":
         info = installer.status()
         print(info["message"])
@@ -808,6 +977,11 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         print(
             f"  racecard job  : installed={rc['installed']} loaded={rc['loaded']}"
             + ("" if rc["installed"] else " (run 'schedule install-racecard')")
+        )
+        rt = installer.retry_status()
+        print(
+            f"  retry job     : installed={rt['installed']} loaded={rt['loaded']}"
+            + ("" if rt["installed"] else " (run 'schedule install-retry')")
         )
         return 0
 
@@ -882,6 +1056,17 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         help="Inclusive end date (required)",
     )
+    rt = sub.add_parser(
+        "retry",
+        help="Run the scheduled download again if the last attempt did not deliver.",
+    )
+    rt.add_argument(
+        "--no-post-slack",
+        dest="post_slack",
+        action="store_false",
+        help="Do not announce the outcome to Slack (announcing is the default).",
+    )
+    rt.set_defaults(post_slack=True)
     sub.add_parser(
         "racecard",
         help="Capture the forward racing card so racing markets keep their full names.",
@@ -936,6 +1121,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "uninstall",
             "install-racecard",
             "uninstall-racecard",
+            "install-retry",
+            "uninstall-retry",
             "status",
             "logs",
         ],
@@ -968,6 +1155,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_auth_test(args)
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "retry":
+        return _cmd_retry(args)
     if args.command == "backfill":
         return _cmd_backfill(args)
     if args.command == "backfill-commission":

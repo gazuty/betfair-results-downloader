@@ -44,7 +44,7 @@ def _isolate_racecard_and_feed():
     """
     with (
         patch.object(runner, "_refresh_racecard", return_value=None),
-        patch.object(runner, "_publish_market_results", return_value=[]),
+        patch.object(runner, "_publish_market_results", return_value=([], True)),
     ):
         yield
 

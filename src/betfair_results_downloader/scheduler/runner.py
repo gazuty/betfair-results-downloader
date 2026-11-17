@@ -19,6 +19,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from ..config import ScheduleConfig
+from ..error_text import brief_error
 from ..paths import resolve_results_dir
 from ..run_lock import PipelineBusy, pipeline_lock
 from .auth import build_api_client
@@ -45,6 +46,11 @@ class RunResult:
     last_confirmed_settled_at_utc: Optional[datetime] = None
     download_started_utc: Optional[datetime] = None
     download_finished_utc: Optional[datetime] = None
+    # True when the attempt did not deliver: it failed, or it succeeded
+    # without a fresh status check, commission read or results feed. The
+    # hourly retry job runs the pipeline again while the latest attempts
+    # say so (see scheduler.retry).
+    retry_wanted: bool = False
 
 
 # Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
@@ -188,6 +194,17 @@ def _extract_max_settled_at_utc(df: pd.DataFrame) -> Optional[datetime]:
     return max_ts.astimezone(timezone.utc)
 
 
+def _log_step_failure(warning: str, exc: BaseException) -> None:
+    """
+    Log a failed step: the short warning that goes into the run message, and
+    the exception in full. The message reaches Slack and the run history, so
+    it carries :func:`~..error_text.brief_error`; the parameters and response
+    body a Betfair error drags along belong in the log only.
+    """
+    logger.warning(warning)
+    logger.warning("Full error for the warning above: %s: %s", type(exc).__name__, exc)
+
+
 def _refresh_market_status(
     client: Any,
     results_dir: Path,
@@ -235,10 +252,10 @@ def _refresh_market_status(
     except Exception as exc:
         warning = (
             f"⚠️ Market settlement status check failed "
-            f"({type(exc).__name__}: {exc}); the report will treat this "
+            f"({brief_error(exc)}); the report will treat this "
             f"window's markets as fully settled until the next run."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -305,11 +322,11 @@ def _refresh_market_commission(
         return None
     except Exception as exc:
         warning = (
-            f"⚠️ Commission read failed ({type(exc).__name__}: {exc}); the "
+            f"⚠️ Commission read failed ({brief_error(exc)}); the "
             f"report will show this window's markets as commission unknown "
             f"until a later run re-reads them."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -349,11 +366,11 @@ def _refresh_racecard(
         return None
     except Exception as exc:
         warning = (
-            f"⚠️ Racecard capture failed ({type(exc).__name__}: {exc}); racing "
+            f"⚠️ Racecard capture failed ({brief_error(exc)}); racing "
             f"markets that settle before the next capture are named from the "
             f"fallback, with country Unknown where the venue is ambiguous."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -362,9 +379,13 @@ def _publish_market_results(
     status_cb: Optional[Any] = None,
     *,
     status_failed: bool = False,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """
     Rebuild the results feed the dashboard reads (see market_results).
+
+    Returns ``(warnings, rebuilt)``. ``rebuilt`` is False when the feed on
+    disk is still the previous one, which is what makes the run ask for a
+    retry; a warning alone (a market stuck without commission) does not.
 
     Runs last, after the status and commission steps, so it sees this
     run's settlements and closes. Never raises: on failure the previous
@@ -382,7 +403,7 @@ def _publish_market_results(
             "failed; the dashboard keeps the previous feed until a run succeeds."
         )
         logger.warning(warning)
-        return [warning]
+        return [warning], False
     try:
         from ..market_results import (  # noqa: PLC0415
             build_market_results_from_disk,
@@ -398,14 +419,29 @@ def _publish_market_results(
         logger.info("%s Written to %s.", result.message, path)
         if status_cb:
             status_cb(result.message)
-        return list(result.warnings)
+        return list(result.warnings), True
     except Exception as exc:
         warning = (
-            f"⚠️ Results feed not rebuilt ({type(exc).__name__}: {exc}); the "
+            f"⚠️ Results feed not rebuilt ({brief_error(exc)}); the "
             f"dashboard keeps the previous feed until a run succeeds."
         )
-        logger.warning(warning)
-        return [warning]
+        _log_step_failure(warning, exc)
+        return [warning], False
+
+
+def _data_steps_incomplete(
+    status_warning: Optional[str],
+    commission_warning: Optional[str],
+    feed_rebuilt: bool,
+) -> bool:
+    """
+    True when a run that downloaded fine still left the dashboard without
+    fresh data: the settlement-status check or the commission read failed,
+    or the results feed was not rebuilt. Another attempt can fix each of
+    those. A racecard failure cannot be made good later (the hourly capture
+    is its retry), nor can a disk or backup warning, so they do not ask.
+    """
+    return bool(status_warning or commission_warning or not feed_rebuilt)
 
 
 def _run_pipeline(
@@ -446,6 +482,7 @@ def _run_pipeline(
             from_dt_utc=from_dt_utc,
             to_dt_utc=to_dt_utc,
             message=str(exc),
+            retry_wanted=True,
         )
     except Exception as exc:
         logger.exception("Scheduled pipeline failed with an unhandled error.")
@@ -454,7 +491,9 @@ def _run_pipeline(
             status="failed",
             from_dt_utc=from_dt_utc,
             to_dt_utc=to_dt_utc,
-            message=f"Scheduled pipeline failed: {type(exc).__name__}: {exc}",
+            # logger.exception above has the full text and the traceback.
+            message=f"Scheduled pipeline failed: {brief_error(exc)}",
+            retry_wanted=True,
         )
 
 
@@ -474,14 +513,15 @@ def _run_pipeline_inner(
         try:
             client = build_api_client(betfair_creds)
         except Exception as exc:
-            msg = f"Betfair authentication failed: {exc}"
-            logger.error(msg)
+            msg = f"Betfair authentication failed: {brief_error(exc)}"
+            logger.error("Betfair authentication failed: %s", exc)
             return RunResult(
                 ok=False,
                 status="failed",
                 from_dt_utc=from_dt_utc,
                 to_dt_utc=to_dt_utc,
                 message=msg,
+                retry_wanted=True,
             )
 
         from ..downloader_core import fetch_cleared_orders_df_range  # noqa: PLC0415
@@ -524,7 +564,7 @@ def _run_pipeline_inner(
             racecard_warning = _refresh_racecard(client, results_dir)
             # A quiet run still rebuilds the feed: it is the run that sees an
             # outright close or a late commission land.
-            feed_warnings = _publish_market_results(
+            feed_warnings, feed_rebuilt = _publish_market_results(
                 results_dir, status_failed=status_warning is not None
             )
             empty_warnings = [
@@ -541,6 +581,9 @@ def _run_pipeline_inner(
                 download_started_utc=run_started,
                 download_finished_utc=datetime.now(timezone.utc),
                 message=f"Download returned no rows. {dl.message}{warn_suffix}",
+                retry_wanted=_data_steps_incomplete(
+                    status_warning, commission_warning, feed_rebuilt
+                ),
             )
 
         df_co = dl.df_co
@@ -623,7 +666,7 @@ def _run_pipeline_inner(
         )
 
         racecard_warning = _refresh_racecard(client, results_dir, _say)
-        feed_warnings = _publish_market_results(
+        feed_warnings, feed_rebuilt = _publish_market_results(
             results_dir, _say, status_failed=status_warning is not None
         )
 
@@ -689,6 +732,7 @@ def _run_pipeline_inner(
                 return RunResult(
                     ok=True,
                     status="partial",
+                    retry_wanted=True,
                     rows_downloaded=dl.rows_downloaded,
                     rows_in_canonical=csvr.rows_in_canonical,
                     azure_published=False,
@@ -699,7 +743,7 @@ def _run_pipeline_inner(
                     download_finished_utc=datetime.now(timezone.utc),
                     message=(
                         f"CSV written ({csvr.rows_in_canonical:,} rows canonical). "
-                        f"Azure publish failed: {exc}{warn_suffix}"
+                        f"Azure publish failed: {brief_error(exc)}{warn_suffix}"
                     ),
                 )
         else:
@@ -739,6 +783,9 @@ def _run_pipeline_inner(
             last_confirmed_settled_at_utc=max_settled_at_utc,
             download_started_utc=run_started,
             download_finished_utc=run_finished,
+            retry_wanted=_data_steps_incomplete(
+                status_warning, commission_warning, feed_rebuilt
+            ),
         )
 
     finally:
@@ -766,12 +813,15 @@ def run_scheduled(
     disk_ok, disk_warning = _preflight_disk(creds)
     if not disk_ok:
         logger.error(disk_warning)
-        result = RunResult(ok=False, status="failed", message=disk_warning)
+        result = RunResult(
+            ok=False, status="failed", message=disk_warning, retry_wanted=True
+        )
         # The refusal is the new failure mode; it belongs in the operational
         # record alongside every other scheduled failure.
         append_run_history(
             str(log_dir),
             {
+                "retry_wanted": True,
                 "status": result.status,
                 "message": result.message,
                 "run_started": run_started.isoformat(),
@@ -831,9 +881,17 @@ def run_scheduled(
             write_today_success_marker(log_dir, today_local, marker_namespace="local")
             write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 
+    # Anything short of a clean success asks for a retry too: that covers a
+    # run downgraded to partial after the pipeline returned (the Azure
+    # checkpoint was not written).
+    result.retry_wanted = result.retry_wanted or not (
+        result.ok and result.status == "success"
+    )
+
     append_run_history(
         str(log_dir),
         {
+            "retry_wanted": result.retry_wanted,
             "status": result.status,
             "from_date": str(result.from_date),
             "to_date": str(result.to_date),

@@ -142,7 +142,7 @@ def test_the_feed_is_built_after_the_status_and_commission_steps(
         patch.object(
             runner,
             "_publish_market_results",
-            side_effect=lambda *a, **k: order.append("feed") or [],
+            side_effect=lambda *a, **k: order.append("feed") or ([], True),
         ),
     ):
         _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
@@ -204,7 +204,9 @@ def test_a_stuck_commission_warning_from_the_feed_reaches_the_message(
         p3,
         p4,
         patch.object(
-            runner, "_publish_market_results", return_value=["⚠️ Results feed: stuck"]
+            runner,
+            "_publish_market_results",
+            return_value=(["⚠️ Results feed: stuck"], True),
         ),
     ):
         result = _run_pipeline(_creds(tmp_path), ScheduleConfig(), FROM_DT, TO_DT)
