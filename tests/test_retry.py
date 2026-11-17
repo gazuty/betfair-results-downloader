@@ -573,41 +573,212 @@ def test_a_run_that_raises_and_cannot_be_recorded_says_so_too(
     assert "retried on the hour" not in posted[0]
 
 
-def test_retries_stand_down_while_the_history_cannot_be_written(
-    posted, monkeypatch, tmp_path, capsys
-) -> None:
-    """
-    The limit is counted from the history. With a pending record and a file
-    that can no longer be appended to, the count would never reach six and
-    the pipeline would run and alert every hour without end.
-    """
-    from betfair_results_downloader.scheduler import retry as policy
-
-    log_dir = _history(tmp_path, [FAILED, FAILED])
+def _real_retry(monkeypatch, log_dir: Path, results: Path, **patches):
+    """main(["retry"]) through the real run_scheduled, with its outside world stubbed."""
+    creds = {"paths": {"results_csv_dir": str(results)}}
     monkeypatch.setattr(
         cli,
         "_load_creds_and_schedule",
-        lambda *a, **k: ({"paths": {}}, ScheduleConfig(log_dir=str(log_dir))),
+        lambda *a, **k: (creds, ScheduleConfig(log_dir=str(log_dir))),
     )
-    monkeypatch.setattr(policy, "history_writable", lambda _dir: False)
-    calls = _result(monkeypatch, CLEAN)
-    for _hour in range(3):
-        assert main(["retry"]) == 0
-    assert calls == [] and posted == []
-    assert "cannot be written, so attempts cannot be counted" in capsys.readouterr().out
+    pipeline = patches.pop(
+        "pipeline", RunResult(ok=True, status="success", message="done")
+    )
+    window = patches.pop("window", None)
+
+    def compute_window(*_a, **_k):
+        if window:
+            window()
+        return (FROM_DT, TO_DT, "gap")
+
+    with (
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(runner, "compute_backfill_window", side_effect=compute_window),
+        patch.object(runner, "upsert_schedule_state", return_value=False),
+        patch.object(runner, "write_today_success_marker"),
+        patch.object(runner, "_run_pipeline", return_value=pipeline) as ran,
+    ):
+        code = main(["retry"])
+    return code, ran
 
 
-def test_history_writable_is_judged_by_appending(tmp_path) -> None:
-    from betfair_results_downloader.scheduler.retry import history_writable
+def _records(log_dir: Path) -> list[dict]:
+    lines = (log_dir / "run_history.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
 
-    assert history_writable(tmp_path / "new" / "dir") is True
-    assert (tmp_path / "new" / "dir" / "run_history.jsonl").read_text() == ""
-    blocked = tmp_path / "a-file"
-    blocked.write_text("not a directory")
-    assert history_writable(blocked) is False
-    as_directory = tmp_path / "odd"
-    (as_directory / "run_history.jsonl").mkdir(parents=True)
-    assert history_writable(as_directory) is False
+
+def test_a_retry_claims_its_attempt_before_the_pipeline_runs(
+    posted, monkeypatch, tmp_path
+) -> None:
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [FAILED])
+    code, ran = _real_retry(monkeypatch, log_dir, tmp_path / "results")
+    assert code == 0 and ran.call_count == 1
+    records = _records(log_dir)
+    assert [r.get("phase") for r in records[-2:]] == ["started", None]
+    assert records[-2]["kind"] == records[-1]["kind"] == "retry"
+    assert records[-1]["retry_wanted"] is False
+    # The claim and its outcome are one attempt, and it succeeded.
+    assert failures_in_a_row(log_dir) == 0
+
+
+def test_a_retry_that_cannot_claim_its_attempt_does_not_run(
+    posted, monkeypatch, tmp_path, capsys
+) -> None:
+    """
+    The limit is counted from the history. A history that can be read but
+    not appended to (here: read-only; a full disk behaves the same at the
+    write) would let a pending record run the pipeline every hour with the
+    count never moving. The claim is a real line flushed to disk: if it
+    cannot be written, the pipeline does not run.
+    """
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [FAILED, FAILED])
+    history = log_dir / "run_history.jsonl"
+    history.chmod(0o444)
+    try:
+        for _hour in range(3):
+            code, ran = _real_retry(monkeypatch, log_dir, tmp_path / "results")
+            assert code == 0 and ran.call_count == 0
+    finally:
+        history.chmod(0o644)
+    assert posted == []
+    assert "could not be counted against the limit of 6" in capsys.readouterr().out
+    assert len(_records(log_dir)) == 2, "nothing was written, and nothing was run"
+
+
+def test_a_retry_stands_down_if_another_attempt_delivered_before_it_got_the_lock(
+    posted, monkeypatch, tmp_path, capsys
+) -> None:
+    """
+    A scheduled run started at the same moment finishes and records its
+    success while the retry is still preparing. The retry looked at the
+    history before that; it must look again once it holds the lock.
+    """
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [FAILED])
+
+    def the_other_attempt_finishes() -> None:
+        with (log_dir / "run_history.jsonl").open("a") as fh:
+            fh.write(json.dumps({"kind": "scheduled", **OK}) + "\n")
+
+    code, ran = _real_retry(
+        monkeypatch, log_dir, tmp_path / "results", window=the_other_attempt_finishes
+    )
+    assert code == 0 and ran.call_count == 0
+    assert posted == []
+    assert "No retry pending" in capsys.readouterr().out
+    assert [r.get("phase") for r in _records(log_dir)] == [None, None], (
+        "no claim written"
+    )
+
+
+@pytest.mark.parametrize(
+    "records,expected",
+    [
+        # A claim and its outcome are one attempt.
+        (
+            [
+                FAILED,
+                {"kind": "retry", "phase": "started", "retry_wanted": True},
+                {"kind": "retry", "status": "failed", "retry_wanted": True},
+            ],
+            2,
+        ),
+        # A claim with no outcome (the retry crashed, or its final record
+        # could not be written) is the failure it stands for.
+        ([FAILED, {"kind": "retry", "phase": "started", "retry_wanted": True}], 2),
+        # A scheduled run recorded after a dangling claim is not its outcome.
+        (
+            [
+                FAILED,
+                {"kind": "retry", "phase": "started", "retry_wanted": True},
+                {"kind": "scheduled", "status": "failed", "retry_wanted": True},
+            ],
+            3,
+        ),
+        # A successful retry ends the run of failures, claim and all.
+        (
+            [
+                FAILED,
+                {"kind": "retry", "phase": "started", "retry_wanted": True},
+                {"kind": "retry", "status": "success", "retry_wanted": False},
+            ],
+            0,
+        ),
+    ],
+    ids=["claim+failure", "dangling-claim", "claim-then-scheduled", "claim+success"],
+)
+def test_a_claim_and_its_outcome_count_as_one_attempt(
+    tmp_path, records, expected
+) -> None:
+    assert failures_in_a_row(_history(tmp_path, records)) == expected
+
+
+def test_five_failed_retries_after_a_failure_reach_the_limit(
+    posted, monkeypatch, tmp_path
+) -> None:
+    """End to end through the real run_scheduled: the sixth failure stops it."""
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [{"kind": "scheduled", **FAILED}])
+    failing = RunResult(ok=False, status="failed", message="auth", retry_wanted=True)
+    runs = 0
+    for _hour in range(8):
+        code, ran = _real_retry(
+            monkeypatch, log_dir, tmp_path / "results", pipeline=failing
+        )
+        runs += ran.call_count
+    assert runs == 5, "five retries after the first failure make six in a row"
+    assert failures_in_a_row(log_dir) == 6
+    assert "That is 6 failures in a row: hourly retries have stopped." in posted[-1]
+    assert len(posted) == 5
+
+
+def test_a_scheduled_run_keeps_the_lock_until_its_result_is_recorded(tmp_path) -> None:
+    """
+    Releasing the lock before the history is written would let a retry take
+    it, still see the old pending failure, and run the pipeline again.
+    """
+    results = tmp_path / "results"
+    seen: list[str] = []
+
+    def append(_log_dir, _record, **_kw):
+        try:
+            with pipeline_lock(results, command="retry"):
+                seen.append("free")
+        except Exception as exc:
+            seen.append(type(exc).__name__)
+        return True
+
+    creds = {"paths": {"results_csv_dir": str(results)}}
+    done = RunResult(ok=True, status="success", message="done")
+    with (
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(
+            runner, "compute_backfill_window", return_value=(FROM_DT, TO_DT, "gap")
+        ),
+        patch.object(runner, "upsert_schedule_state", return_value=False),
+        patch.object(runner, "write_today_success_marker"),
+        patch.object(runner, "_run_pipeline", return_value=done) as ran,
+        patch.object(runner, "append_run_history", side_effect=append),
+    ):
+        runner.run_scheduled(creds, ScheduleConfig(log_dir=str(tmp_path)))
+    assert seen == ["PipelineBusy"]
+    assert ran.call_args.kwargs == {"hold_lock": False}
+    with pipeline_lock(results, command="backfill"):
+        pass  # and it is released afterwards
+
+
+def test_the_claim_is_flushed_to_disk(tmp_path, monkeypatch) -> None:
+    from betfair_results_downloader.scheduler import state
+    from betfair_results_downloader.scheduler.retry import claim_attempt
+
+    synced: list[int] = []
+    monkeypatch.setattr(state.os, "fsync", lambda fd: synced.append(fd))
+    assert claim_attempt(_history(tmp_path, [FAILED])).run is True
+    assert len(synced) == 1
 
 
 def test_a_writable_history_with_a_pending_record_still_retries(tmp_path) -> None:

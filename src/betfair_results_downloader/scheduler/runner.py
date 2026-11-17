@@ -14,7 +14,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
@@ -54,6 +54,9 @@ class RunResult:
     # True when the pipeline did not start because another downloader
     # command held the lock.
     busy: bool = False
+    # True when a retry found, once it held the lock, that it was no longer
+    # due (another attempt had delivered) or could not claim its attempt.
+    superseded: bool = False
     # False when the attempt could not be written to run_history.jsonl.
     # The hourly retry reads only that file, so such an attempt is not
     # retried and the alert must not promise that it will be.
@@ -459,6 +462,7 @@ def _run_pipeline(
     *,
     command: str = "run",
     lock_wait_seconds: float = 0.0,
+    hold_lock: bool = True,
 ) -> RunResult:
     """
     Run the pipeline for one window: download, enrich, write the CSVs,
@@ -468,13 +472,17 @@ def _run_pipeline(
     Holds the pipeline lock throughout (see :mod:`..run_lock`), so a
     scheduled run and a manual command cannot overwrite each other's
     files. A lock still busy after ``lock_wait_seconds`` is a failed run
-    that touched nothing.
+    that touched nothing. ``hold_lock=False`` is for a caller that already
+    holds it (``run_scheduled``, which keeps it until the attempt is
+    recorded).
 
     Never raises: any unhandled exception is converted into a failed
     :class:`RunResult` so the caller always records the attempt in
     ``run_history.jsonl``.
     """
     try:
+        if not hold_lock:
+            return _run_pipeline_inner(creds, schedule_cfg, from_dt_utc, to_dt_utc)
         with pipeline_lock(
             _resolve_results_dir(creds),
             command=command,
@@ -809,18 +817,34 @@ def run_scheduled(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
     *,
-    stand_down_if_busy: bool = False,
+    claim: Optional[Callable[[], bool]] = None,
 ) -> RunResult:
     """
     One scheduled attempt: preflight, gap detection, the pipeline, then the
     checkpoint and the history record.
 
-    ``stand_down_if_busy`` is for the hourly retry. If another downloader
-    command holds the pipeline lock, that command is the attempt: the retry
-    does not wait for it, and returns a ``busy`` result without recording
-    anything, so an overlap (a scheduled run and a retry started together
-    after a wake) costs neither a second pipeline run nor a false failure.
+    The pipeline lock is held from before the pipeline starts until the
+    attempt has been written to the history. Releasing it earlier would
+    let another attempt take the lock and start while this one's result
+    was still unrecorded.
+
+    ``claim`` makes this a retry (see :mod:`.retry`):
+
+    - It does not wait for the lock. If another downloader command holds
+      it, that command is the attempt, and a ``busy`` result is returned
+      with nothing recorded.
+    - With the lock held it calls ``claim()``, which looks at the history
+      again and records that the retry has started. If that returns False
+      the retry is no longer due, or could not be counted, and a
+      ``superseded`` result is returned without running the pipeline.
+
+    So a scheduled run and a retry started together (launchd does that
+    after a wake) cost one pipeline run, not two, and no false failure.
     """
+    from .retry import KIND_RETRY, KIND_SCHEDULED  # noqa: PLC0415
+
+    is_retry = claim is not None
+    kind = KIND_RETRY if is_retry else KIND_SCHEDULED
     scheduler_now = get_scheduler_now(schedule_cfg)
     today_local = scheduler_now.today_local
     today_utc = scheduler_now.today_utc
@@ -841,6 +865,7 @@ def run_scheduled(
         result.history_recorded = append_run_history(
             str(log_dir),
             {
+                "kind": kind,
                 "retry_wanted": True,
                 "status": result.status,
                 "message": result.message,
@@ -856,89 +881,128 @@ def run_scheduled(
     from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
     logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
 
-    result = _run_pipeline(
-        creds,
-        schedule_cfg,
-        from_dt_utc,
-        to_dt_utc,
-        command="retry" if stand_down_if_busy else "run",
-        lock_wait_seconds=0.0 if stand_down_if_busy else SCHEDULED_LOCK_WAIT_SECONDS,
-    )
-    if stand_down_if_busy and result.busy:
-        logger.info("Another downloader command is running; the retry stands down.")
+    def record(result: RunResult) -> RunResult:
+        """Write the checkpoint, the markers and the history for ``result``."""
+        if disk_warning:
+            # Attached before state and history are written: the operational
+            # record must carry the same warning the operator is alerted with
+            # -- a later incident investigation reads run_history.jsonl, not
+            # Slack.
+            result.message = f"{result.message} {disk_warning}".strip()
+        result.from_dt_utc = from_dt_utc
+        result.to_dt_utc = to_dt_utc
+        result.from_date = from_dt_utc.date()
+        result.to_date = to_dt_utc.date()
+
+        run_finished = datetime.now(timezone.utc)
+
+        if result.ok and result.status == "success":
+            covered_utc, covered_local = derive_coverage_dates(
+                from_dt_utc, to_dt_utc, schedule_cfg.timezone
+            )
+            state_written = upsert_schedule_state(
+                creds,
+                last_covered_date_utc=covered_utc,
+                last_covered_date_local=covered_local,
+                last_covered_timezone=schedule_cfg.timezone,
+                status="success",
+                message=result.message,
+                run_started_utc=run_started,
+                run_finished_utc=run_finished,
+                last_confirmed_settled_at_utc=result.last_confirmed_settled_at_utc,
+                last_successful_download_started_utc=result.download_started_utc,
+                last_successful_download_finished_utc=result.download_finished_utc,
+            )
+            apply_azure_state_outcome(result, creds, state_written)
+            if result.status == "success":
+                # Only mark the day successful if it still is: a downgraded
+                # run exits 1, alerts, and is recorded as partial, so leaving
+                # a success marker behind would contradict every other signal.
+                write_today_success_marker(
+                    log_dir, today_local, marker_namespace="local"
+                )
+                write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
+
+        # Anything short of a clean success asks for a retry too: that covers
+        # a run downgraded to partial after the pipeline returned (the Azure
+        # checkpoint was not written).
+        result.retry_wanted = result.retry_wanted or not (
+            result.ok and result.status == "success"
+        )
+
+        result.history_recorded = append_run_history(
+            str(log_dir),
+            {
+                "kind": kind,
+                "retry_wanted": result.retry_wanted,
+                "status": result.status,
+                "from_date": str(result.from_date),
+                "to_date": str(result.to_date),
+                "from_dt_utc": from_dt_utc.isoformat(),
+                "to_dt_utc": to_dt_utc.isoformat(),
+                "rows_downloaded": result.rows_downloaded,
+                "rows_in_canonical": result.rows_in_canonical,
+                "azure_published": result.azure_published,
+                "gap_reason": gap_reason,
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": run_finished.isoformat(),
+                "schedule_timezone": schedule_cfg.timezone,
+                "today_local": today_local.isoformat(),
+                "today_utc": today_utc.isoformat(),
+                "last_confirmed_settled_at_utc": (
+                    result.last_confirmed_settled_at_utc.isoformat()
+                    if result.last_confirmed_settled_at_utc is not None
+                    else None
+                ),
+            },
+        )
         return result
-    if disk_warning:
-        # Attached before state and history are written: the operational
-        # record must carry the same warning the operator is alerted with --
-        # a later incident investigation reads run_history.jsonl, not Slack.
-        result.message = f"{result.message} {disk_warning}".strip()
-    result.from_dt_utc = from_dt_utc
-    result.to_dt_utc = to_dt_utc
-    result.from_date = from_dt_utc.date()
-    result.to_date = to_dt_utc.date()
 
-    run_finished = datetime.now(timezone.utc)
-
-    if result.ok and result.status == "success":
-        covered_utc, covered_local = derive_coverage_dates(
-            from_dt_utc, to_dt_utc, schedule_cfg.timezone
+    command = "retry" if is_retry else "run"
+    try:
+        results_dir = _resolve_results_dir(creds)
+    except Exception:
+        # A malformed paths section. There is no directory to lock; the
+        # pipeline reports the configuration error as a failed run, as it
+        # did before the lock existed.
+        return record(
+            _run_pipeline(creds, schedule_cfg, from_dt_utc, to_dt_utc, command=command)
         )
-        state_written = upsert_schedule_state(
-            creds,
-            last_covered_date_utc=covered_utc,
-            last_covered_date_local=covered_local,
-            last_covered_timezone=schedule_cfg.timezone,
-            status="success",
-            message=result.message,
-            run_started_utc=run_started,
-            run_finished_utc=run_finished,
-            last_confirmed_settled_at_utc=result.last_confirmed_settled_at_utc,
-            last_successful_download_started_utc=result.download_started_utc,
-            last_successful_download_finished_utc=result.download_finished_utc,
+
+    try:
+        with pipeline_lock(
+            results_dir,
+            command=command,
+            wait_seconds=0.0 if is_retry else SCHEDULED_LOCK_WAIT_SECONDS,
+        ):
+            if claim is not None and not claim():
+                logger.info("The retry is no longer due; standing down.")
+                return RunResult(
+                    ok=True,
+                    status="success",
+                    superseded=True,
+                    message="Retry stood down: no longer due.",
+                )
+            return record(
+                _run_pipeline(
+                    creds, schedule_cfg, from_dt_utc, to_dt_utc, hold_lock=False
+                )
+            )
+    except PipelineBusy as exc:
+        logger.error("%s", exc)
+        busy = RunResult(
+            ok=False,
+            status="failed",
+            message=str(exc),
+            retry_wanted=True,
+            busy=True,
         )
-        apply_azure_state_outcome(result, creds, state_written)
-        if result.status == "success":
-            # Only mark the day successful if it still is: a downgraded run
-            # exits 1, alerts, and is recorded as partial, so leaving a success
-            # marker behind would contradict every other signal.
-            write_today_success_marker(log_dir, today_local, marker_namespace="local")
-            write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
-
-    # Anything short of a clean success asks for a retry too: that covers a
-    # run downgraded to partial after the pipeline returned (the Azure
-    # checkpoint was not written).
-    result.retry_wanted = result.retry_wanted or not (
-        result.ok and result.status == "success"
-    )
-
-    result.history_recorded = append_run_history(
-        str(log_dir),
-        {
-            "retry_wanted": result.retry_wanted,
-            "status": result.status,
-            "from_date": str(result.from_date),
-            "to_date": str(result.to_date),
-            "from_dt_utc": from_dt_utc.isoformat(),
-            "to_dt_utc": to_dt_utc.isoformat(),
-            "rows_downloaded": result.rows_downloaded,
-            "rows_in_canonical": result.rows_in_canonical,
-            "azure_published": result.azure_published,
-            "gap_reason": gap_reason,
-            "message": result.message,
-            "run_started": run_started.isoformat(),
-            "run_finished": run_finished.isoformat(),
-            "schedule_timezone": schedule_cfg.timezone,
-            "today_local": today_local.isoformat(),
-            "today_utc": today_utc.isoformat(),
-            "last_confirmed_settled_at_utc": (
-                result.last_confirmed_settled_at_utc.isoformat()
-                if result.last_confirmed_settled_at_utc is not None
-                else None
-            ),
-        },
-    )
-
-    return result
+        if is_retry:
+            logger.info("Another downloader command is running; the retry stands down.")
+            return busy
+        # A scheduled run that never got the lock is a failed attempt.
+        return record(busy)
 
 
 def run_backfill(

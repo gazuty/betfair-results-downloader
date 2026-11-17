@@ -21,6 +21,7 @@ All public functions are designed to be called from ``runner.py`` and
 from __future__ import annotations
 
 import json
+import os
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -256,14 +257,18 @@ WHEN NOT MATCHED THEN
         return False
 
 
-def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> bool:
+def append_run_history(
+    log_dir: str | Path, run_record: dict[str, Any], *, durable: bool = False
+) -> bool:
     """
     Append one record to ``run_history.jsonl``; True when it was written.
 
     Never raises: the history must not be what fails a run. The result
     matters to the hourly retry, whose only state is this file: an attempt
     that could not be recorded will not be retried, and the caller must not
-    tell anyone that it will.
+    tell anyone that it will. ``durable`` flushes the line to disk before
+    returning, for the record a retry writes to claim its attempt: opening
+    a file for append can succeed on a full disk where writing a line fails.
     """
     if not log_dir:
         logger.debug("append_run_history: log_dir empty, skipping.")
@@ -278,6 +283,9 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> bool:
         jsonl_path = log_path / "run_history.jsonl"
         with jsonl_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, default=str) + "\n")
+            if durable:
+                fh.flush()
+                os.fsync(fh.fileno())
     except Exception as exc:
         logger.warning("Failed to append to run_history.jsonl: %s", exc)
         return False

@@ -280,8 +280,18 @@ def test_the_pipeline_holds_the_lock_while_it_runs_and_releases_it(tmp_path) -> 
 
 
 def test_the_scheduled_run_waits_and_a_backfill_does_not(tmp_path) -> None:
+    from contextlib import contextmanager
+
+    waits: list[tuple[str, float]] = []
+
+    @contextmanager
+    def recording_lock(_results_dir, *, command, wait_seconds=0.0, **_kw):
+        waits.append((command, wait_seconds))
+        yield
+
     done = runner.RunResult(ok=True, status="success", message="done")
     with (
+        patch.object(runner, "pipeline_lock", recording_lock),
         patch.object(runner, "_run_pipeline", return_value=done) as pipeline,
         patch.object(runner, "_preflight_disk", return_value=(True, None)),
         patch.object(
@@ -297,10 +307,11 @@ def test_the_scheduled_run_waits_and_a_backfill_does_not(tmp_path) -> None:
             _creds(tmp_path), ScheduleConfig(), date(2026, 11, 1), date(2026, 11, 2)
         )
         backfill = pipeline.call_args.kwargs
-    assert scheduled == {
-        "command": "run",
-        "lock_wait_seconds": runner.SCHEDULED_LOCK_WAIT_SECONDS,
-    }
+    # The scheduled run takes the lock itself, waiting, and keeps it until
+    # its result is recorded; the pipeline is told not to take it again.
+    assert waits == [("run", runner.SCHEDULED_LOCK_WAIT_SECONDS)]
+    assert scheduled == {"hold_lock": False}
+    # A backfill takes it inside the pipeline, without waiting.
     assert backfill == {"command": "backfill"}
 
 

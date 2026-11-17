@@ -17,8 +17,10 @@ count and re-arms the retries.
 The state is the run history itself: each scheduled or retry attempt
 records ``retry_wanted``, and the count is the number of trailing records
 that asked. There is no separate state file to fall out of step with it.
-The price is that the limit depends on that file being writable, so the
-retry job refuses to run while it is not (see :func:`decide_retry`).
+The price is that the limit depends on that file being writable. So a
+retry claims its attempt first, by writing a "started" record to disk
+under the pipeline lock, and does not run if that write fails (see
+:func:`claim_attempt`): every retry that runs has already been counted.
 """
 
 from __future__ import annotations
@@ -33,6 +35,12 @@ logger = logging.getLogger(__name__)
 MAX_FAILURES_IN_A_ROW = 6
 
 HISTORY_FILENAME = "run_history.jsonl"
+
+# How attempts are marked in the history: "kind" says who made the attempt,
+# and a retry's claim carries the "started" phase until its outcome follows.
+KIND_SCHEDULED = "scheduled"
+KIND_RETRY = "retry"
+PHASE_STARTED = "started"
 
 
 @dataclass(frozen=True)
@@ -75,7 +83,28 @@ def _attempts_newest_first(log_dir: str | Path) -> list[dict]:
         if "backfill" in (record.get("mode"), record.get("kind")):
             continue
         attempts.append(record)
-    return attempts
+    return _without_completed_claims(attempts)
+
+
+def _without_completed_claims(newest_first: list[dict]) -> list[dict]:
+    """
+    Drop each retry's "started" claim once its outcome has been recorded
+    after it, so one retry is one attempt. A claim with no outcome (the
+    retry crashed, or its final record could not be written) stays, and
+    counts as the failure it stands for.
+    """
+    kept: list[dict] = []
+    for record in newest_first:
+        is_claim = record.get("phase") == PHASE_STARTED
+        outcome_follows = (
+            bool(kept)
+            and kept[-1].get("kind") == KIND_RETRY
+            and kept[-1].get("phase") != PHASE_STARTED
+        )
+        if is_claim and outcome_follows:
+            continue
+        kept.append(record)
+    return kept
 
 
 def _asked_in_a_row(attempts: list[dict]) -> int:
@@ -110,34 +139,11 @@ def failures_before_latest(log_dir: str | Path) -> int:
     return _asked_in_a_row(_attempts_newest_first(log_dir)[1:])
 
 
-def history_writable(log_dir: str | Path) -> bool:
-    """True when an attempt made now could be recorded in the history."""
-    try:
-        Path(log_dir).mkdir(parents=True, exist_ok=True)
-        with (Path(log_dir) / HISTORY_FILENAME).open("a", encoding="utf-8"):
-            pass
-    except OSError:
-        return False
-    return True
-
-
 def decide_retry(log_dir: str | Path) -> RetryDecision:
     """Whether the hourly job should run the pipeline now, and why."""
     failures = failures_in_a_row(log_dir)
     if failures == 0:
         return RetryDecision(False, 0, "No retry pending: the last run delivered.")
-    if not history_writable(log_dir):
-        # The six-in-a-row limit is counted from the history. If attempts
-        # cannot be recorded the count never moves, and a pending record
-        # would have the pipeline run and alert every hour without end. A
-        # retry that cannot be counted is not made; scheduled runs go on.
-        return RetryDecision(
-            False,
-            failures,
-            f"Not retrying: {HISTORY_FILENAME} in {log_dir} cannot be written, so "
-            f"attempts cannot be counted against the limit of "
-            f"{MAX_FAILURES_IN_A_ROW}. The next attempt is the next scheduled run.",
-        )
     if failures >= MAX_FAILURES_IN_A_ROW:
         return RetryDecision(
             False,
@@ -150,3 +156,49 @@ def decide_retry(log_dir: str | Path) -> RetryDecision:
         failures,
         f"Retrying: the last {failures} attempt(s) did not deliver.",
     )
+
+
+def claim_attempt(log_dir: str | Path) -> RetryDecision:
+    """
+    Decide again, and if a retry is still due, record that it has started.
+
+    Called by the retry while it holds the pipeline lock, for two reasons.
+
+    - Another attempt may have delivered since the retry first looked: a
+      scheduled run started at the same moment (launchd starts both after a
+      wake) records its result before it releases the lock, so a retry that
+      then gets the lock sees it here and stands down.
+    - The six-in-a-row limit is counted from the history. The claim is a
+      real line flushed to disk, written before the pipeline runs. If it
+      cannot be written the retry does not run, so a full or read-only log
+      directory cannot leave a pending record driving the pipeline every
+      hour with the count never moving.
+
+    The claim itself counts as a failed attempt until the retry's outcome
+    is recorded after it.
+    """
+    from .state import append_run_history  # noqa: PLC0415
+
+    decision = decide_retry(log_dir)
+    if not decision.run:
+        return decision
+    claimed = append_run_history(
+        log_dir,
+        {
+            "kind": KIND_RETRY,
+            "phase": PHASE_STARTED,
+            "status": "started",
+            "retry_wanted": True,
+            "message": "Retry started.",
+        },
+        durable=True,
+    )
+    if not claimed:
+        return RetryDecision(
+            False,
+            decision.failures,
+            f"Not retrying: {HISTORY_FILENAME} in {log_dir} cannot be written, so "
+            f"this attempt could not be counted against the limit of "
+            f"{MAX_FAILURES_IN_A_ROW}. The next attempt is the next scheduled run.",
+        )
+    return decision

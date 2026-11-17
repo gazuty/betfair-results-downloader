@@ -271,7 +271,13 @@ def _run_and_announce(
     Exit codes: 0=success (or a retry that stood down), 1=failure.
     """
     from .error_text import brief_error
-    from .scheduler.retry import failures_before_latest, failures_in_a_row
+    from .scheduler.retry import (
+        KIND_RETRY,
+        KIND_SCHEDULED,
+        claim_attempt,
+        failures_before_latest,
+        failures_in_a_row,
+    )
     from .scheduler.runner import run_scheduled
     from .scheduler.state import append_run_history
 
@@ -283,8 +289,18 @@ def _run_and_announce(
         # the only failure known.
         return max(failures_in_a_row(log_dir), 1) if log_dir else 1
 
+    def claim() -> bool:
+        # Called by run_scheduled once it holds the pipeline lock.
+        decision = claim_attempt(log_dir)
+        if not decision.run:
+            print(decision.reason)
+        return decision.run
+
     try:
-        result = run_scheduled(creds, schedule_cfg, stand_down_if_busy=retry)
+        if retry and log_dir:
+            result = run_scheduled(creds, schedule_cfg, claim=claim)
+        else:
+            result = run_scheduled(creds, schedule_cfg)
     except Exception as exc:
         # Not everything reaches _run_pipeline's RunResult conversion: a
         # malformed optional section (a `paths` that is a string, say) passes
@@ -298,7 +314,13 @@ def _run_and_announce(
         # run_scheduled did not get as far as recording the attempt; without
         # a record the hourly retry would not know this one failed.
         recorded = bool(log_dir) and append_run_history(
-            log_dir, {"status": "failed", "message": msg, "retry_wanted": True}
+            log_dir,
+            {
+                "kind": KIND_RETRY if retry else KIND_SCHEDULED,
+                "status": "failed",
+                "message": msg,
+                "retry_wanted": True,
+            },
         )
         note = _retry_note(failures_now(), _retry_job_ready(), recorded)
         print(note)
@@ -313,6 +335,10 @@ def _run_and_announce(
         # Another command holds the lock and is the attempt. Nothing was
         # recorded and nothing failed, so there is nothing to announce.
         print("Another downloader command is running; this retry stands down.")
+        return 0
+    if retry and result.superseded:
+        # Another attempt delivered while this one waited to start, or the
+        # attempt could not be counted; claim() has printed which.
         return 0
 
     note = (
