@@ -160,6 +160,17 @@ class _FakeInstaller:
     def racecard_status(self):
         return {"installed": True, "loaded": True}
 
+    def install_retry(self, **kwargs):
+        self.calls.append("install_retry")
+        return {"ok": True, "message": "installed retry"}
+
+    def uninstall_retry(self):
+        self.calls.append("uninstall_retry")
+        return {"ok": True, "message": "uninstalled retry"}
+
+    def retry_status(self):
+        return {"installed": False, "loaded": False}
+
 
 def test_schedule_dispatches_the_racecard_actions(
     tmp_path, capsys, monkeypatch
@@ -186,3 +197,22 @@ def test_schedule_status_reports_the_racecard_job(
     )
     assert main(["schedule", "status"]) == 0
     assert "racecard job  : installed=True loaded=True" in capsys.readouterr().out
+
+
+def test_schedule_dispatches_the_retry_actions_and_reports_the_job(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    _use_creds(monkeypatch, tmp_path)
+    fake = _FakeInstaller()
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.installers.get_installer", lambda: fake
+    )
+    assert main(["schedule", "install-retry"]) == 0
+    assert main(["schedule", "uninstall-retry"]) == 0
+    assert fake.calls == ["install_retry", "uninstall_retry"]
+    capsys.readouterr()
+    assert main(["schedule", "status"]) == 0
+    assert (
+        "retry job     : installed=False loaded=False (run 'schedule install-retry')"
+        in capsys.readouterr().out
+    )

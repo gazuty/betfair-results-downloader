@@ -14,11 +14,12 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 
 from ..config import ScheduleConfig
+from ..error_text import brief_error
 from ..paths import resolve_results_dir
 from ..run_lock import PipelineBusy, pipeline_lock
 from .auth import build_api_client
@@ -45,6 +46,21 @@ class RunResult:
     last_confirmed_settled_at_utc: Optional[datetime] = None
     download_started_utc: Optional[datetime] = None
     download_finished_utc: Optional[datetime] = None
+    # True when the attempt did not deliver: it failed, or it succeeded
+    # without a fresh status check, commission read or results feed. The
+    # hourly retry job runs the pipeline again while the latest attempts
+    # say so (see scheduler.retry).
+    retry_wanted: bool = False
+    # True when the pipeline did not start because another downloader
+    # command held the lock.
+    busy: bool = False
+    # True when a retry found, once it held the lock, that it was no longer
+    # due (another attempt had delivered) or could not claim its attempt.
+    superseded: bool = False
+    # False when the attempt could not be written to run_history.jsonl.
+    # The hourly retry reads only that file, so such an attempt is not
+    # retried and the alert must not promise that it will be.
+    history_recorded: bool = True
 
 
 # Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
@@ -188,6 +204,17 @@ def _extract_max_settled_at_utc(df: pd.DataFrame) -> Optional[datetime]:
     return max_ts.astimezone(timezone.utc)
 
 
+def _log_step_failure(warning: str, exc: BaseException) -> None:
+    """
+    Log a failed step: the short warning that goes into the run message, and
+    the exception in full. The message reaches Slack and the run history, so
+    it carries :func:`~..error_text.brief_error`; the parameters and response
+    body a Betfair error drags along belong in the log only.
+    """
+    logger.warning(warning)
+    logger.warning("Full error for the warning above: %s: %s", type(exc).__name__, exc)
+
+
 def _refresh_market_status(
     client: Any,
     results_dir: Path,
@@ -235,10 +262,10 @@ def _refresh_market_status(
     except Exception as exc:
         warning = (
             f"⚠️ Market settlement status check failed "
-            f"({type(exc).__name__}: {exc}); the report will treat this "
+            f"({brief_error(exc)}); the report will treat this "
             f"window's markets as fully settled until the next run."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -305,11 +332,11 @@ def _refresh_market_commission(
         return None
     except Exception as exc:
         warning = (
-            f"⚠️ Commission read failed ({type(exc).__name__}: {exc}); the "
+            f"⚠️ Commission read failed ({brief_error(exc)}); the "
             f"report will show this window's markets as commission unknown "
             f"until a later run re-reads them."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -349,11 +376,11 @@ def _refresh_racecard(
         return None
     except Exception as exc:
         warning = (
-            f"⚠️ Racecard capture failed ({type(exc).__name__}: {exc}); racing "
+            f"⚠️ Racecard capture failed ({brief_error(exc)}); racing "
             f"markets that settle before the next capture are named from the "
             f"fallback, with country Unknown where the venue is ambiguous."
         )
-        logger.warning(warning)
+        _log_step_failure(warning, exc)
         return warning
 
 
@@ -362,9 +389,13 @@ def _publish_market_results(
     status_cb: Optional[Any] = None,
     *,
     status_failed: bool = False,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """
     Rebuild the results feed the dashboard reads (see market_results).
+
+    Returns ``(warnings, rebuilt)``. ``rebuilt`` is False when the feed on
+    disk is still the previous one, which is what makes the run ask for a
+    retry; a warning alone (a market stuck without commission) does not.
 
     Runs last, after the status and commission steps, so it sees this
     run's settlements and closes. Never raises: on failure the previous
@@ -382,7 +413,7 @@ def _publish_market_results(
             "failed; the dashboard keeps the previous feed until a run succeeds."
         )
         logger.warning(warning)
-        return [warning]
+        return [warning], False
     try:
         from ..market_results import (  # noqa: PLC0415
             build_market_results_from_disk,
@@ -398,14 +429,29 @@ def _publish_market_results(
         logger.info("%s Written to %s.", result.message, path)
         if status_cb:
             status_cb(result.message)
-        return list(result.warnings)
+        return list(result.warnings), True
     except Exception as exc:
         warning = (
-            f"⚠️ Results feed not rebuilt ({type(exc).__name__}: {exc}); the "
+            f"⚠️ Results feed not rebuilt ({brief_error(exc)}); the "
             f"dashboard keeps the previous feed until a run succeeds."
         )
-        logger.warning(warning)
-        return [warning]
+        _log_step_failure(warning, exc)
+        return [warning], False
+
+
+def _data_steps_incomplete(
+    status_warning: Optional[str],
+    commission_warning: Optional[str],
+    feed_rebuilt: bool,
+) -> bool:
+    """
+    True when a run that downloaded fine still left the dashboard without
+    fresh data: the settlement-status check or the commission read failed,
+    or the results feed was not rebuilt. Another attempt can fix each of
+    those. A racecard failure cannot be made good later (the hourly capture
+    is its retry), nor can a disk or backup warning, so they do not ask.
+    """
+    return bool(status_warning or commission_warning or not feed_rebuilt)
 
 
 def _run_pipeline(
@@ -416,6 +462,7 @@ def _run_pipeline(
     *,
     command: str = "run",
     lock_wait_seconds: float = 0.0,
+    hold_lock: bool = True,
 ) -> RunResult:
     """
     Run the pipeline for one window: download, enrich, write the CSVs,
@@ -425,13 +472,17 @@ def _run_pipeline(
     Holds the pipeline lock throughout (see :mod:`..run_lock`), so a
     scheduled run and a manual command cannot overwrite each other's
     files. A lock still busy after ``lock_wait_seconds`` is a failed run
-    that touched nothing.
+    that touched nothing. ``hold_lock=False`` is for a caller that already
+    holds it (``run_scheduled``, which keeps it until the attempt is
+    recorded).
 
     Never raises: any unhandled exception is converted into a failed
     :class:`RunResult` so the caller always records the attempt in
     ``run_history.jsonl``.
     """
     try:
+        if not hold_lock:
+            return _run_pipeline_inner(creds, schedule_cfg, from_dt_utc, to_dt_utc)
         with pipeline_lock(
             _resolve_results_dir(creds),
             command=command,
@@ -446,6 +497,8 @@ def _run_pipeline(
             from_dt_utc=from_dt_utc,
             to_dt_utc=to_dt_utc,
             message=str(exc),
+            retry_wanted=True,
+            busy=True,
         )
     except Exception as exc:
         logger.exception("Scheduled pipeline failed with an unhandled error.")
@@ -454,7 +507,9 @@ def _run_pipeline(
             status="failed",
             from_dt_utc=from_dt_utc,
             to_dt_utc=to_dt_utc,
-            message=f"Scheduled pipeline failed: {type(exc).__name__}: {exc}",
+            # logger.exception above has the full text and the traceback.
+            message=f"Scheduled pipeline failed: {brief_error(exc)}",
+            retry_wanted=True,
         )
 
 
@@ -474,14 +529,15 @@ def _run_pipeline_inner(
         try:
             client = build_api_client(betfair_creds)
         except Exception as exc:
-            msg = f"Betfair authentication failed: {exc}"
-            logger.error(msg)
+            msg = f"Betfair authentication failed: {brief_error(exc)}"
+            logger.error("Betfair authentication failed: %s", exc)
             return RunResult(
                 ok=False,
                 status="failed",
                 from_dt_utc=from_dt_utc,
                 to_dt_utc=to_dt_utc,
                 message=msg,
+                retry_wanted=True,
             )
 
         from ..downloader_core import fetch_cleared_orders_df_range  # noqa: PLC0415
@@ -524,7 +580,7 @@ def _run_pipeline_inner(
             racecard_warning = _refresh_racecard(client, results_dir)
             # A quiet run still rebuilds the feed: it is the run that sees an
             # outright close or a late commission land.
-            feed_warnings = _publish_market_results(
+            feed_warnings, feed_rebuilt = _publish_market_results(
                 results_dir, status_failed=status_warning is not None
             )
             empty_warnings = [
@@ -541,6 +597,9 @@ def _run_pipeline_inner(
                 download_started_utc=run_started,
                 download_finished_utc=datetime.now(timezone.utc),
                 message=f"Download returned no rows. {dl.message}{warn_suffix}",
+                retry_wanted=_data_steps_incomplete(
+                    status_warning, commission_warning, feed_rebuilt
+                ),
             )
 
         df_co = dl.df_co
@@ -623,7 +682,7 @@ def _run_pipeline_inner(
         )
 
         racecard_warning = _refresh_racecard(client, results_dir, _say)
-        feed_warnings = _publish_market_results(
+        feed_warnings, feed_rebuilt = _publish_market_results(
             results_dir, _say, status_failed=status_warning is not None
         )
 
@@ -689,6 +748,7 @@ def _run_pipeline_inner(
                 return RunResult(
                     ok=True,
                     status="partial",
+                    retry_wanted=True,
                     rows_downloaded=dl.rows_downloaded,
                     rows_in_canonical=csvr.rows_in_canonical,
                     azure_published=False,
@@ -699,7 +759,7 @@ def _run_pipeline_inner(
                     download_finished_utc=datetime.now(timezone.utc),
                     message=(
                         f"CSV written ({csvr.rows_in_canonical:,} rows canonical). "
-                        f"Azure publish failed: {exc}{warn_suffix}"
+                        f"Azure publish failed: {brief_error(exc)}{warn_suffix}"
                     ),
                 )
         else:
@@ -739,6 +799,9 @@ def _run_pipeline_inner(
             last_confirmed_settled_at_utc=max_settled_at_utc,
             download_started_utc=run_started,
             download_finished_utc=run_finished,
+            retry_wanted=_data_steps_incomplete(
+                status_warning, commission_warning, feed_rebuilt
+            ),
         )
 
     finally:
@@ -753,25 +816,59 @@ def _run_pipeline_inner(
 def run_scheduled(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
+    *,
+    claim: Optional[Callable[[], bool]] = None,
+    attempt_id: Optional[str] = None,
 ) -> RunResult:
+    """
+    One scheduled attempt: preflight, gap detection, the pipeline, then the
+    checkpoint and the history record.
+
+    ``attempt_id`` is written on every history record this attempt makes.
+    A retry passes the id its claim carries, which is how the claim and the
+    outcome are recognised as one attempt.
+
+    Everything from the disk preflight to the history record happens under
+    the pipeline lock. Two attempts can start together (launchd starts a
+    missed scheduled run and a retry at once after a wake), and each of
+    these would go wrong outside it:
+
+    - The window is computed from the checkpoint. Computed before waiting
+      for the lock, it would be the window the other attempt has just
+      downloaded; computed after, it starts where that attempt stopped.
+    - The history record must be written before the lock is released, or
+      the other attempt could start while this one's result was unknown.
+
+    ``claim`` makes this a retry (see :mod:`.retry`):
+
+    - It does not wait for the lock. If another downloader command holds
+      it, that command is the attempt, and a ``busy`` result is returned
+      with nothing recorded.
+    - With the lock held, and before anything else can record a failure,
+      it calls ``claim()``, which looks at the history again and records
+      that the retry has started. If that returns False the retry is no
+      longer due, or could not be counted, and a ``superseded`` result is
+      returned without running the pipeline.
+    """
+    from .retry import KIND_RETRY, KIND_SCHEDULED  # noqa: PLC0415
+
+    is_retry = claim is not None
+    kind = KIND_RETRY if is_retry else KIND_SCHEDULED
+    command = "retry" if is_retry else "run"
     scheduler_now = get_scheduler_now(schedule_cfg)
     today_local = scheduler_now.today_local
     today_utc = scheduler_now.today_utc
     log_dir = _resolve_log_dir(creds, schedule_cfg)
     run_started = scheduler_now.now_utc
 
-    # The resolved directory, not the raw config: an empty results_csv_dir
-    # falls back to the OneDrive default, which can sit on a different
-    # filesystem from the working directory.
-    disk_ok, disk_warning = _preflight_disk(creds)
-    if not disk_ok:
-        logger.error(disk_warning)
-        result = RunResult(ok=False, status="failed", message=disk_warning)
-        # The refusal is the new failure mode; it belongs in the operational
-        # record alongside every other scheduled failure.
-        append_run_history(
+    def record_refusal(result: RunResult) -> RunResult:
+        """Record an attempt that never reached the pipeline."""
+        result.history_recorded = append_run_history(
             str(log_dir),
             {
+                "kind": kind,
+                "attempt_id": attempt_id,
+                "retry_wanted": True,
                 "status": result.status,
                 "message": result.message,
                 "run_started": run_started.isoformat(),
@@ -782,82 +879,155 @@ def run_scheduled(
         )
         return result
 
-    logger.info("Computing incremental backfill window...")
-    from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(creds, schedule_cfg)
-    logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
+    def attempt(*, lock_held: bool) -> RunResult:
+        # The resolved directory, not the raw config: an empty
+        # results_csv_dir falls back to the OneDrive default, which can sit
+        # on a different filesystem from the working directory.
+        disk_ok, disk_warning = _preflight_disk(creds)
+        if not disk_ok:
+            logger.error(disk_warning)
+            # The refusal is a failure mode of its own; it belongs in the
+            # operational record alongside every other scheduled failure.
+            return record_refusal(
+                RunResult(
+                    ok=False, status="failed", message=disk_warning, retry_wanted=True
+                )
+            )
 
-    result = _run_pipeline(
-        creds,
-        schedule_cfg,
-        from_dt_utc,
-        to_dt_utc,
-        command="run",
-        lock_wait_seconds=SCHEDULED_LOCK_WAIT_SECONDS,
-    )
-    if disk_warning:
-        # Attached before state and history are written: the operational
-        # record must carry the same warning the operator is alerted with --
-        # a later incident investigation reads run_history.jsonl, not Slack.
-        result.message = f"{result.message} {disk_warning}".strip()
-    result.from_dt_utc = from_dt_utc
-    result.to_dt_utc = to_dt_utc
-    result.from_date = from_dt_utc.date()
-    result.to_date = to_dt_utc.date()
-
-    run_finished = datetime.now(timezone.utc)
-
-    if result.ok and result.status == "success":
-        covered_utc, covered_local = derive_coverage_dates(
-            from_dt_utc, to_dt_utc, schedule_cfg.timezone
+        logger.info("Computing incremental backfill window...")
+        from_dt_utc, to_dt_utc, gap_reason = compute_backfill_window(
+            creds, schedule_cfg
         )
-        state_written = upsert_schedule_state(
-            creds,
-            last_covered_date_utc=covered_utc,
-            last_covered_date_local=covered_local,
-            last_covered_timezone=schedule_cfg.timezone,
+        logger.info("Backfill window: %s → %s (%s)", from_dt_utc, to_dt_utc, gap_reason)
+
+        if lock_held:
+            result = _run_pipeline(
+                creds, schedule_cfg, from_dt_utc, to_dt_utc, hold_lock=False
+            )
+        else:
+            result = _run_pipeline(
+                creds, schedule_cfg, from_dt_utc, to_dt_utc, command=command
+            )
+
+        if disk_warning:
+            # Attached before state and history are written: the operational
+            # record must carry the same warning the operator is alerted with
+            # -- a later incident investigation reads run_history.jsonl, not
+            # Slack.
+            result.message = f"{result.message} {disk_warning}".strip()
+        result.from_dt_utc = from_dt_utc
+        result.to_dt_utc = to_dt_utc
+        result.from_date = from_dt_utc.date()
+        result.to_date = to_dt_utc.date()
+
+        run_finished = datetime.now(timezone.utc)
+
+        if result.ok and result.status == "success":
+            covered_utc, covered_local = derive_coverage_dates(
+                from_dt_utc, to_dt_utc, schedule_cfg.timezone
+            )
+            state_written = upsert_schedule_state(
+                creds,
+                last_covered_date_utc=covered_utc,
+                last_covered_date_local=covered_local,
+                last_covered_timezone=schedule_cfg.timezone,
+                status="success",
+                message=result.message,
+                run_started_utc=run_started,
+                run_finished_utc=run_finished,
+                last_confirmed_settled_at_utc=result.last_confirmed_settled_at_utc,
+                last_successful_download_started_utc=result.download_started_utc,
+                last_successful_download_finished_utc=result.download_finished_utc,
+            )
+            apply_azure_state_outcome(result, creds, state_written)
+            if result.status == "success":
+                # Only mark the day successful if it still is: a downgraded
+                # run exits 1, alerts, and is recorded as partial, so leaving
+                # a success marker behind would contradict every other signal.
+                write_today_success_marker(
+                    log_dir, today_local, marker_namespace="local"
+                )
+                write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
+
+        # Anything short of a clean success asks for a retry too: that covers
+        # a run downgraded to partial after the pipeline returned (the Azure
+        # checkpoint was not written).
+        result.retry_wanted = result.retry_wanted or not (
+            result.ok and result.status == "success"
+        )
+
+        result.history_recorded = append_run_history(
+            str(log_dir),
+            {
+                "kind": kind,
+                "attempt_id": attempt_id,
+                "retry_wanted": result.retry_wanted,
+                "status": result.status,
+                "from_date": str(result.from_date),
+                "to_date": str(result.to_date),
+                "from_dt_utc": from_dt_utc.isoformat(),
+                "to_dt_utc": to_dt_utc.isoformat(),
+                "rows_downloaded": result.rows_downloaded,
+                "rows_in_canonical": result.rows_in_canonical,
+                "azure_published": result.azure_published,
+                "gap_reason": gap_reason,
+                "message": result.message,
+                "run_started": run_started.isoformat(),
+                "run_finished": run_finished.isoformat(),
+                "schedule_timezone": schedule_cfg.timezone,
+                "today_local": today_local.isoformat(),
+                "today_utc": today_utc.isoformat(),
+                "last_confirmed_settled_at_utc": (
+                    result.last_confirmed_settled_at_utc.isoformat()
+                    if result.last_confirmed_settled_at_utc is not None
+                    else None
+                ),
+            },
+        )
+        return result
+
+    def stood_down() -> Optional[RunResult]:
+        """A ``superseded`` result when this is a retry that may not proceed."""
+        if claim is None or claim():
+            return None
+        logger.info("The retry is no longer due; standing down.")
+        return RunResult(
+            ok=True,
             status="success",
-            message=result.message,
-            run_started_utc=run_started,
-            run_finished_utc=run_finished,
-            last_confirmed_settled_at_utc=result.last_confirmed_settled_at_utc,
-            last_successful_download_started_utc=result.download_started_utc,
-            last_successful_download_finished_utc=result.download_finished_utc,
+            superseded=True,
+            message="Retry stood down: no longer due.",
         )
-        apply_azure_state_outcome(result, creds, state_written)
-        if result.status == "success":
-            # Only mark the day successful if it still is: a downgraded run
-            # exits 1, alerts, and is recorded as partial, so leaving a success
-            # marker behind would contradict every other signal.
-            write_today_success_marker(log_dir, today_local, marker_namespace="local")
-            write_today_success_marker(log_dir, today_utc, marker_namespace="utc")
 
-    append_run_history(
-        str(log_dir),
-        {
-            "status": result.status,
-            "from_date": str(result.from_date),
-            "to_date": str(result.to_date),
-            "from_dt_utc": from_dt_utc.isoformat(),
-            "to_dt_utc": to_dt_utc.isoformat(),
-            "rows_downloaded": result.rows_downloaded,
-            "rows_in_canonical": result.rows_in_canonical,
-            "azure_published": result.azure_published,
-            "gap_reason": gap_reason,
-            "message": result.message,
-            "run_started": run_started.isoformat(),
-            "run_finished": run_finished.isoformat(),
-            "schedule_timezone": schedule_cfg.timezone,
-            "today_local": today_local.isoformat(),
-            "today_utc": today_utc.isoformat(),
-            "last_confirmed_settled_at_utc": (
-                result.last_confirmed_settled_at_utc.isoformat()
-                if result.last_confirmed_settled_at_utc is not None
-                else None
-            ),
-        },
-    )
+    try:
+        results_dir = _resolve_results_dir(creds)
+    except Exception:
+        # A malformed paths section. There is no directory to lock; the
+        # pipeline reports the configuration error as a failed run, as it
+        # did before the lock existed. A retry still claims its attempt
+        # first: every retry that proceeds must already be counted.
+        return stood_down() or attempt(lock_held=False)
 
-    return result
+    try:
+        with pipeline_lock(
+            results_dir,
+            command=command,
+            wait_seconds=0.0 if is_retry else SCHEDULED_LOCK_WAIT_SECONDS,
+        ):
+            return stood_down() or attempt(lock_held=True)
+    except PipelineBusy as exc:
+        logger.error("%s", exc)
+        busy = RunResult(
+            ok=False,
+            status="failed",
+            message=str(exc),
+            retry_wanted=True,
+            busy=True,
+        )
+        if is_retry:
+            logger.info("Another downloader command is running; the retry stands down.")
+            return busy
+        # A scheduled run that never got the lock is a failed attempt.
+        return record_refusal(busy)
 
 
 def run_backfill(
@@ -895,6 +1065,7 @@ def run_backfill(
             {
                 "status": result.status,
                 "kind": "backfill",
+                "mode": "backfill",
                 "from_date": str(from_date),
                 "to_date": str(to_date),
                 "message": result.message,

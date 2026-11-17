@@ -345,6 +345,27 @@ Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
 
 Output: structured log lines to stdout (human-readable, one-per-event format).
 
+### `retry`
+
+**Status:** ✅ Implemented
+
+Runs the scheduled download again when the last attempt did not deliver, and does nothing otherwise. It backs an hourly job, so a failure at 19:00 is tried again at 20:00, 21:00 and so on, not left until the next scheduled run:
+
+```bash
+python -m betfair_results_downloader retry
+python -m betfair_results_downloader schedule install-retry   # on the hour, every hour without a scheduled run
+```
+
+- **What counts as not delivering:** the run failed or was partial, or it succeeded but the settlement-status check, the commission read or the results-feed rebuild failed. A racecard, disk or backup warning alone does not ask for a retry.
+- **When it stops:** after six failures in a row. Scheduled runs still happen, and the first success of any run re-arms the retries.
+- **Where the state lives:** each attempt records `retry_wanted` in `run_history.jsonl`; the count is the run of trailing records that asked. Manual backfills are ignored. A scheduled run that cannot even load its configuration records a failed attempt in the default `outputs/` (a custom `schedule.log_dir` is unknown at that point, so such an installation gets no retry for that one failure).
+- **Unwritable history:** the six-in-a-row limit is counted from `run_history.jsonl`. Before it runs the pipeline a retry writes a "started" record to that file and flushes it to disk; if that fails (a full or read-only log directory) the retry does not run. Scheduled runs continue, and their alert says when an attempt could not be recorded.
+- **Overlap:** after a wake launchd can start a scheduled run and a retry together. Each does everything under the pipeline lock, from the disk check and the download window to the history record. A retry does not wait for the lock: if another command holds it the retry stands down, and once it does hold the lock it checks the history again before anything else. A scheduled run that waited behind a retry works out its window afterwards, so it picks up where the retry stopped instead of downloading the same window twice.
+- **Hours:** the job stays out of every hour that has a scheduled run, read from the installed scheduler job as well as the configuration. Reinstall it (`schedule install-retry`) after changing the scheduled times.
+- **Alerts:** each failed attempt posts one short alert saying which failure in a row it is and whether another retry follows; a success after failures posts one "recovered" message. Most hours the command exits at once without logging in to Betfair and posts nothing.
+
+Exit codes: `0` = nothing to do, or success · `1` = failure · `2` = bad configuration (not posted to Slack: the scheduled run announces that).
+
 ### `backfill`
 
 **Status:** ✅ Implemented
@@ -480,6 +501,7 @@ python -m betfair_results_downloader schedule status
 python -m betfair_results_downloader schedule uninstall
 python -m betfair_results_downloader schedule logs [--tail N]
 python -m betfair_results_downloader schedule install-racecard     # hourly racecard job
+python -m betfair_results_downloader schedule install-retry        # hourly retry after a failed run
 # Either install replaces a copy that is already loaded, which stops a run in
 # progress: reinstall between the scheduled times.
 python -m betfair_results_downloader schedule uninstall-racecard
@@ -859,6 +881,8 @@ settlement-status files) live under `paths.results_csv_dir`, not in the repo.
 ### Downloads
 
 - **"… did not start: the pipeline lock … is held by pid N (command, started …)"** — another downloader command is writing the same results directory. `run`, `backfill`, `backfill-commission` and `export-market-results` take one lock between them (`<results_csv_dir>/.pipeline.lock`) so they cannot overwrite each other's files. Wait for the named command to finish and run yours again. `run` waits up to ten minutes before failing this way, whether launchd or a person started it, and the next scheduled run then covers the same window. The lock is released when its process exits, however it exits, so there is never a stale lock to delete.
+- **A Slack alert ends "(truncated; full text in the log)" or names only an error code** — alerts carry a short form of each error (the Betfair call and its error code). The request parameters and the full response are in `outputs/launchd.err.log` (or `outputs/retry.err.log` for a retry), on the line after the warning: "Full error for the warning above".
+- **"Failure N of 6 in a row; it will be retried on the hour"** — the run did not deliver and the hourly `retry` job will try again. After the sixth the alert says retries have stopped; the next scheduled run is then the next attempt, and one success re-arms them. If the alert says the retry job is not installed, run `schedule install-retry`.
 - **Credentials not found** — check that `secrets/credentials.json` (or the path in `credentials.location.json`) exists and contains valid JSON.
 - **"API returned 0 catalogues"** — expected for already-settled markets; enrichment falls back to the cache.
 - **Azure publish silently skipped** — verify all four safety gates are open (see [Azure SQL Publishing](#azure-sql-publishing)).

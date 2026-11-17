@@ -21,6 +21,7 @@ All public functions are designed to be called from ``runner.py`` and
 from __future__ import annotations
 
 import json
+import os
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -256,10 +257,35 @@ WHEN NOT MATCHED THEN
         return False
 
 
-def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
+def _ends_mid_line(path: Path) -> bool:
+    """True when ``path`` has content that does not end with a newline."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
+def append_run_history(
+    log_dir: str | Path, run_record: dict[str, Any], *, durable: bool = False
+) -> bool:
+    """
+    Append one record to ``run_history.jsonl``; True when it was written.
+
+    Never raises: the history must not be what fails a run. The result
+    matters to the hourly retry, whose only state is this file: an attempt
+    that could not be recorded will not be retried, and the caller must not
+    tell anyone that it will. ``durable`` flushes the line to disk before
+    returning, for the record a retry writes to claim its attempt: opening
+    a file for append can succeed on a full disk where writing a line fails.
+    """
     if not log_dir:
         logger.debug("append_run_history: log_dir empty, skipping.")
-        return
+        return False
 
     try:
         log_path = Path(log_dir)
@@ -268,10 +294,21 @@ def append_run_history(log_dir: str | Path, run_record: dict[str, Any]) -> None:
         if "ts" not in record:
             record["ts"] = datetime.now(timezone.utc).isoformat()
         jsonl_path = log_path / "run_history.jsonl"
+        line = json.dumps(record, default=str) + "\n"
+        if _ends_mid_line(jsonl_path):
+            # A crash or a failed write left the last record without its
+            # newline. Appended straight on, this record would become part
+            # of that fragment and be unreadable along with it.
+            line = "\n" + line
         with jsonl_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
+            fh.write(line)
+            if durable:
+                fh.flush()
+                os.fsync(fh.fileno())
     except Exception as exc:
         logger.warning("Failed to append to run_history.jsonl: %s", exc)
+        return False
+    return True
 
 
 def _marker_filename(marker_date: date, marker_namespace: str = "local") -> str:
