@@ -837,6 +837,31 @@ def test_a_retry_whose_outcome_could_not_be_written_is_still_counted_by_its_clai
     assert "could not be written" not in posted[0]
 
 
+def test_a_record_appended_after_a_torn_line_is_still_readable(tmp_path) -> None:
+    """
+    A crash mid-write leaves the last record cut off with no newline. The
+    next record must not be glued onto the fragment: a clean outcome that
+    could not be read would leave an older failure driving retries.
+    """
+    from betfair_results_downloader.scheduler.state import append_run_history
+
+    history = tmp_path / "run_history.jsonl"
+    history.write_text(json.dumps(FAILED) + "\n" + '{"status": "failed", "retry_wan')
+    assert failures_in_a_row(tmp_path) == 1
+    assert append_run_history(tmp_path, {"kind": "scheduled", **OK}) is True
+    lines = history.read_text().splitlines()
+    assert lines[1] == '{"status": "failed", "retry_wan'
+    assert json.loads(lines[2])["retry_wanted"] is False
+    assert failures_in_a_row(tmp_path) == 0
+
+    # A file that ends properly gets no blank line added.
+    append_run_history(tmp_path, {"kind": "scheduled", **FAILED})
+    assert "\n\n" not in history.read_text()
+    # And a new or empty history starts on its first line.
+    append_run_history(tmp_path / "fresh", OK)
+    assert not (tmp_path / "fresh" / "run_history.jsonl").read_text().startswith("\n")
+
+
 def test_dangling_claims_still_reach_the_limit(tmp_path) -> None:
     """Outcomes that never get written must not let retries run past six."""
     claim = {"kind": "retry", "phase": "started", "retry_wanted": True}

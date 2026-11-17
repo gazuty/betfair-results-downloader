@@ -257,6 +257,19 @@ WHEN NOT MATCHED THEN
         return False
 
 
+def _ends_mid_line(path: Path) -> bool:
+    """True when ``path`` has content that does not end with a newline."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            if fh.tell() == 0:
+                return False
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False
+
+
 def append_run_history(
     log_dir: str | Path, run_record: dict[str, Any], *, durable: bool = False
 ) -> bool:
@@ -281,8 +294,14 @@ def append_run_history(
         if "ts" not in record:
             record["ts"] = datetime.now(timezone.utc).isoformat()
         jsonl_path = log_path / "run_history.jsonl"
+        line = json.dumps(record, default=str) + "\n"
+        if _ends_mid_line(jsonl_path):
+            # A crash or a failed write left the last record without its
+            # newline. Appended straight on, this record would become part
+            # of that fragment and be unreadable along with it.
+            line = "\n" + line
         with jsonl_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
+            fh.write(line)
             if durable:
                 fh.flush()
                 os.fsync(fh.fileno())
