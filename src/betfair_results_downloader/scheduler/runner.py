@@ -979,13 +979,26 @@ def run_scheduled(
         )
         return result
 
+    def stood_down() -> Optional[RunResult]:
+        """A ``superseded`` result when this is a retry that may not proceed."""
+        if claim is None or claim():
+            return None
+        logger.info("The retry is no longer due; standing down.")
+        return RunResult(
+            ok=True,
+            status="success",
+            superseded=True,
+            message="Retry stood down: no longer due.",
+        )
+
     try:
         results_dir = _resolve_results_dir(creds)
     except Exception:
         # A malformed paths section. There is no directory to lock; the
         # pipeline reports the configuration error as a failed run, as it
-        # did before the lock existed.
-        return attempt(lock_held=False)
+        # did before the lock existed. A retry still claims its attempt
+        # first: every retry that proceeds must already be counted.
+        return stood_down() or attempt(lock_held=False)
 
     try:
         with pipeline_lock(
@@ -993,15 +1006,7 @@ def run_scheduled(
             command=command,
             wait_seconds=0.0 if is_retry else SCHEDULED_LOCK_WAIT_SECONDS,
         ):
-            if claim is not None and not claim():
-                logger.info("The retry is no longer due; standing down.")
-                return RunResult(
-                    ok=True,
-                    status="success",
-                    superseded=True,
-                    message="Retry stood down: no longer due.",
-                )
-            return attempt(lock_held=True)
+            return stood_down() or attempt(lock_held=True)
     except PipelineBusy as exc:
         logger.error("%s", exc)
         busy = RunResult(

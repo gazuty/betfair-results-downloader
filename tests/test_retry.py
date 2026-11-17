@@ -741,6 +741,53 @@ def test_five_failed_retries_after_a_failure_reach_the_limit(
     assert len(posted) == 5
 
 
+def test_a_retry_with_an_unresolvable_results_directory_still_claims_first(
+    posted, monkeypatch, tmp_path, capsys
+) -> None:
+    """
+    The results directory passes validation but cannot be resolved at run
+    time, so there is nothing to lock. The retry must still claim its
+    attempt: with a history that cannot be written it does not proceed,
+    and with one that can, the failed attempt is counted once.
+    """
+    _retry_job(monkeypatch, installed=True)
+    (tmp_path / "logs").mkdir()
+    log_dir = _history(tmp_path / "logs", [{"kind": "scheduled", **FAILED}])
+    monkeypatch.setattr(
+        cli,
+        "_load_creds_and_schedule",
+        lambda *a, **k: ({"paths": {}}, ScheduleConfig(log_dir=str(log_dir))),
+    )
+
+    def unresolvable(_creds):
+        raise RuntimeError("Could not determine home directory.")
+
+    failed = RunResult(
+        ok=False, status="failed", message="bad paths", retry_wanted=True
+    )
+    history = log_dir / "run_history.jsonl"
+    with (
+        patch.object(runner, "_resolve_results_dir", side_effect=unresolvable),
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(
+            runner, "compute_backfill_window", return_value=(FROM_DT, TO_DT, "g")
+        ),
+        patch.object(runner, "_run_pipeline", return_value=failed) as ran,
+    ):
+        history.chmod(0o444)
+        try:
+            assert main(["retry"]) == 0
+        finally:
+            history.chmod(0o644)
+        assert ran.call_count == 0 and posted == []
+        assert "could not be counted" in capsys.readouterr().out
+
+        assert main(["retry"]) == 1
+        assert ran.call_count == 1
+    assert [r.get("phase") for r in _records(log_dir)] == [None, "started", None]
+    assert failures_in_a_row(log_dir) == 2
+
+
 def test_a_scheduled_run_computes_its_window_after_it_has_the_lock(tmp_path) -> None:
     """
     A scheduled run that waited behind a retry must not download the window
