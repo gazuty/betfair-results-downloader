@@ -289,12 +289,17 @@ def _run_and_announce(
         # the only failure known.
         return max(failures_in_a_row(log_dir), 1) if log_dir else 1
 
+    import uuid
+
+    # Ties this attempt's records together in the history: a retry's claim
+    # and its outcome are one attempt, whatever is written between them.
+    attempt_id = uuid.uuid4().hex
     claimed = False
 
     def claim() -> bool:
         # Called by run_scheduled once it holds the pipeline lock.
         nonlocal claimed
-        decision = claim_attempt(log_dir)
+        decision = claim_attempt(log_dir, attempt_id)
         if not decision.run:
             print(decision.reason)
         claimed = decision.run
@@ -308,9 +313,11 @@ def _run_and_announce(
 
     try:
         if retry and log_dir:
-            result = run_scheduled(creds, schedule_cfg, claim=claim)
+            result = run_scheduled(
+                creds, schedule_cfg, claim=claim, attempt_id=attempt_id
+            )
         else:
-            result = run_scheduled(creds, schedule_cfg)
+            result = run_scheduled(creds, schedule_cfg, attempt_id=attempt_id)
     except Exception as exc:
         # Not everything reaches _run_pipeline's RunResult conversion: a
         # malformed optional section (a `paths` that is a string, say) passes
@@ -327,6 +334,7 @@ def _run_and_announce(
             log_dir,
             {
                 "kind": KIND_RETRY if retry else KIND_SCHEDULED,
+                "attempt_id": attempt_id,
                 "status": "failed",
                 "message": msg,
                 "retry_wanted": True,

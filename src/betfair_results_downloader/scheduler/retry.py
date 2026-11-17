@@ -88,25 +88,28 @@ def _attempts_newest_first(log_dir: str | Path) -> list[dict]:
 
 def _without_completed_claims(newest_first: list[dict]) -> list[dict]:
     """
-    Drop each retry's "started" claim once its outcome has been recorded
-    straight after it, so one retry is one attempt. A claim with no outcome
-    (the retry crashed, or its final record could not be written) stays,
-    and counts as the failure it stands for.
+    Drop each retry's "started" claim once its outcome is on record, so one
+    retry is one attempt. A claim with no outcome (the retry crashed, or
+    its final record could not be written) stays, and counts as the failure
+    it stands for.
 
-    Worked through in the order the records were written, so that one
-    outcome settles exactly one claim: a dangling claim followed by a later
-    retry's claim and outcome is still one failure of its own.
+    A claim and its outcome carry the same ``attempt_id``. They are paired
+    by that, not by position: another process can append a record between
+    the two (a scheduled run that failed to load its configuration writes
+    one without holding the pipeline lock).
     """
-    kept: list[dict] = []
-    for record in reversed(newest_first):
-        is_outcome = (
-            record.get("kind") == KIND_RETRY and record.get("phase") != PHASE_STARTED
+    settled = {
+        record.get("attempt_id")
+        for record in newest_first
+        if record.get("attempt_id") and record.get("phase") != PHASE_STARTED
+    }
+    return [
+        record
+        for record in newest_first
+        if not (
+            record.get("phase") == PHASE_STARTED and record.get("attempt_id") in settled
         )
-        if is_outcome and kept and kept[-1].get("phase") == PHASE_STARTED:
-            kept.pop()
-        kept.append(record)
-    kept.reverse()
-    return kept
+    ]
 
 
 def _asked_in_a_row(attempts: list[dict]) -> int:
@@ -160,7 +163,7 @@ def decide_retry(log_dir: str | Path) -> RetryDecision:
     )
 
 
-def claim_attempt(log_dir: str | Path) -> RetryDecision:
+def claim_attempt(log_dir: str | Path, attempt_id: str) -> RetryDecision:
     """
     Decide again, and if a retry is still due, record that it has started.
 
@@ -176,8 +179,8 @@ def claim_attempt(log_dir: str | Path) -> RetryDecision:
       directory cannot leave a pending record driving the pipeline every
       hour with the count never moving.
 
-    The claim itself counts as a failed attempt until the retry's outcome
-    is recorded after it.
+    The claim itself counts as a failed attempt until an outcome with the
+    same ``attempt_id`` is on record.
     """
     from .state import append_run_history  # noqa: PLC0415
 
@@ -189,6 +192,7 @@ def claim_attempt(log_dir: str | Path) -> RetryDecision:
         {
             "kind": KIND_RETRY,
             "phase": PHASE_STARTED,
+            "attempt_id": attempt_id,
             "status": "started",
             "retry_wanted": True,
             "message": "Retry started.",

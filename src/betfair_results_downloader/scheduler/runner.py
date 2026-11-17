@@ -818,10 +818,15 @@ def run_scheduled(
     schedule_cfg: ScheduleConfig,
     *,
     claim: Optional[Callable[[], bool]] = None,
+    attempt_id: Optional[str] = None,
 ) -> RunResult:
     """
     One scheduled attempt: preflight, gap detection, the pipeline, then the
     checkpoint and the history record.
+
+    ``attempt_id`` is written on every history record this attempt makes.
+    A retry passes the id its claim carries, which is how the claim and the
+    outcome are recognised as one attempt.
 
     Everything from the disk preflight to the history record happens under
     the pipeline lock. Two attempts can start together (launchd starts a
@@ -862,6 +867,7 @@ def run_scheduled(
             str(log_dir),
             {
                 "kind": kind,
+                "attempt_id": attempt_id,
                 "retry_wanted": True,
                 "status": result.status,
                 "message": result.message,
@@ -954,6 +960,7 @@ def run_scheduled(
             str(log_dir),
             {
                 "kind": kind,
+                "attempt_id": attempt_id,
                 "retry_wanted": result.retry_wanted,
                 "status": result.status,
                 "from_date": str(result.from_date),

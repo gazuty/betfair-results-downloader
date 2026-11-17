@@ -618,6 +618,9 @@ def test_a_retry_claims_its_attempt_before_the_pipeline_runs(
     records = _records(log_dir)
     assert [r.get("phase") for r in records[-2:]] == ["started", None]
     assert records[-2]["kind"] == records[-1]["kind"] == "retry"
+    # One id ties the claim to its outcome.
+    assert records[-2]["attempt_id"] == records[-1]["attempt_id"]
+    assert len(records[-1]["attempt_id"]) == 32
     assert records[-1]["retry_wanted"] is False
     # The claim and its outcome are one attempt, and it succeeded.
     assert failures_in_a_row(log_dir) == 0
@@ -679,50 +682,49 @@ def test_a_retry_stands_down_if_another_attempt_delivered_before_it_got_the_lock
     )
 
 
+def _claim(attempt: str) -> dict:
+    return {
+        "kind": "retry",
+        "phase": "started",
+        "attempt_id": attempt,
+        "retry_wanted": True,
+    }
+
+
+def _outcome(attempt: str, ok: bool = False) -> dict:
+    status = "success" if ok else "failed"
+    return {
+        "kind": "retry",
+        "attempt_id": attempt,
+        "status": status,
+        "retry_wanted": not ok,
+    }
+
+
+SCHEDULED_FAILURE = {"kind": "scheduled", "attempt_id": "s1", **FAILED}
+
+
 @pytest.mark.parametrize(
     "records,expected",
     [
         # A claim and its outcome are one attempt.
-        (
-            [
-                FAILED,
-                {"kind": "retry", "phase": "started", "retry_wanted": True},
-                {"kind": "retry", "status": "failed", "retry_wanted": True},
-            ],
-            2,
-        ),
+        ([FAILED, _claim("a"), _outcome("a")], 2),
         # A claim with no outcome (the retry crashed, or its final record
         # could not be written) is the failure it stands for.
-        ([FAILED, {"kind": "retry", "phase": "started", "retry_wanted": True}], 2),
+        ([FAILED, _claim("a")], 2),
         # A scheduled run recorded after a dangling claim is not its outcome.
-        (
-            [
-                FAILED,
-                {"kind": "retry", "phase": "started", "retry_wanted": True},
-                {"kind": "scheduled", "status": "failed", "retry_wanted": True},
-            ],
-            3,
-        ),
+        ([FAILED, _claim("a"), SCHEDULED_FAILURE], 3),
         # A successful retry ends the run of failures, claim and all.
-        (
-            [
-                FAILED,
-                {"kind": "retry", "phase": "started", "retry_wanted": True},
-                {"kind": "retry", "status": "success", "retry_wanted": False},
-            ],
-            0,
-        ),
+        ([FAILED, _claim("a"), _outcome("a", ok=True)], 0),
         # One outcome settles one claim: a dangling claim from an earlier
         # retry is still a failure of its own after a later retry fails.
-        (
-            [
-                FAILED,
-                {"kind": "retry", "phase": "started", "retry_wanted": True},
-                {"kind": "retry", "phase": "started", "retry_wanted": True},
-                {"kind": "retry", "status": "failed", "retry_wanted": True},
-            ],
-            3,
-        ),
+        ([FAILED, _claim("a"), _claim("b"), _outcome("b")], 3),
+        # Another process's record lands between a claim and its outcome
+        # (a scheduled run that could not load its configuration writes one
+        # without the lock). The retry is still one attempt, not two.
+        ([FAILED, _claim("a"), SCHEDULED_FAILURE, _outcome("a")], 3),
+        # ... and an unrelated record does not settle someone else's claim.
+        ([FAILED, _claim("a"), _outcome("zzz")], 3),
     ],
     ids=[
         "claim+failure",
@@ -730,6 +732,8 @@ def test_a_retry_stands_down_if_another_attempt_delivered_before_it_got_the_lock
         "claim-then-scheduled",
         "claim+success",
         "dangling-then-claim+failure",
+        "record-between-claim-and-outcome",
+        "outcome-of-another-attempt",
     ],
 )
 def test_a_claim_and_its_outcome_count_as_one_attempt(
@@ -864,8 +868,7 @@ def test_a_record_appended_after_a_torn_line_is_still_readable(tmp_path) -> None
 
 def test_dangling_claims_still_reach_the_limit(tmp_path) -> None:
     """Outcomes that never get written must not let retries run past six."""
-    claim = {"kind": "retry", "phase": "started", "retry_wanted": True}
-    history = [{"kind": "scheduled", **FAILED}] + [claim] * 5
+    history = [{"kind": "scheduled", **FAILED}] + [_claim(f"r{n}") for n in range(5)]
     assert failures_in_a_row(_history(tmp_path, history)) == 6
     assert decide_retry(tmp_path).run is False
 
@@ -1029,8 +1032,9 @@ def test_the_claim_is_flushed_to_disk(tmp_path, monkeypatch) -> None:
 
     synced: list[int] = []
     monkeypatch.setattr(state.os, "fsync", lambda fd: synced.append(fd))
-    assert claim_attempt(_history(tmp_path, [FAILED])).run is True
+    assert claim_attempt(_history(tmp_path, [FAILED]), "abc").run is True
     assert len(synced) == 1
+    assert _records(tmp_path)[-1]["attempt_id"] == "abc"
 
 
 def test_a_writable_history_with_a_pending_record_still_retries(tmp_path) -> None:
