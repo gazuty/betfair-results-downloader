@@ -24,6 +24,8 @@ _FULL_TEXT_NOTE = "full text in the log"
 
 _RE_ERROR_CODE = re.compile(r"'errorCode':\s*'([^']+)'")
 _RE_ERROR_MESSAGE = re.compile(r"'message':\s*'([^']+)'")
+# "Exception: <cause>" up to the end of its line; "None" when Betfair replied.
+_RE_CAUSE = re.compile(r"\nException:\s*(.*?)\s*(?:\n|$)")
 _RE_WHITESPACE = re.compile(r"\s+")
 
 
@@ -34,6 +36,8 @@ def brief_error(exc: BaseException, limit: int = DEFAULT_LIMIT) -> str:
     - A Betfair API error becomes the call and Betfair's error code:
       ``APIError: SportsAPING/v1.0/listMarketBook returned UNEXPECTED_ERROR
       (ANGX-0006)``.
+    - A Betfair call that got no answer becomes the call and its cause:
+      ``APIError: SportsAPING/v1.0/listClearedOrders failed: ReadTimeout``.
     - An ``InvalidResponse`` says the reply could not be used and how large
       it was, not what it contained.
     - Anything else keeps its own message on one line, cut at ``limit``
@@ -42,12 +46,25 @@ def brief_error(exc: BaseException, limit: int = DEFAULT_LIMIT) -> str:
     name = type(exc).__name__
     text = str(exc)
 
-    code = _RE_ERROR_CODE.search(text)
-    if code:
-        call = text.strip().splitlines()[0].strip() if text.strip() else "Betfair"
+    if "\nParams:" in text:
+        # betfairlightweight's APIError: the call on the first line, then the
+        # request parameters, the underlying exception and, when Betfair
+        # answered, its error body.
+        call = _cut(text.splitlines()[0].strip() or "Betfair call", limit)
+        code = _RE_ERROR_CODE.search(text)
         message = _RE_ERROR_MESSAGE.search(text)
-        detail = f" ({message.group(1)})" if message else ""
-        return f"{name}: {_cut(call, limit)} returned {code.group(1)}{detail}"
+        cause = _RE_CAUSE.search(text)
+        if code:
+            detail = f" ({_cut(message.group(1), 60)})" if message else ""
+            return f"{name}: {call} returned {_cut(code.group(1), 60)}{detail}"
+        if message:
+            # A JSON-RPC error with no APING error code (DSC-…).
+            return f"{name}: {call} returned {_cut(message.group(1), 60)}"
+        if cause and cause.group(1) != "None":
+            # No answer at all: a timeout or a dropped connection. The cause
+            # sits after the parameters, where a plain cut would lose it.
+            return f"{name}: {call} failed: {_cut(cause.group(1), limit)}"
+        return f"{name}: {call} failed"
 
     if name == "InvalidResponse" or text.lstrip().startswith("Invalid response"):
         return (

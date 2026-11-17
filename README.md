@@ -358,7 +358,9 @@ python -m betfair_results_downloader schedule install-retry   # on the hour, eve
 
 - **What counts as not delivering:** the run failed or was partial, or it succeeded but the settlement-status check, the commission read or the results-feed rebuild failed. A racecard, disk or backup warning alone does not ask for a retry.
 - **When it stops:** after six failures in a row. Scheduled runs still happen, and the first success of any run re-arms the retries.
-- **Where the state lives:** each attempt records `retry_wanted` in `run_history.jsonl`; the count is the run of trailing records that asked. Manual backfills are ignored.
+- **Where the state lives:** each attempt records `retry_wanted` in `run_history.jsonl`; the count is the run of trailing records that asked. Manual backfills are ignored. A scheduled run that cannot even load its configuration records a failed attempt in the default `outputs/` (a custom `schedule.log_dir` is unknown at that point, so such an installation gets no retry for that one failure).
+- **Overlap:** if another downloader command is running when a retry fires (after a wake launchd can start a scheduled run and a retry together), the retry stands down without waiting, recording or alerting: the other command is the attempt.
+- **Hours:** the job stays out of every hour that has a scheduled run, read from the installed scheduler job as well as the configuration. Reinstall it (`schedule install-retry`) after changing the scheduled times.
 - **Alerts:** each failed attempt posts one short alert saying which failure in a row it is and whether another retry follows; a success after failures posts one "recovered" message. Most hours the command exits at once without logging in to Betfair and posts nothing.
 
 Exit codes: `0` = nothing to do, or success · `1` = failure · `2` = bad configuration (not posted to Slack: the scheduled run announces that).

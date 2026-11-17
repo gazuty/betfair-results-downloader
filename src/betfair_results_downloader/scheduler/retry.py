@@ -40,42 +40,72 @@ class RetryDecision:
     reason: str
 
 
-def failures_in_a_row(log_dir: str | Path) -> int:
+def _attempts_newest_first(log_dir: str | Path) -> list[dict]:
     """
-    How many of the most recent scheduled or retry attempts asked for a
-    retry, counting back from the newest until one that did not.
+    Scheduled and retry attempts in the history, newest first.
 
-    Manual backfills are skipped: they neither repair a failed scheduled
-    run nor count against it. A record written before ``retry_wanted``
-    existed did not ask, so history from before this feature reads as a
-    clean slate. An unreadable history is no evidence of a failure: the
-    count is zero and the reason is logged.
+    Manual backfills are left out: they neither repair a failed scheduled
+    run nor count against it. So are lines that are not records (a torn
+    line from a crash mid-append). An unreadable history is no evidence of
+    a failure: it reads as empty and the reason is logged.
     """
     path = Path(log_dir) / HISTORY_FILENAME
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
-        return 0
+        return []
     except OSError as exc:
         logger.warning("Could not read %s (%s); no retry is pending.", path, exc)
-        return 0
+        return []
 
-    count = 0
+    attempts: list[dict] = []
     for line in reversed(lines):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except ValueError:
-            # A torn line from a crash mid-append: not an attempt.
             continue
-        if not isinstance(record, dict) or record.get("mode") == "backfill":
+        if not isinstance(record, dict):
             continue
-        if record.get("retry_wanted") is True:
-            count += 1
-        else:
+        # A backfill is marked "mode" when it ran and "kind" when it was
+        # refused for disk space; both are manual and both are ignored.
+        if "backfill" in (record.get("mode"), record.get("kind")):
+            continue
+        attempts.append(record)
+    return attempts
+
+
+def _asked_in_a_row(attempts: list[dict]) -> int:
+    count = 0
+    for record in attempts:
+        # A record written before retry_wanted existed did not ask, so
+        # history from before this feature reads as a clean slate.
+        if record.get("retry_wanted") is not True:
             break
+        count += 1
     return count
+
+
+def failures_in_a_row(log_dir: str | Path) -> int:
+    """
+    How many of the most recent scheduled or retry attempts asked for a
+    retry, counting back from the newest until one that did not.
+    """
+    return _asked_in_a_row(_attempts_newest_first(log_dir))
+
+
+def failures_before_latest(log_dir: str | Path) -> int:
+    """
+    The same count as it stood before the newest attempt was recorded.
+
+    A run reads this after it has recorded itself, to say how many failures
+    it recovered from. Reading the count before the run would be wrong when
+    two runs overlap (after a wake launchd can start a scheduled run and a
+    retry together): the second would announce a recovery the first had
+    already made.
+    """
+    return _asked_in_a_row(_attempts_newest_first(log_dir)[1:])
 
 
 def decide_retry(log_dir: str | Path) -> RetryDecision:

@@ -158,9 +158,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # The scheduled job is unattended: a failure that only reaches
     # launchd.err.log is a failure nobody sees. Announce every non-success
     # outcome, including a credentials load that exits before the run starts.
-    creds, schedule_cfg = _load_creds_for_report(
-        args, validate=True, context="scheduled run"
-    )
+    try:
+        creds, schedule_cfg = _load_creds_for_report(
+            args, validate=True, context="scheduled run"
+        )
+    except SystemExit:
+        # A run that never started is still a failed attempt, and the hourly
+        # retry only knows about attempts in the history. A credentials file
+        # on a cloud-synced disk can be unreadable at 06:00 and fine an hour
+        # later. Without the configuration the log directory is unknown, so
+        # the record goes to the default one; an installation with a custom
+        # schedule.log_dir gets no retry for this failure.
+        from .scheduler.runner import _resolve_repo_root
+        from .scheduler.state import append_run_history
+
+        append_run_history(
+            str(_resolve_repo_root() / "outputs"),
+            {
+                "status": "failed",
+                "message": "Scheduled run could not load its configuration.",
+                "retry_wanted": True,
+            },
+        )
+        raise
 
     return _run_and_announce(args, creds, schedule_cfg)
 
@@ -177,33 +197,34 @@ def _alert_text(text: str) -> str:
     return text[:_ALERT_MAX_CHARS].rstrip() + " … (truncated; full text in the log)"
 
 
-def _retry_context(creds: dict, schedule_cfg) -> tuple[str | None, int, bool]:
-    """
-    ``(log_dir, failures in a row so far, hourly retry job installed)``.
-
-    Only used to word the alert, so nothing here may stop a run: when the
-    history cannot be located the count is zero and the reason is printed.
-    """
-    try:
-        from .scheduler.retry import failures_in_a_row
-        from .scheduler.runner import _resolve_log_dir
-
-        log_dir = str(_resolve_log_dir(creds, schedule_cfg))
-        failures = failures_in_a_row(log_dir)
-    except Exception as exc:
-        print(f"WARN: could not read the run history for retries ({exc}).")
-        return None, 0, False
+def _retry_job_ready() -> bool:
+    """True when the hourly retry job is installed and loaded in launchd."""
     try:
         from .scheduler.installers import get_installer
 
-        installed = bool(get_installer().retry_status()["installed"])
+        status = get_installer().retry_status()
     except Exception:
         # No installer on this platform, or launchctl unavailable.
-        installed = False
-    return log_dir, failures, installed
+        return False
+    return bool(status.get("installed") and status.get("loaded"))
 
 
-def _retry_note(failures: int, retry_job_installed: bool) -> str:
+def _log_dir_for_retries(creds: dict, schedule_cfg) -> str | None:
+    """
+    Where the run history lives, for wording the alert. Nothing here may
+    stop a run: when it cannot be resolved the reason is printed and the
+    alert goes out without a failure count.
+    """
+    try:
+        from .scheduler.runner import _resolve_log_dir
+
+        return str(_resolve_log_dir(creds, schedule_cfg))
+    except Exception as exc:
+        print(f"WARN: could not locate the run history for retries ({exc}).")
+        return None
+
+
+def _retry_note(failures: int, retry_job_ready: bool) -> str:
     """What happens next after a run that asked for a retry."""
     from .scheduler.retry import MAX_FAILURES_IN_A_ROW
 
@@ -212,11 +233,11 @@ def _retry_note(failures: int, retry_job_installed: bool) -> str:
             f"That is {failures} failures in a row: hourly retries have stopped. "
             f"The next attempt is the next scheduled run."
         )
-    if not retry_job_installed:
+    if not retry_job_ready:
         return (
             f"Failure {failures} of {MAX_FAILURES_IN_A_ROW} in a row. The hourly "
-            f"retry job is not installed (schedule install-retry), so the next "
-            f"attempt is the next scheduled run."
+            f"retry job is not installed and loaded (schedule install-retry), so "
+            f"the next attempt is the next scheduled run."
         )
     return (
         f"Failure {failures} of {MAX_FAILURES_IN_A_ROW} in a row; it will be "
@@ -224,7 +245,9 @@ def _retry_note(failures: int, retry_job_installed: bool) -> str:
     )
 
 
-def _run_and_announce(args: argparse.Namespace, creds: dict, schedule_cfg) -> int:
+def _run_and_announce(
+    args: argparse.Namespace, creds: dict, schedule_cfg, *, retry: bool = False
+) -> int:
     """
     Run the scheduled pipeline once and announce the outcome; shared by
     ``run`` and ``retry``.
@@ -233,17 +256,27 @@ def _run_and_announce(args: argparse.Namespace, creds: dict, schedule_cfg) -> in
     whether and when it will be retried. A success that follows failures
     is announced once, so the last word in the channel is not a failure.
 
-    Exit codes: 0=success, 1=failure.
+    The failure counts are read from the history after this attempt has
+    recorded itself, never before: two attempts can overlap, and each must
+    count what the other has already written.
+
+    Exit codes: 0=success (or a retry that stood down), 1=failure.
     """
     from .error_text import brief_error
+    from .scheduler.retry import failures_before_latest, failures_in_a_row
     from .scheduler.runner import run_scheduled
     from .scheduler.state import append_run_history
 
     post = getattr(args, "post_slack", True)
-    log_dir, failures_before, retry_job_installed = _retry_context(creds, schedule_cfg)
+    log_dir = _log_dir_for_retries(creds, schedule_cfg)
+
+    def failures_now() -> int:
+        # Including this attempt. With no history to read, this attempt is
+        # the only failure known.
+        return max(failures_in_a_row(log_dir), 1) if log_dir else 1
 
     try:
-        result = run_scheduled(creds, schedule_cfg)
+        result = run_scheduled(creds, schedule_cfg, stand_down_if_busy=retry)
     except Exception as exc:
         # Not everything reaches _run_pipeline's RunResult conversion: a
         # malformed optional section (a `paths` that is a string, say) passes
@@ -260,7 +293,7 @@ def _run_and_announce(args: argparse.Namespace, creds: dict, schedule_cfg) -> in
             append_run_history(
                 log_dir, {"status": "failed", "message": msg, "retry_wanted": True}
             )
-        note = _retry_note(failures_before + 1, retry_job_installed)
+        note = _retry_note(failures_now(), _retry_job_ready())
         print(note)
         if post:
             _post_to_slack(
@@ -269,32 +302,44 @@ def _run_and_announce(args: argparse.Namespace, creds: dict, schedule_cfg) -> in
             )
         return 1
 
+    if retry and result.busy:
+        # Another command holds the lock and is the attempt. Nothing was
+        # recorded and nothing failed, so there is nothing to announce.
+        print("Another downloader command is running; this retry stands down.")
+        return 0
+
     note = (
-        _retry_note(failures_before + 1, retry_job_installed)
-        if result.retry_wanted
-        else ""
+        _retry_note(failures_now(), _retry_job_ready()) if result.retry_wanted else ""
+    )
+    recovered_from = (
+        failures_before_latest(log_dir) if log_dir and not result.retry_wanted else 0
+    )
+    recovered = (
+        f"Recovered after {recovered_from} failed attempt(s)." if recovered_from else ""
     )
 
     if result.ok and result.status == "success":
         print(f"OK ({result.status}): {result.message}")
-        if note:
-            print(note)
+        for line in (note, recovered):
+            if line:
+                print(line)
         # A success can still carry a warning. It must reach Slack from
         # here: a low disk gave this pipeline both of its incidents, and a
-        # warning that only lands in scheduler stdout is not a warning.
-        if "⚠️" in result.message and post:
-            body = f"{result.message}\n{note}" if note else result.message
+        # warning that only lands in scheduler stdout is not a warning. A
+        # run that asks for a retry is announced even if it carries none.
+        if ("⚠️" in result.message or result.retry_wanted) and post:
+            body = "\n".join(line for line in (result.message, note, recovered) if line)
             _post_to_slack(
                 _alert_text(
                     f":warning: Betfair scheduled run succeeded with a warning\n{body}"
                 ),
                 creds,
             )
-        elif failures_before and not result.retry_wanted and post:
+        elif recovered_from and post:
             _post_to_slack(
                 _alert_text(
                     f":white_check_mark: Betfair scheduled run recovered after "
-                    f"{failures_before} failed attempt(s)\n{result.message}"
+                    f"{recovered_from} failed attempt(s)\n{result.message}"
                 ),
                 creds,
             )
@@ -355,7 +400,7 @@ def _cmd_retry(args: argparse.Namespace) -> int:
     print(decision.reason)
     if not decision.run:
         return 0
-    return _run_and_announce(args, creds, schedule_cfg)
+    return _run_and_announce(args, creds, schedule_cfg, retry=True)
 
 
 def _cmd_backfill(args: argparse.Namespace) -> int:

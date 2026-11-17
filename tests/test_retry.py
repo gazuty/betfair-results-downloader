@@ -66,6 +66,9 @@ def _history(tmp_path: Path, records: list) -> Path:
         ([FAILED, "{not json", "", FAILED], 2),
         # Only an explicit true counts.
         ([{"status": "failed", "retry_wanted": "yes"}], 0),
+        # A backfill refused for disk space is marked "kind", with no
+        # retry_wanted: it must be ignored too, not read as a success.
+        ([FAILED, {"status": "failed", "kind": "backfill"}], 1),
     ],
 )
 def test_failures_are_counted_back_from_the_newest_attempt(
@@ -299,14 +302,28 @@ def creds_ok(monkeypatch, tmp_path) -> Path:
         "_load_creds_and_schedule",
         lambda *a, **k: (creds, ScheduleConfig(log_dir=str(tmp_path))),
     )
+    monkeypatch.setattr(sys.modules[__name__], "_LOG_DIR", tmp_path)
     return tmp_path
 
 
+# Where the stand-in for run_scheduled records its attempt; set by creds_ok.
+_LOG_DIR: Path | None = None
+
+
 def _result(monkeypatch, result: RunResult) -> list[int]:
+    """
+    Stand in for run_scheduled. Like the real one it records the attempt in
+    the history, because the alerts are worded from the history as it
+    stands after the run.
+    """
     calls: list[int] = []
 
     def fake(*_a, **_k):
         calls.append(1)
+        if _LOG_DIR is not None:
+            with (_LOG_DIR / "run_history.jsonl").open("a") as fh:
+                record = {"status": result.status, "retry_wanted": result.retry_wanted}
+                fh.write(json.dumps(record) + "\n")
         return result
 
     monkeypatch.setattr(
@@ -315,10 +332,10 @@ def _result(monkeypatch, result: RunResult) -> list[int]:
     return calls
 
 
-def _retry_job(monkeypatch, installed: bool) -> None:
+def _retry_job(monkeypatch, installed: bool, loaded: bool = True) -> None:
     class _Installer:
         def retry_status(self):
-            return {"installed": installed, "loaded": installed}
+            return {"installed": installed, "loaded": loaded and installed}
 
     monkeypatch.setattr(
         "betfair_results_downloader.scheduler.installers.get_installer",
@@ -359,7 +376,7 @@ def test_without_the_retry_job_the_alert_does_not_promise_a_retry(
         RunResult(ok=False, status="failed", message="auth", retry_wanted=True),
     )
     assert main(["run"]) == 1
-    assert "retry job is not installed (schedule install-retry)" in posted[0]
+    assert "retry job is not installed and loaded (schedule install-retry)" in posted[0]
     assert "retried on the hour" not in posted[0]
 
 
@@ -491,9 +508,126 @@ def test_retry_with_unloadable_credentials_exits_2_without_posting(
     assert stopped.value.code == 2 and posted == []
 
 
+def test_a_plist_that_is_installed_but_not_loaded_promises_no_retry(
+    posted, creds_ok, monkeypatch
+) -> None:
+    _retry_job(monkeypatch, installed=True, loaded=False)
+    _result(monkeypatch, STALE)
+    main(["run"])
+    assert "not installed and loaded" in posted[0] and "on the hour" not in posted[0]
+
+
+def test_a_recovery_that_carries_a_warning_still_says_it_recovered(
+    posted, creds_ok, monkeypatch
+) -> None:
+    # The recovering run has a warning a retry cannot fix (a low disk).
+    _retry_job(monkeypatch, installed=True)
+    _history(creds_ok, [FAILED, FAILED])
+    warned = RunResult(
+        ok=True, status="success", message="Run complete. ⚠️ Disk low: 8.0 GB free."
+    )
+    _result(monkeypatch, warned)
+    assert main(["retry"]) == 0
+    assert len(posted) == 1 and "succeeded with a warning" in posted[0]
+    assert posted[0].endswith("Recovered after 2 failed attempt(s).")
+
+
+def test_two_overlapping_attempts_announce_one_recovery(
+    posted, creds_ok, monkeypatch
+) -> None:
+    """
+    After a wake launchd can start the scheduled run and a retry together.
+    Both start while the history says two failures; the first to finish
+    records its success, and the second must count that, not what it saw
+    when it started.
+    """
+    _retry_job(monkeypatch, installed=True)
+    _history(creds_ok, [FAILED, FAILED])
+    calls: list[int] = []
+
+    def second_attempt(*_a, **_k):
+        calls.append(1)
+        with (creds_ok / "run_history.jsonl").open("a") as fh:
+            fh.write(json.dumps(OK) + "\n")  # the other attempt, finishing first
+            fh.write(json.dumps(OK) + "\n")  # this one
+        return CLEAN
+
+    monkeypatch.setattr(
+        "betfair_results_downloader.scheduler.runner.run_scheduled", second_attempt
+    )
+    assert main(["run"]) == 0
+    assert calls == [1] and posted == [], "the first attempt already announced it"
+
+
+def test_a_retry_stands_down_while_another_command_holds_the_lock(
+    posted, creds_ok, monkeypatch, capsys
+) -> None:
+    """Real run_scheduled, real lock: no pipeline, no record, no alert."""
+    _history(creds_ok, [FAILED])
+    creds = {"paths": {"results_csv_dir": str(creds_ok)}}
+    monkeypatch.setattr(
+        cli,
+        "_load_creds_and_schedule",
+        lambda *a, **k: (creds, ScheduleConfig(log_dir=str(creds_ok))),
+    )
+    with (
+        pipeline_lock(creds_ok, command="run"),
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(
+            runner, "compute_backfill_window", return_value=(FROM_DT, TO_DT, "gap")
+        ),
+        patch.object(runner, "build_api_client") as login,
+        patch.object(runner, "upsert_schedule_state") as state,
+    ):
+        assert main(["retry"]) == 0
+    login.assert_not_called()
+    state.assert_not_called()
+    assert posted == []
+    assert failures_in_a_row(creds_ok) == 1, "standing down is not a failure"
+    assert "stands down" in capsys.readouterr().out
+
+
+def test_a_scheduled_run_that_never_gets_the_lock_is_a_failure(creds_ok) -> None:
+    """Only the retry stands down."""
+    creds = {"paths": {"results_csv_dir": str(creds_ok)}}
+    with (
+        pipeline_lock(creds_ok, command="backfill"),
+        patch.object(runner, "SCHEDULED_LOCK_WAIT_SECONDS", 0.0),
+        patch.object(runner, "_preflight_disk", return_value=(True, None)),
+        patch.object(
+            runner, "compute_backfill_window", return_value=(FROM_DT, TO_DT, "gap")
+        ),
+    ):
+        result = runner.run_scheduled(creds, ScheduleConfig(log_dir=str(creds_ok)))
+    assert (result.ok, result.busy, result.retry_wanted) == (False, True, True)
+    assert failures_in_a_row(creds_ok) == 1
+
+
+def test_a_run_that_cannot_load_its_configuration_is_recorded_for_the_retry(
+    posted, monkeypatch, tmp_path
+) -> None:
+    def refuse(*_a, **_k):
+        print("FAIL: could not parse credentials.json: OSError: [Errno 11]")
+        raise SystemExit(2)
+
+    monkeypatch.setattr(cli, "_load_creds_and_schedule", refuse)
+    monkeypatch.setattr(runner, "_resolve_repo_root", lambda: tmp_path)
+    with pytest.raises(SystemExit):
+        main(["run"])
+    assert len(posted) == 1 and "could not parse credentials.json" in posted[0]
+    assert failures_in_a_row(tmp_path / "outputs") == 1
+    assert decide_retry(tmp_path / "outputs").run is True
+
+
 # -----------------------------
 # The launchd job
 # -----------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_scheduler_plist(monkeypatch, tmp_path):
+    """The retry hours also read the installed scheduler plist; not this Mac's."""
+    monkeypatch.setattr(launchd, "PLIST_PATH", tmp_path / "absent-scheduler.plist")
 
 
 def _cfg() -> ScheduleConfig:
@@ -521,6 +655,21 @@ def test_an_hour_with_a_scheduled_run_at_any_minute_is_left_to_that_run(
     plist = launchd.build_retry_plist(cfg, tmp_path, Path(sys.executable), tmp_path)
     assert 6 not in [entry["Hour"] for entry in plist["StartCalendarInterval"]]
     assert len(plist["StartCalendarInterval"]) == 23
+
+
+def test_the_retry_hours_follow_the_installed_schedule_not_only_the_config(
+    tmp_path, monkeypatch
+) -> None:
+    # `schedule install --time 07:30` installed a time credentials.json does
+    # not hold: the retry must stay out of that hour as well.
+    installed = tmp_path / "scheduler.plist"
+    installed.write_bytes(
+        plistlib.dumps({"StartCalendarInterval": [{"Hour": 7, "Minute": 30}]})
+    )
+    monkeypatch.setattr(launchd, "PLIST_PATH", installed)
+    plist = launchd.build_retry_plist(_cfg(), tmp_path, Path(sys.executable), tmp_path)
+    hours = [entry["Hour"] for entry in plist["StartCalendarInterval"]]
+    assert hours == [h for h in range(24) if h not in (6, 7, 9, 19, 23)]
 
 
 def test_install_retry_writes_the_plist_and_replaces_a_loaded_copy(

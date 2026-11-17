@@ -51,6 +51,9 @@ class RunResult:
     # hourly retry job runs the pipeline again while the latest attempts
     # say so (see scheduler.retry).
     retry_wanted: bool = False
+    # True when the pipeline did not start because another downloader
+    # command held the lock.
+    busy: bool = False
 
 
 # Disk thresholds for the preflight. The pipeline rewrites a ~270MB canonical
@@ -483,6 +486,7 @@ def _run_pipeline(
             to_dt_utc=to_dt_utc,
             message=str(exc),
             retry_wanted=True,
+            busy=True,
         )
     except Exception as exc:
         logger.exception("Scheduled pipeline failed with an unhandled error.")
@@ -800,7 +804,19 @@ def _run_pipeline_inner(
 def run_scheduled(
     creds: dict[str, Any],
     schedule_cfg: ScheduleConfig,
+    *,
+    stand_down_if_busy: bool = False,
 ) -> RunResult:
+    """
+    One scheduled attempt: preflight, gap detection, the pipeline, then the
+    checkpoint and the history record.
+
+    ``stand_down_if_busy`` is for the hourly retry. If another downloader
+    command holds the pipeline lock, that command is the attempt: the retry
+    does not wait for it, and returns a ``busy`` result without recording
+    anything, so an overlap (a scheduled run and a retry started together
+    after a wake) costs neither a second pipeline run nor a false failure.
+    """
     scheduler_now = get_scheduler_now(schedule_cfg)
     today_local = scheduler_now.today_local
     today_utc = scheduler_now.today_utc
@@ -841,9 +857,12 @@ def run_scheduled(
         schedule_cfg,
         from_dt_utc,
         to_dt_utc,
-        command="run",
-        lock_wait_seconds=SCHEDULED_LOCK_WAIT_SECONDS,
+        command="retry" if stand_down_if_busy else "run",
+        lock_wait_seconds=0.0 if stand_down_if_busy else SCHEDULED_LOCK_WAIT_SECONDS,
     )
+    if stand_down_if_busy and result.busy:
+        logger.info("Another downloader command is running; the retry stands down.")
+        return result
     if disk_warning:
         # Attached before state and history are written: the operational
         # record must carry the same warning the operator is alerted with --
@@ -953,6 +972,7 @@ def run_backfill(
             {
                 "status": result.status,
                 "kind": "backfill",
+                "mode": "backfill",
                 "from_date": str(from_date),
                 "to_date": str(to_date),
                 "message": result.message,

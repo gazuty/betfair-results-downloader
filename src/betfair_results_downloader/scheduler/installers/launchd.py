@@ -147,7 +147,18 @@ def build_racecard_plist(
 
 
 def _scheduled_hours(schedule_cfg: ScheduleConfig) -> set[int]:
-    return {entry["Hour"] for entry in _build_calendar_intervals(schedule_cfg)}
+    """
+    The hours that have a scheduled run, which the retry job leaves alone.
+
+    Read from the installed scheduler plist when there is one, because
+    `schedule install --time/--retries` can install times the credentials
+    file does not hold, and it is the installed job the retry must not
+    collide with. The configured times are added, so a retry never fires
+    in an hour either source claims.
+    """
+    hours = {entry["Hour"] for entry in _build_calendar_intervals(schedule_cfg)}
+    hours.update(int(time.split(":")[0]) for time in _installed_times())
+    return hours
 
 
 def build_retry_plist(
