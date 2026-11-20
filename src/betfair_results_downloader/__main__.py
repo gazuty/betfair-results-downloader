@@ -927,13 +927,20 @@ def _cmd_dm_report(args: argparse.Namespace) -> int:
                 _post_to_slack(f":warning: Betfair DM report failed\n{msg}", creds)
             return 2
 
+    from .reporting.breakout import parse_breakouts
     from .reporting.daily_dm_report import build_daily_dm_report_from_results_dir
+
+    # Breakouts live in credentials.json, so a run with --csv alone (which
+    # never loads it) reports none.
+    breakouts, breakout_problems = parse_breakouts(creds)
 
     try:
         report = build_daily_dm_report_from_results_dir(
             results_dir,
             report_dt=report_dt,
             csv_path=getattr(args, "csv", None),
+            breakouts=breakouts,
+            breakout_problems=breakout_problems,
         )
     except FileNotFoundError as exc:
         msg = f"FAIL: {exc}"

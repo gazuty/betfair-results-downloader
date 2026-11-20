@@ -426,7 +426,7 @@ def test_dm_report_expands_tilde_in_results_dir(monkeypatch) -> None:
         lambda *a, **k: ({"paths": {"results_csv_dir": "~/BetfairData"}}, None),
     )
 
-    def capture(results_dir, report_dt=None, csv_path=None):
+    def capture(results_dir, report_dt=None, csv_path=None, **_breakouts):
         captured["results_dir"] = results_dir
         raise FileNotFoundError("stop here")
 
