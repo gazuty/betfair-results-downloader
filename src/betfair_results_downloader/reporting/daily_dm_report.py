@@ -228,18 +228,14 @@ def _format_breakout_line(figures: BreakoutFigures) -> str:
     return line
 
 
-def _slack_plain(text: str) -> str:
+def _heading_text(text: str) -> str:
     """
-    Configured text made safe to sit inside a bold Slack heading: an
-    asterisk would end the bold, and ``<...>`` is how Slack spells a
-    mention or a link.
+    Configured text made safe to sit inside a bold heading: an asterisk
+    would end the bold. Nothing else is escaped here, because the Slack
+    sender escapes ``&``, ``<`` and ``>`` for the whole message
+    (``slack_notify.escape_mrkdwn``) and doing it twice shows the entity.
     """
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("*", "")
-    )
+    return text.replace("*", "")
 
 
 def _format_breakout_lines(
@@ -250,7 +246,7 @@ def _format_breakout_lines(
         lines += [
             "",
             _format_section_heading(
-                _slack_plain(breakout.name), "commission estimated"
+                _heading_text(breakout.name), "commission estimated"
             ),
         ]
         if breakout.problem:

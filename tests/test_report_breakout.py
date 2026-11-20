@@ -17,6 +17,7 @@ import pytest
 from betfair_results_downloader.__main__ import main
 from betfair_results_downloader.commission import COMMISSION_COLUMNS
 from betfair_results_downloader.market_status import STATUS_COLUMNS
+from betfair_results_downloader.slack_notify import escape_mrkdwn
 from betfair_results_downloader.reporting.breakout import (
     BreakoutFigures,
     BreakoutSpec,
@@ -373,7 +374,11 @@ def test_the_heading_cannot_break_slack_formatting_or_mention_anyone() -> None:
 
     report = _report([_subset_bet("1", "1.100", -2.0)], _store(), spec)
 
-    assert "*AB &lt;!channel&gt; &amp; co* (commission estimated)" in report.text
+    # The asterisk goes here; the sender escapes the rest, exactly once.
+    assert "*AB <!channel> & co* (commission estimated)" in report.text
+    assert "*AB &lt;!channel&gt; &amp; co* (commission estimated)" in escape_mrkdwn(
+        report.text
+    )
 
 
 def test_criteria_match_whatever_case_and_dtype_the_csv_gave_them() -> None:
