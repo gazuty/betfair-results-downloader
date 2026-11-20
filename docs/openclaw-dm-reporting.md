@@ -216,6 +216,41 @@ PATH>/.cache/market_commission.csv`. If that file is missing or can't be
 read, every market is reported commission unknown rather than
 commission-free.
 
+## Breakouts
+
+A breakout reports a named subset of bets on its own lines, after Pending, so one staking rule can be followed apart from the rest of the account. Breakouts are defined in `credentials.json`, never in code, and the report shows none unless at least one is configured:
+
+```json
+"report": {
+  "breakouts": [
+    {"name": "Soccer lays", "event_type_id": 1, "side": "LAY"}
+  ]
+}
+```
+
+`event_type_id` (a whole number), `side` and `order_type` are matched against the canonical's `eventTypeId`, `side` and `orderType` columns, text ignoring case. Each is optional, but an entry needs a `name` and at least one of them. Each breakout adds one section:
+
+```text
+*Soccer lays* (commission estimated)
+• Today: net -$20.00 (gross -$20.00, commission $0.00) · 2 bets, 0 winners
+• Yesterday: net $47.00 (gross $50.00, commission $3.00) · 5 bets, 3 winners
+• Week to date: net $27.00 (gross $30.00, commission $3.00) · 7 bets, 3 winners
+• Month to date: net $94.00 (gross $100.00, commission $6.00) · 20 bets, 11 winners
+• Year to date: net $188.00 (gross $200.00, commission $12.00) · 40 bets, 22 winners
+```
+
+All five periods appear every day (on Sundays Last week takes the place of Week to date, as in the main sections). Bets, winners and gross follow each bet's settled time; partially settled markets are held out exactly as they are above. A winner is a bet with a profit above zero.
+
+**Commission is an estimate.** Betfair charges commission per market on the net winnings of every bet in it, so a subset of bets has no commission of its own. The figure is what the market was charged less what its other bets would have been charged without the breakout:
+
+- **On a winning market** the market's own rate is known (commission divided by gross), so the breakout carries the charge in proportion to its share of the winnings, and all of it when the other bets lost. A market that won less than $1.00 is priced at the typical rate below, because commission is rounded to the cent and the ratio on a few cents is noise.
+- **A losing breakout bet in a winning market** reduced the charge, so it counts as a small negative commission at that market's rate.
+- **On a market that lost overall** nothing was charged. If the other bets would have won without the breakout's losses, the commission they would have paid is counted as saved, priced at the typical rate: the median over that sport's winning markets on file.
+
+A period's commission can therefore be negative, and no percentage is shown. A market whose commission is not known yet, or whose saving has no typical rate to be priced with, counts as $0.00 and the line ends `⚠️ commission unknown for N markets`. Bets in a partially settled market appear in no breakout line until the market closes; the Pending section above counts them.
+
+A breakout is an optional extra and never costs the report. An entry that cannot be read (a misspelt setting, no criterion, a repeated name) is skipped and the report ends with `⚠️ Breakout setting ignored: …`; a breakout that cannot be computed keeps its heading with `⚠️ Not reported: …`. `dm-report --csv PATH` on its own does not load `credentials.json` and so shows no breakouts.
+
 ## CLI
 
 Render the report body from the configured results directory:

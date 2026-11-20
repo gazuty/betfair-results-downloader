@@ -20,6 +20,13 @@ from ..market_status import (
     is_pending_status,
     load_market_status,
 )
+from .breakout import (
+    MARKET_KEY,
+    BreakoutFigures,
+    BreakoutReport,
+    BreakoutSpec,
+    build_breakout,
+)
 from .io import discover_csv_files, load_csv
 from .schema import HORSES_LABEL, GREYHOUNDS_LABEL, normalize_cleared_orders_schema
 
@@ -133,6 +140,10 @@ class DailyDmReport:
     unreadable_profit_rows: int = 0
     # When the oldest of them settled, so the warning says where to look.
     unreadable_profit_oldest: datetime | None = None
+    # Configured subsets of bets, each reported on its own lines (see
+    # reporting.breakout), and what was wrong with any that were skipped.
+    breakouts: tuple[BreakoutReport, ...] = ()
+    breakout_problems: tuple[str, ...] = ()
 
 
 # The pipeline runs four times a day, so anything older than half a day means
@@ -198,6 +209,58 @@ def _format_breakdown_lines(breakdown: ProfitBreakdown) -> list[str]:
     return lines
 
 
+def _format_breakout_line(figures: BreakoutFigures) -> str:
+    """
+    One period of a breakout. No commission rate: the commission is an
+    estimate of the breakout's share and can be negative, so a percentage
+    of gross would not be a rate of anything.
+    """
+    bets = "1 bet" if figures.bets == 1 else f"{figures.bets:,} bets"
+    winners = "1 winner" if figures.winners == 1 else f"{figures.winners:,} winners"
+    line = (
+        f"• {figures.label}: net {_money(figures.net)} "
+        f"(gross {_money(figures.gross)}, commission {_money(figures.commission)}) "
+        f"· {bets}, {winners}"
+    )
+    if figures.unknown_markets:
+        noun = "market" if figures.unknown_markets == 1 else "markets"
+        line += f" · ⚠️ commission unknown for {figures.unknown_markets} {noun}"
+    return line
+
+
+def _heading_text(text: str) -> str:
+    """
+    Configured text made safe to sit inside a bold heading: an asterisk
+    would end the bold. Nothing else is escaped here, because the Slack
+    sender escapes ``&``, ``<`` and ``>`` for the whole message
+    (``slack_notify.escape_mrkdwn``) and doing it twice shows the entity.
+    """
+    return text.replace("*", "")
+
+
+def _format_breakout_lines(
+    breakouts: tuple[BreakoutReport, ...], problems: tuple[str, ...]
+) -> list[str]:
+    lines: list[str] = []
+    for breakout in breakouts:
+        lines += [
+            "",
+            _format_section_heading(
+                _heading_text(breakout.name), "commission estimated"
+            ),
+        ]
+        if breakout.problem:
+            lines.append(f"• ⚠️ Not reported: {breakout.problem}")
+        else:
+            lines += [_format_breakout_line(period) for period in breakout.periods]
+    if problems:
+        # A definition that could not be read is said out loud; a breakout
+        # that silently vanished would look like a day without bets.
+        lines.append("")
+        lines += [f"⚠️ Breakout setting ignored: {problem}" for problem in problems]
+    return lines
+
+
 def _format_day_name(dt: datetime) -> str:
     """e.g. ``Friday 5 June`` -- portable, unpadded (see _format_heading)."""
     return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}"
@@ -219,6 +282,8 @@ def _format_report(
     last_week_start: datetime | None = None,
     unreadable_profit_rows: int = 0,
     unreadable_profit_oldest: datetime | None = None,
+    breakouts: tuple[BreakoutReport, ...] = (),
+    breakout_problems: tuple[str, ...] = (),
 ) -> str:
     # Title and timestamp share the first line so a Slack push notification,
     # which previews only the start of the message, says which report it is.
@@ -311,6 +376,9 @@ def _format_report(
         )
     else:
         lines.append("• None")
+    # After Pending, which closes the account-wide figures: a breakout is a
+    # second view of bets already counted above, not an addition to them.
+    lines += _format_breakout_lines(breakouts, breakout_problems)
     return "\n".join(lines)
 
 
@@ -377,6 +445,25 @@ def _profit_breakdown(df: pd.DataFrame, markets: pd.DataFrame) -> ProfitBreakdow
     return ProfitBreakdown(total=total, by_sport=tuple(by_sport))
 
 
+def with_market_keys(final: pd.DataFrame) -> pd.DataFrame:
+    """
+    ``final`` with the market key every per-market figure is grouped on.
+
+    The key is the numeric form of the marketId, so the float-damaged
+    spellings in the historical canonical still meet their store row. A
+    frame that already carries the key is returned as it is, so the report
+    computes it once for the commission frame and the breakouts.
+    """
+    if MARKET_KEY in final.columns:
+        return final
+    ids = final["marketId"].fillna("").astype(str).str.strip()
+    keys = [
+        decimal_key(mid) if mid else f"blank:{pos}"
+        for pos, mid in enumerate(ids.tolist())
+    ]
+    return final.assign(**{MARKET_KEY: keys})
+
+
 def market_commission_frame(
     final: pd.DataFrame,
     market_commission: pd.DataFrame | None,
@@ -415,12 +502,7 @@ def market_commission_frame(
     # A row with no marketId still counts in gross but can never match a
     # store row; each such row stands as its own market so it is reported
     # commission unknown rather than silently commission-free.
-    ids = final["marketId"].fillna("").astype(str).str.strip()
-    keys = [
-        decimal_key(mid) if mid else f"blank:{pos}"
-        for pos, mid in enumerate(ids.tolist())
-    ]
-    keyed = final.assign(_key=keys)
+    keyed = with_market_keys(final)
     markets = (
         keyed.groupby("_key", sort=False)
         .agg(sport=("sport", "first"), rows_latest=("settled_dt_local", "max"))
@@ -590,6 +672,8 @@ def build_daily_dm_report_from_dataframe(
     source_csv: str = "<dataframe>",
     market_status: pd.DataFrame | None = None,
     market_commission: pd.DataFrame | None = None,
+    breakouts: tuple[BreakoutSpec, ...] = (),
+    breakout_problems: tuple[str, ...] = (),
 ) -> DailyDmReport:
     report_dt_local = _coerce_report_dt(report_dt)
     normalized = normalize_cleared_orders_schema(df_raw)
@@ -637,6 +721,8 @@ def build_daily_dm_report_from_dataframe(
     month_start = day_start.replace(day=1)
     year_start = day_start.replace(month=1, day=1)
 
+    if breakouts and "marketId" in final.columns:
+        final = with_market_keys(final)
     markets = market_commission_frame(
         final, market_commission, market_status, as_of=report_dt_local
     )
@@ -667,6 +753,23 @@ def build_daily_dm_report_from_dataframe(
         profit=float(pending_rows["profit"].sum()) if not pending_rows.empty else 0.0,
     )
 
+    # A breakout shows every period every day: it is a handful of lines, and
+    # its running month and year figures are the reason to track it.
+    is_sunday = report_dt_local.weekday() == 6
+    breakout_windows: list[tuple[str, datetime, datetime | None]] = [
+        ("Today", day_start, None),
+        ("Yesterday", yesterday_start, day_start),
+        ("Last week", last_week_start, week_start)
+        if is_sunday
+        else ("Week to date", week_start, None),
+        ("Month to date", month_start, None),
+        ("Year to date", year_start, None),
+    ]
+    breakout_reports = tuple(
+        _breakout_or_problem(spec, final, markets, breakout_windows)
+        for spec in breakouts
+    )
+
     # Keywords, not positions: several arguments share a type, and a swap
     # would type-check and only show up as wrong figures.
     text = _format_report(
@@ -685,6 +788,8 @@ def build_daily_dm_report_from_dataframe(
         last_week_start=last_week_start,
         unreadable_profit_rows=unreadable_profit_rows,
         unreadable_profit_oldest=unreadable_profit_oldest,
+        breakouts=breakout_reports,
+        breakout_problems=breakout_problems,
     )
 
     return DailyDmReport(
@@ -707,7 +812,32 @@ def build_daily_dm_report_from_dataframe(
         last_week=last_week,
         unreadable_profit_rows=unreadable_profit_rows,
         unreadable_profit_oldest=unreadable_profit_oldest,
+        breakouts=breakout_reports,
+        breakout_problems=breakout_problems,
     )
+
+
+def _breakout_or_problem(
+    spec: BreakoutSpec,
+    final: pd.DataFrame,
+    markets: pd.DataFrame,
+    windows: list[tuple[str, datetime, datetime | None]],
+) -> BreakoutReport:
+    """
+    A breakout is an optional extra: if it cannot be computed the account
+    figures still go out, with the breakout's section saying it failed.
+    """
+    if MARKET_KEY not in final.columns:
+        return BreakoutReport(
+            spec.name, problem="the results have no 'marketId' column"
+        )
+    try:
+        return build_breakout(spec, final, markets, windows)
+    except Exception as exc:
+        logger.exception("Breakout %r could not be computed", spec.name)
+        return BreakoutReport(
+            spec.name, problem=f"{type(exc).__name__} while computing it"
+        )
 
 
 def resolve_default_results_csv(results_dir: str) -> Path:
@@ -891,6 +1021,8 @@ def build_daily_dm_report_from_results_dir(
     *,
     report_dt: datetime | None = None,
     csv_path: str | None = None,
+    breakouts: tuple[BreakoutSpec, ...] = (),
+    breakout_problems: tuple[str, ...] = (),
 ) -> DailyDmReport:
     chosen = (
         Path(csv_path).expanduser()
@@ -912,4 +1044,6 @@ def build_daily_dm_report_from_results_dir(
         source_csv=str(chosen),
         market_status=market_status,
         market_commission=market_commission,
+        breakouts=breakouts,
+        breakout_problems=breakout_problems,
     )
