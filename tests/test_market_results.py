@@ -88,7 +88,9 @@ def _closed_for(bets: pd.DataFrame) -> pd.DataFrame:
     return _status([(m, "CLOSED", "", "2026-11-14T11:00:00Z") for m in ids])
 
 
-def _build(bets, store, status=_ALL_CLOSED, racecard=None, catalogue=None):
+def _build(
+    bets, store, status=_ALL_CLOSED, racecard=None, catalogue=None, venue_store=None
+):
     # By default every market has been seen closed, as the status step
     # records every market a run touches; tests about missing or pending
     # status pass their own.
@@ -101,6 +103,7 @@ def _build(bets, store, status=_ALL_CLOSED, racecard=None, catalogue=None):
         racecard=racecard,
         catalogue=catalogue,
         now=NOW,
+        venue_store=venue_store,
     )
 
 
@@ -1453,3 +1456,137 @@ def test_the_download_stamp_survives_a_missing_current_meta(tmp_path) -> None:
     (d / META_FILENAME).write_text("{not json")
     write_market_results(d, build_market_results_from_disk(d, now=later))
     assert _meta(d)["lastDownloadUtc"] == "2026-11-14T08:00:00Z"
+
+
+# --- racing countries from the venue store -----------------------------------
+
+ASCOT_STORE = pd.DataFrame(
+    [("7", "Ascot", "Ascot"), ("7", "Ascot", "Ascot (AUS)")],
+    columns=["eventTypeId", "venue", "track"],
+)
+
+
+def _race(n: int, event: str, settled: str, gross: str, commission: str):
+    """One winning or losing horse market: its bet row and its store row."""
+    market_id = f"1.{n}"
+    bet = (str(n), market_id, "7", settled, gross, event, "Win")
+    row = (market_id, "7", settled, "1", gross, commission, "2026-11-14T11:30:00Z")
+    return bet, row
+
+
+def _races(specs: list[tuple]):
+    pairs = [_race(n, *spec) for n, spec in enumerate(specs, start=100)]
+    return _bets([bet for bet, _ in pairs]), _store([row for _, row in pairs])
+
+
+# 5.4% on a 100.00 win, as racing outside Australia is charged; 7.2% as in it.
+ELSEWHERE = ("23:00 Kempton", "2026-11-13T12:05:00.000Z", "100.00", "5.40")
+ASCOT_AUS_TIME = ("15:00 Ascot", "2026-11-13T04:05:00.000Z")
+ASCOT_UK_TIME = ("01:00 Ascot", "2026-11-13T14:05:00.000Z")
+KEMPTON_STORE = pd.DataFrame(
+    [("7", "Kempton", "Kempton"), *ASCOT_STORE.itertuples(index=False)],
+    columns=["eventTypeId", "venue", "track"],
+)
+
+
+def test_the_venue_store_gives_fallback_names_their_country() -> None:
+    bets, store = _races(
+        [(*ASCOT_AUS_TIME, "-2.00", "0.00"), (*ASCOT_UK_TIME, "-2.00", "0.00")]
+    )
+
+    with_store = _build(bets, store, venue_store=ASCOT_STORE)
+    without = _build(bets, store)
+
+    assert with_store.feed["market"].tolist() == [
+        "Horse Racing / Ascot (AUS) 13th Nov : Win",
+        "Horse Racing / Ascot 14th Nov : Win",
+    ]
+    assert with_store.meta["unknownCountryMarkets"] == 0
+    assert without.meta["unknownCountryMarkets"] == 2
+    assert list(with_store.feed.columns) == FEED_COLUMNS, "no helper column leaks"
+    assert with_store.warnings == []
+
+
+def test_commission_at_the_other_countrys_rate_is_reported_once_it_is_a_pattern() -> (
+    None
+):
+    reference = [ELSEWHERE] * 60
+    # Called Australian by start time, but charged like everywhere else.
+    wrong = [(*ASCOT_AUS_TIME, "100.00", "5.40")] * 4
+    right = [(*ASCOT_AUS_TIME, "100.00", "7.20")] * 6 + [
+        (*ASCOT_UK_TIME, "100.00", "5.40")
+    ] * 6
+
+    bets, store = _races(reference + right + wrong)
+    result = _build(bets, store, venue_store=KEMPTON_STORE)
+
+    assert result.warnings == [
+        "⚠️ Results feed: 4 of 16 recent markets given a country by start time were "
+        "charged commission at the other country's rate; the start-time rule "
+        "may no longer hold."
+    ]
+
+    bets, store = _races(reference + right + wrong[:3])
+    assert _build(bets, store, venue_store=KEMPTON_STORE).warnings == []
+
+
+def test_a_market_called_uk_but_charged_as_australian_is_a_disagreement_too() -> None:
+    wrong = [(*ASCOT_UK_TIME, "100.00", "7.20")] * 4
+
+    bets, store = _races([ELSEWHERE] * 60 + wrong)
+    result = _build(bets, store, venue_store=KEMPTON_STORE)
+
+    assert "4 of 4 recent markets given a country by start time" in result.warnings[0]
+
+
+def test_the_commission_check_leaves_old_markets_and_greyhounds_out() -> None:
+    old = ("15:00 Ascot", "2026-08-13T05:05:00.000Z", "100.00", "5.40")
+    bets, store = _races([ELSEWHERE] * 60 + [old] * 10)
+    assert _build(bets, store, venue_store=KEMPTON_STORE).warnings == []
+
+    # Greyhound rates are no reference for horse racing: with only dogs to
+    # compare against there is nothing to judge by.
+    dogs = [("23:00 Romford", "2026-11-13T12:05:00.000Z", "100.00", "5.40")] * 60
+    bets, store = _races(dogs + [(*ASCOT_AUS_TIME, "100.00", "5.40")] * 10)
+    bets.loc[:59, "eventTypeId"] = "4339"
+    store.loc[:59, "eventTypeId"] = "4339"
+    assert _build(bets, store, venue_store=KEMPTON_STORE).warnings == []
+
+
+def test_the_commission_check_reads_only_wins_large_enough_to_have_a_rate() -> None:
+    reference = [ELSEWHERE] * 60
+    # Losers and a 4.00 win say nothing about the rate, whatever was charged.
+    unreadable = [(*ASCOT_AUS_TIME, "-2.00", "0.00")] * 5 + [
+        (*ASCOT_AUS_TIME, "4.00", "0.22")
+    ] * 5
+
+    bets, store = _races(reference + unreadable)
+
+    assert _build(bets, store, venue_store=KEMPTON_STORE).warnings == []
+
+
+def test_the_commission_check_needs_enough_reference_markets_to_judge() -> None:
+    wrong = [(*ASCOT_AUS_TIME, "100.00", "5.40")] * 10
+
+    bets, store = _races([ELSEWHERE] * 10 + wrong)
+
+    assert _build(bets, store, venue_store=KEMPTON_STORE).warnings == []
+
+
+def test_from_disk_uses_the_venue_store_and_says_when_it_cannot(tmp_path: Path) -> None:
+    bets, store = _races([(*ASCOT_AUS_TIME, "-2.00", "0.00")])
+    cache = _seed_disk(tmp_path, bets, store)
+    ASCOT_STORE.to_csv(cache / "venue_tracks.csv", index=False)
+
+    result = build_market_results_from_disk(tmp_path, now=NOW)
+    assert result.feed["market"].tolist() == [
+        "Horse Racing / Ascot (AUS) 13th Nov : Win"
+    ]
+    assert result.warnings == []
+
+    (cache / "venue_tracks.csv").write_text("nothing,useful\n1,2\n", encoding="utf-8")
+    result = build_market_results_from_disk(tmp_path, now=NOW)
+    assert result.feed["market"].tolist() == [
+        "Horse Racing / Ascot (Unknown) 13th Nov : Win"
+    ]
+    assert "venue store unreadable" in result.warnings[0]

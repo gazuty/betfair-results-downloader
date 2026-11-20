@@ -408,6 +408,21 @@ python -m betfair_results_downloader schedule install-racecard   # hourly at :30
 
 A failure exits `1` and prints the reason. It does not post to Slack: each run captures as well and announces its own failure.
 
+### `seed-venues`
+
+**Status:** ✅ Implemented
+
+Teaches the venue store (`<results_csv_dir>/.cache/venue_tracks.csv`) which track, and so which country, each racing venue name means, from a CSV of website-style market names such as a Betfair "Betting P&L" download. Every racecard capture adds to the store, so this is for a first install or to fill in venues raced before the store existed: without it a venue stays country `Unknown` in the feed until the racecard next shows it. It makes no Betfair calls, never removes anything, and is safe to repeat. The next run's feed uses the result.
+
+```bash
+python -m betfair_results_downloader seed-venues --from-names "BettingPandL.csv"
+python -m betfair_results_downloader seed-venues --from-names names.csv --column Name
+```
+
+Only racing names with an event date and a plain track or one tagged with a known country count ("Horse Racing / Ascot (AUS) 14th Nov : R7 1200m Hcp"); other sports, pool-bet events and tracks already marked `Unknown` are ignored.
+
+Exit codes: `0` = success · `1` = failure · `2` = bad configuration.
+
 ### `export-market-results`
 
 **Status:** ✅ Implemented
@@ -779,7 +794,7 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
   - A partially settled outright is held back until Betfair closes it. It then appears once, for the whole market, at its close: the time of its last settled leg when no run saw the market still open after that leg (a race or a match market a run caught mid-settlement keeps its real time), otherwise the moment a run observed the close. The status file records when each market was last seen open (`lastPendingUtc`) for this. `dm-report` keeps the observed close throughout, so the two can place such a market up to ten hours apart.
   - A market whose commission is not yet known is held back until a later run reads it. A zero commission on a small win is judged by the same three-band rule as `dm-report` (genuine up to 10 cents; from 10 to 15 cents once read a day after settlement; never above).
 
-  Gross and bet count are Betfair's whole-market figures from the commission store, which matched the website download to the cent. A racing market the racecard missed is named from `itemDescription`, using the track earlier captures recorded for that venue, or country `Unknown` when the venue is ambiguous (Ascot, York). The meta records `generatedUtc` (when the feed was built), `lastDownloadUtc` (when a run last downloaded from Betfair; `null` until one has), `dataThroughUtc`, a `csvSha256` of the CSV, `schemaVersion`, and counts of held-back markets and name sources. A run warns when a market has waited more than 48 hours for its commission.
+  Gross and bet count are Betfair's whole-market figures from the commission store, which matched the website download to the cent. A racing market the racecard missed is named from `itemDescription`, using the track the venue store has recorded for that venue (see `venue_tracks.csv` below). A horse racing venue that has meant both an Australian and a UK or Irish track (Ascot, York) is told apart by its start time: Australian before 11:00 UTC, UK or Irish from 11:30 to 21:30 UTC. The country is `Unknown` when the venue has never been seen, when it is shared in any other way, when `itemDescription` gives no start time, or when the start falls outside those hours. A run warns if recent markets given a country this way were charged commission at the other country's rate. The meta records `generatedUtc` (when the feed was built), `lastDownloadUtc` (when a run last downloaded from Betfair; `null` until one has), `dataThroughUtc`, a `csvSha256` of the CSV, `schemaVersion`, and counts of held-back markets and name sources. A run warns when a market has waited more than 48 hours for its commission.
 
 ### Enrichment cache (`<results_csv_dir>/.cache/`)
 
@@ -789,6 +804,7 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 - `market_commission.csv` — per-market commission observed via `listClearedOrders` grouped by market, columns `marketId`, `eventTypeId`, `settledDateUtc`, `betCount`, `grossProfit`, `commission`, `fetchedUtc`; used by `dm-report` to show commission and net alongside gross (see `docs/openclaw-dm-reporting.md`)
 
 - `racecard.csv` — forward racing card captured by `racecard` and every run, columns `marketId`, `eventTypeId`, `eventId`, `eventName`, `venue`, `countryCode`, `marketName`, `marketStartTime`, `capturedUtc`. Rows for markets never bet on are dropped 72 hours after their start.
+- `venue_tracks.csv` — every venue-to-track pairing a racecard capture or `seed-venues` has recorded, columns `eventTypeId`, `venue`, `track` (`Ascot (AUS)`, or plain `Ascot` for a UK or Irish meeting), `source` (`racecard` or `names`), `firstSeenUtc`. Rows are only ever added. The feed reads it to give a fallback racing name its country after the racecard has dropped the venue's markets. It is data rather than code so that the tracks an account bets on stay out of the repository. If it is unreadable the feed says so and falls back to the current racecard
 
 All five are git-ignored.
 
