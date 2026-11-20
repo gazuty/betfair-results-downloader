@@ -57,9 +57,11 @@ from .commission import (
     load_market_commission,
     resolve_commission_path,
 )
+from .config import EVENTTYPE_HORSES
 from .csv_utils import decimal_key
 from .downloader_core import resolve_enrichment_cache_dir
 from .market_names import (
+    AUSTRALIAN_TAG,
     SOURCE_FALLBACK,
     UNKNOWN_COUNTRY,
     resolve_market_names,
@@ -76,6 +78,7 @@ from .market_status import (
     resolve_status_path,
 )
 from .racecard import load_racecard, resolve_racecard_path
+from .venue_tracks import load_venue_tracks, resolve_venue_tracks_path
 from .reporting.daily_dm_report import (
     apply_settlement_status,
     market_commission_frame,
@@ -450,6 +453,96 @@ def _close_brackets(
     return out
 
 
+# The commission check on start-time countries (see _rate_check) reads a
+# market's rate as commission over gross, which rounding to the cent makes
+# unreliable on a small win.
+RATE_CHECK_MIN_GROSS = 5.0
+# Fewer reference markets than this and the usual range of rates is not
+# known well enough to judge anything against.
+RATE_CHECK_MIN_REFERENCE = 50
+# Disagreements are reported once they pass both of these: a couple of odd
+# markets are not a rule gone wrong.
+RATE_CHECK_ALERT_COUNT = 3
+RATE_CHECK_ALERT_SHARE = 0.02
+# Only recent markets are checked. The rates an account is charged change
+# over the years, and a disagreement from long ago would otherwise repeat
+# its warning on every run for as long as the market stays in the feed.
+RATE_CHECK_DAYS = 60
+
+
+def _is_horse_racing(event_type_id: Any) -> bool:
+    try:
+        return int(float(event_type_id)) == EVENTTYPE_HORSES
+    except (TypeError, ValueError):
+        return False
+
+
+@dataclass(frozen=True)
+class RateCheck:
+    """How the start-time countries fared against the commission charged."""
+
+    # Markets whose country came from the start-time rule.
+    timed: int = 0
+    # Of those, winners large enough to read a rate from.
+    checked: int = 0
+    # Of those, markets charged at a rate the named country does not use.
+    disagreed: int = 0
+
+    @property
+    def alarming(self) -> bool:
+        return (
+            self.disagreed > RATE_CHECK_ALERT_COUNT
+            and self.disagreed > RATE_CHECK_ALERT_SHARE * self.checked
+        )
+
+
+def _rate_check(ready: pd.DataFrame, now_utc: datetime) -> RateCheck:
+    """
+    Check the start-time rule against the commission Betfair charged.
+
+    Betfair charges Australian racing at different rates from everything
+    else, so a winning market's rate says which side of that line it is on.
+    The rate cannot name the country itself: only winners have one, and a
+    country given to winners alone would skew every per-country profit
+    figure. It can audit the rule that does. The usual range of rates for
+    racing outside Australia is taken from this feed's own markets whose
+    country was never in doubt, so the check follows the account's rates
+    as they change. A market the rule called Australian inside that range,
+    or UK outside it, is a disagreement. Only horse racing settled in the
+    last ``RATE_CHECK_DAYS`` days takes part, on both sides: the rule only
+    decides horse racing, and greyhounds need not be charged alike.
+    """
+    settled = pd.to_datetime(ready["settled_dt_local"], utc=True)
+    recent = settled >= pd.Timestamp(now_utc) - pd.Timedelta(days=RATE_CHECK_DAYS)
+    horses = ready["eventTypeId"].map(_is_horse_racing)
+    ready = ready.loc[recent & horses]
+    timed = ready["countryByStartTime"].astype(bool)
+    if not timed.any():
+        return RateCheck()
+    gross = ready["grossProfit"].astype(float)
+    readable = gross >= RATE_CHECK_MIN_GROSS
+    rate = ready["commission"].astype(float) / gross.where(readable)
+    names = ready["market"].astype(str)
+    australian = names.str.contains(f" {AUSTRALIAN_TAG} ", regex=False)
+    known_elsewhere = (
+        readable
+        & ~timed
+        & ~australian
+        & ~names.str.contains(f"({UNKNOWN_COUNTRY})", regex=False)
+    )
+    checked = timed & readable
+    if known_elsewhere.sum() < RATE_CHECK_MIN_REFERENCE:
+        return RateCheck(timed=int(timed.sum()))
+    low, high = rate[known_elsewhere].quantile([0.005, 0.995])
+    in_range = (rate >= low) & (rate <= high)
+    disagreed = checked & (australian == in_range)
+    return RateCheck(
+        timed=int(timed.sum()),
+        checked=int(checked.sum()),
+        disagreed=int(disagreed.sum()),
+    )
+
+
 def _first_present(series: pd.Series) -> Any:
     present = series.dropna()
     present = present[present.astype(str).str.strip() != ""]
@@ -462,16 +555,19 @@ def _finish_ready_markets(
     *,
     racecard: Optional[pd.DataFrame],
     catalogue: Optional[pd.DataFrame],
-) -> tuple[pd.DataFrame, int]:
+    venue_store: Optional[pd.DataFrame] = None,
+    now_utc: datetime,
+) -> tuple[pd.DataFrame, int, RateCheck]:
     """
     Turn the markets whose figure is final into feed rows.
 
     Returns ``(feed, markets whose canonical sum differed from Betfair's
-    gross)``. An empty input is an empty feed with the full column set, so
-    a run that holds every market back still writes a well-formed file.
+    gross, the commission check on start-time countries)``. An empty input
+    is an empty feed with the full column set, so a run that holds every
+    market back still writes a well-formed file.
     """
     if ready.empty:
-        return pd.DataFrame(columns=FEED_COLUMNS), 0
+        return pd.DataFrame(columns=FEED_COLUMNS), 0, RateCheck()
     # A market whose commission is known has a store row by construction;
     # its gross and bet count come from there (see _store_by_key).
     ready = ready.join(_store_by_key(market_commission), on="_key")
@@ -485,7 +581,9 @@ def _finish_ready_markets(
     with_count = has_store & ready["storeBetCount"].notna()
     ready.loc[with_count, "betCount"] = ready.loc[with_count, "storeBetCount"]
     ready["betCount"] = ready["betCount"].astype(int)
-    ready = resolve_market_names(ready, racecard=racecard, catalogue=catalogue)
+    ready = resolve_market_names(
+        ready, racecard=racecard, catalogue=catalogue, venue_store=venue_store
+    )
 
     settled_local = pd.to_datetime(ready["settled_dt_local"]).dt.tz_convert(SYDNEY_TZ)
     ready["settledUtc"] = settled_local.dt.tz_convert("UTC").map(_fmt_utc)
@@ -493,12 +591,13 @@ def _finish_ready_markets(
     ready["grossProfit"] = ready["grossProfit"].astype(float).round(2)
     ready["commission"] = ready["commission"].astype(float).round(2)
     ready["netProfit"] = (ready["grossProfit"] - ready["commission"]).round(2)
+    rate_check = _rate_check(ready, now_utc)
     feed = (
         ready.sort_values(["settledUtc", "marketId"])
         .reindex(columns=FEED_COLUMNS)
         .reset_index(drop=True)
     )
-    return feed, int(gross_mismatch.sum())
+    return feed, int(gross_mismatch.sum()), rate_check
 
 
 def build_market_results(
@@ -510,6 +609,7 @@ def build_market_results(
     catalogue: Optional[pd.DataFrame],
     previous_feed: Optional[pd.DataFrame] = None,
     now: Optional[datetime] = None,
+    venue_store: Optional[pd.DataFrame] = None,
 ) -> FeedResult:
     """
     Build the feed and its meta from frames already in memory.
@@ -557,8 +657,13 @@ def build_market_results(
     held = per_market.loc[unknown]
     ready = per_market.loc[~unknown].copy()
 
-    feed, gross_mismatch_markets = _finish_ready_markets(
-        ready, market_commission, racecard=racecard, catalogue=catalogue
+    feed, gross_mismatch_markets, rate_check = _finish_ready_markets(
+        ready,
+        market_commission,
+        racecard=racecard,
+        catalogue=catalogue,
+        venue_store=venue_store,
+        now_utc=now_utc,
     )
     feed, carried = _carry_forward(feed, previous_feed, canonical_keys)
 
@@ -626,6 +731,22 @@ def build_market_results(
             f"unknown commission, the oldest settled {oldest_unknown_hours:.0f}h "
             f"ago; they stay off the dashboard until a run reads their commission."
         )
+    if rate_check.alarming:
+        warnings.append(
+            f"⚠️ Results feed: {rate_check.disagreed:,} of {rate_check.checked:,} "
+            f"recent markets given a country by start time were charged commission at "
+            f"the other country's rate; the start-time rule may no longer hold."
+        )
+    logger.info(
+        "Results feed: %d horse racing market(s) in the last %d days given a "
+        "country by start time; commission rate disagreed on %d of %d checked; "
+        "%d racing market(s) in all with country unknown.",
+        rate_check.timed,
+        RATE_CHECK_DAYS,
+        rate_check.disagreed,
+        rate_check.checked,
+        int(unknown_country.sum()),
+    )
     message = (
         f"Results feed: {len(feed):,} markets; held back "
         f"{pending_markets:,} partially settled, {unchecked_markets:,} with no "
@@ -747,6 +868,14 @@ def build_market_results_from_disk(
             f"⚠️ Results feed: racecard unreadable ({type(exc).__name__}: {exc}); "
             f"racing markets were named from the fallback."
         )
+    try:
+        venue_store = load_venue_tracks(resolve_venue_tracks_path(cache_dir))
+    except (OSError, ValueError) as exc:
+        venue_store = None
+        warnings.append(
+            f"⚠️ Results feed: venue store unreadable ({type(exc).__name__}: "
+            f"{exc}); racing countries came from the current racecard only."
+        )
     df_raw = _load_canonical(results_dir)
     df_raw = supplement_with_archived_legs(df_raw, market_status, results_dir)
     previous_feed = load_previous_feed(results_dir)
@@ -785,6 +914,7 @@ def build_market_results_from_disk(
         catalogue=_load_catalogue_cache(cache_dir),
         previous_feed=previous_feed,
         now=now,
+        venue_store=venue_store,
     )
     result.meta["archiveSignature"] = signature
     result.warnings[:0] = warnings

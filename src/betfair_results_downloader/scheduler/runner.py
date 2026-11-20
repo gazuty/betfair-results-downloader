@@ -371,7 +371,9 @@ def _refresh_racecard(
             status_cb=status_cb,
         )
         logger.info("Racecard result: %s", rc.message)
-        if rc.truncated_slices:
+        # Both leave racing names or countries incomplete, so both are said
+        # out loud rather than left in the log.
+        if rc.truncated_slices or rc.venue_warning:
             return f"⚠️ {rc.message}"
         return None
     except Exception as exc:

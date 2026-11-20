@@ -41,6 +41,16 @@ from .betfair_net import retry_betfair_call
 from .config import EVENTTYPE_GREYHOUNDS, EVENTTYPE_HORSES
 from .csv_utils import decimal_key
 from .market_status import _fmt_utc, _now_utc, _parse_utc
+from .venue_tracks import SOURCE_NAMES as VENUE_SOURCE_NAMES
+from .venue_tracks import SOURCE_RACECARD as VENUE_SOURCE_RACECARD
+from .venue_tracks import (
+    load_venue_tracks,
+    merge_venue_tracks,
+    observations_from_names,
+    observations_from_racecard,
+    resolve_venue_tracks_path,
+    save_venue_tracks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +123,8 @@ class RacecardResult:
     stored: int
     truncated_slices: int
     message: str
+    # Why the venue store was not updated by this capture; '' when it was.
+    venue_warning: str = ""
 
 
 def resolve_racecard_path(cache_dir: Path) -> Path:
@@ -315,6 +327,56 @@ def _store_lock(path: Path) -> Iterator[None]:
             yield
 
 
+def _remember_venues(cache_dir: Path, racecard: pd.DataFrame, seen_utc: str) -> str:
+    """
+    Add the capture's venue-to-track pairings to the venue store. Call with
+    the racecard lock held; it serialises writers of both stores.
+
+    Returns '' or what went wrong. A venue store that cannot be read or
+    written must not cost the capture, which is already saved: the names it
+    holds are worth more than the pairings, and the next capture retries.
+    """
+    path = resolve_venue_tracks_path(cache_dir)
+    try:
+        store = load_venue_tracks(path)
+        merged, added = merge_venue_tracks(
+            store,
+            observations_from_racecard(racecard),
+            source=VENUE_SOURCE_RACECARD,
+            seen_utc=seen_utc,
+        )
+        if added:
+            save_venue_tracks(merged, path)
+    except (OSError, ValueError) as exc:
+        logger.warning("Venue store not updated: %s: %s", type(exc).__name__, exc)
+        return f"venue store not updated ({type(exc).__name__})."
+    return ""
+
+
+def seed_venue_tracks(
+    cache_dir: Path, names: Iterable[Any], *, now: Optional[datetime] = None
+) -> tuple[int, int]:
+    """
+    Teach the venue store the pairings in website-style market names.
+
+    Returns ``(pairings found in the names, pairings that were new)``.
+    Raises on an unreadable store, leaving it untouched.
+    """
+    observations = observations_from_names(names)
+    path = resolve_venue_tracks_path(cache_dir)
+    with _store_lock(resolve_racecard_path(cache_dir)):
+        store = load_venue_tracks(path)
+        merged, added = merge_venue_tracks(
+            store,
+            observations,
+            source=VENUE_SOURCE_NAMES,
+            seen_utc=_fmt_utc(_now_utc(now)),
+        )
+        if added:
+            save_venue_tracks(merged, path)
+    return len(observations), added
+
+
 def update_racecard(
     *,
     client: Any,
@@ -342,10 +404,15 @@ def update_racecard(
         merged = merge_racecard(store, rows)
         pruned = prune_racecard(merged, bet_market_keys=bet_market_keys, now=now_utc)
         save_racecard(pruned, path)
+        # Before the pruned rows are forgotten for good, the venue store
+        # keeps what they said about which track each venue name means.
+        venue_warning = _remember_venues(cache_dir, merged, captured_utc)
 
     message = (
         f"Racecard: captured {len(rows):,} racing markets; store holds {len(pruned):,}."
     )
+    if venue_warning:
+        message += f" WARNING: {venue_warning}"
     if truncated:
         message += (
             f" WARNING: {truncated} slice(s) returned a full page at the "
@@ -359,4 +426,5 @@ def update_racecard(
         stored=len(pruned),
         truncated_slices=truncated,
         message=message,
+        venue_warning=venue_warning,
     )

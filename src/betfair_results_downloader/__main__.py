@@ -9,6 +9,7 @@ Subcommands:
   backfill-commission — read per-market commission for a date range
   racecard      — capture the forward racing card (full racing market names)
   export-market-results — rebuild the dashboard results feed from disk
+  seed-venues   — teach the venue store track countries from website names
   audit         — report missing settled-date gaps in the canonical CSV
   schedule      — install/uninstall/status/logs for the platform scheduled jobs
   dm-report     — render the OpenClaw daily DM report from local CSV results
@@ -681,7 +682,56 @@ def _cmd_racecard(_args: argparse.Namespace) -> int:
             client.logout()
         except Exception:
             pass
+    if result.venue_warning:
+        # The capture itself is saved, but the hourly job must not report
+        # success while the venue store is failing every hour.
+        print(f"FAIL: {result.message}")
+        return 1
     print(f"OK: {result.message}")
+    return 0
+
+
+def _cmd_seed_venues(args: argparse.Namespace) -> int:
+    """
+    Teach the venue store which track each racing venue name means, from a
+    CSV of website-style market names ("Horse Racing / Ascot (AUS) 14th Nov
+    : R7 1200m Hcp"), such as a Betfair "Betting P&L" download.
+
+    The feed names a settled racing market from a bare venue, and takes the
+    country from what the racecard has shown for that venue. A new store
+    only knows the venues raced since it began; this fills in the rest.
+    Nothing is downloaded, and the next run's feed uses the result.
+
+    Exit codes: 0=success, 1=failure, 2=bad configuration.
+    """
+    import pandas as pd
+
+    creds, _schedule_cfg = _load_creds_and_schedule()
+
+    from .downloader_core import resolve_enrichment_cache_dir
+    from .paths import ResultsDirNotConfigured, resolve_results_dir
+    from .racecard import seed_venue_tracks
+
+    try:
+        cache_dir = resolve_enrichment_cache_dir(resolve_results_dir(creds))
+    except (ResultsDirNotConfigured, AttributeError):
+        print("FAIL: paths.results_csv_dir is not configured in credentials.json")
+        return 2
+    try:
+        names = pd.read_csv(args.from_names, dtype=str, usecols=[args.column])
+    except (OSError, ValueError) as exc:
+        # ValueError: no such column, or not a CSV at all.
+        print(f"FAIL: could not read names ({type(exc).__name__}: {exc})")
+        return 1
+    try:
+        found, added = seed_venue_tracks(cache_dir, names[args.column])
+    except (OSError, ValueError) as exc:
+        print(f"FAIL: venue store not updated ({type(exc).__name__}: {exc})")
+        return 1
+    print(
+        f"OK: {found:,} venue-to-track pairing(s) in {len(names):,} name(s); "
+        f"{added:,} new to the store."
+    )
     return 0
 
 
@@ -1203,6 +1253,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "export-market-results",
         help="Rebuild the dashboard results feed from the files on disk (no API calls).",
     )
+    sv = sub.add_parser(
+        "seed-venues",
+        help="Teach the venue store which track (and country) each racing venue "
+        "name means, from a CSV of website-style market names (no API calls).",
+    )
+    sv.add_argument(
+        "--from-names",
+        required=True,
+        metavar="CSV",
+        help="CSV with a column of names like "
+        "'Horse Racing / Ascot (AUS) 14th Nov : R7 1200m Hcp'.",
+    )
+    sv.add_argument(
+        "--column",
+        default="Market",
+        help="The column holding the names (default: Market).",
+    )
     au = sub.add_parser(
         "audit",
         help="Report missing settled-date gaps in the canonical CSV.",
@@ -1293,6 +1360,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_racecard(args)
     if args.command == "export-market-results":
         return _cmd_export_market_results(args)
+    if args.command == "seed-venues":
+        return _cmd_seed_venues(args)
     if args.command == "audit":
         return _cmd_audit(args)
     if args.command == "dm-report":
