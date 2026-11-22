@@ -38,6 +38,7 @@ directory and nothing off the machine; only looking at the cloud side
 from __future__ import annotations
 
 import gzip
+import threading
 import hashlib
 import json
 import logging
@@ -48,7 +49,7 @@ import tarfile
 import tempfile
 import uuid
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
@@ -173,19 +174,22 @@ def _stores_in(bundle: Path) -> list[str]:
         )
 
 
-def _stores_last_backed_up(backup_dirs: Sequence[Path]) -> set[str]:
+def _stores_last_backed_up(
+    manifests: Iterable[dict[str, dict[str, object]]],
+) -> set[str]:
     """
-    The stores in the newest whole bundle on record, over all targets.
+    The stores in the newest whole bundle on record, over the manifests
+    of all targets.
 
     A store the code stops writing would be flagged from then on; that is
     a code change, which can drop it from here in the same commit. Until
     then a store that silently stops existing is the case worth catching.
     """
     expected: set[str] = set()
-    for backup_dir in backup_dirs:
+    for manifest in manifests:
         whole = {
             name: entry
-            for name, entry in read_manifest(backup_dir).items()
+            for name, entry in manifest.items()
             if _BUNDLE_NAME_RE.match(name)
             and not entry.get("incomplete")
             and isinstance(entry.get("stores"), list)
@@ -193,6 +197,51 @@ def _stores_last_backed_up(backup_dirs: Sequence[Path]) -> set[str]:
         if whole:
             expected.update(str(store) for store in whole[max(whole)]["stores"])
     return expected
+
+
+_UNFINISHED = object()
+
+
+def _within(seconds: Optional[float], work: Callable[[], object]) -> object:
+    """
+    Run ``work`` and return its result, or ``_UNFINISHED`` when it has not
+    returned after ``seconds`` (None waits for as long as it takes).
+
+    A backup target is usually a cloud-sync folder, and a call into one
+    can block for as long as the sync client or the operating system
+    likes: a run once sat 88 minutes in a directory listing, holding the
+    pipeline lock with its publish still to do. A blocked system call
+    cannot be interrupted from Python, so the work runs on a daemon
+    thread that is left behind when time is up. It may still finish
+    later, or it dies with the process; every write it makes is a
+    temp-file-then-rename, so a half-done copy never takes a real name.
+    An exception in ``work`` is re-raised here.
+    """
+    if seconds is None:
+        return work()
+    outcome: list[object] = []
+    failure: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(work())
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller
+            failure.append(exc)
+
+    worker = threading.Thread(target=_run, name="backup-target", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if failure:
+        raise failure[0]
+    return outcome[0] if outcome else _UNFINISHED
+
+
+def _not_responding(backup_dir: Path, seconds: float) -> str:
+    return (
+        f"⚠️ Backup to {backup_dir} did not finish within {seconds:g}s and "
+        f"was left behind (the folder is not responding); check it with "
+        f"backup --verify."
+    )
 
 
 def _remove_stale_staging(results_csv_dir: Path, now_epoch: float) -> None:
@@ -399,6 +448,7 @@ def run_backup(
     extra_files: Sequence[Path] = (),
     status_cb: Optional[Callable[[str], None]] = None,
     now_utc: Optional[datetime] = None,
+    target_time_limit: Optional[float] = None,
 ) -> Optional[str]:
     """
     Back the working set up to every directory in ``backup_dirs``.
@@ -408,6 +458,13 @@ def run_backup(
     The destinations are independent: one that fails does not stop the
     others, and each failure is named in the returned warning.
 
+    ``target_time_limit`` is the seconds any one destination may take
+    before it is left behind and named in the warning (see
+    :func:`_within`); the others still get their copies. A run passes
+    one, so that a folder which stops responding cannot hold the run up.
+    None, the default, waits: right for a person running the first
+    backup to a new, slow destination.
+
     Returns a warning string, or None when every destination is complete.
     Never raises, for the reason :func:`backup_compressed_outputs` gives.
     """
@@ -415,6 +472,21 @@ def run_backup(
         return None
     now_utc = now_utc or datetime.now(timezone.utc)
     warnings: list[str] = []
+    # The first touch of each destination, under the same limit as the
+    # copy: one that does not answer here is not asked again this run, so
+    # it costs the run one wait and not two.
+    manifests: dict[Path, dict[str, dict[str, object]]] = {}
+    for backup_dir in backup_dirs:
+        try:
+            read = _within(target_time_limit, lambda d=backup_dir: read_manifest(d))
+        except Exception:
+            # The copy step reads it again and reports what is wrong.
+            read = {}
+        if read is _UNFINISHED:
+            assert target_time_limit is not None
+            warnings.append(_not_responding(backup_dir, target_time_limit))
+        else:
+            manifests[backup_dir] = read  # type: ignore[assignment]
     staging: Optional[Path] = None
     bundle: Optional[Path] = None
     undelivered: list[str] = []
@@ -434,7 +506,7 @@ def run_backup(
                 results_csv_dir,
                 extra_files,
                 bundle,
-                expected_stores=_stores_last_backed_up(backup_dirs),
+                expected_stores=_stores_last_backed_up(manifests.values()),
             )
             bundle_stores = _stores_in(bundle)
             if missing:
@@ -455,20 +527,26 @@ def run_backup(
                 f"⚠️ Backup state bundle not built ({type(exc).__name__}: {exc}); "
                 f"only the order snapshots were backed up."
             )
-        for backup_dir in backup_dirs:
-            warning = backup_compressed_outputs(
-                results_csv_dir,
-                backup_dir,
-                tiers=tiers,
-                bundle=bundle,
-                undelivered=undelivered,
-                bundle_missing=bundle_missing,
-                bundle_stores=bundle_stores,
-                status_cb=status_cb,
-                now_utc=now_utc,
+        for backup_dir in manifests:
+            warning = _within(
+                target_time_limit,
+                lambda d=backup_dir: backup_compressed_outputs(
+                    results_csv_dir,
+                    d,
+                    tiers=tiers,
+                    bundle=bundle,
+                    undelivered=undelivered,
+                    bundle_missing=bundle_missing,
+                    bundle_stores=bundle_stores,
+                    status_cb=status_cb,
+                    now_utc=now_utc,
+                ),
             )
+            if warning is _UNFINISHED:
+                assert target_time_limit is not None
+                warning = _not_responding(backup_dir, target_time_limit)
             if warning:
-                warnings.append(warning)
+                warnings.append(str(warning))
     except Exception as exc:
         logger.warning("Backup failed unexpectedly: %s: %s", type(exc).__name__, exc)
         warnings.append(f"⚠️ Backup failed unexpectedly: {type(exc).__name__}: {exc}")
@@ -792,6 +870,8 @@ class VerifyResult:
     checked: int
     problems: list[str]
     written_utc: Optional[str]
+    # Worth saying, but not a failed check: see verify_backup.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -806,13 +886,20 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
     kept bundle recorded as short of members, and every
     file the manifest lists must be present with the recorded size
     and SHA-256, and must read to the end (a bundle member by member). A
-    backup file the manifest does not list is read too and reported as
-    unrecorded. Run it while no backup is writing: it takes no lock, and
+    backup file the manifest does not list is read too. An order snapshot
+    or archive like that is a note when it reads to the end, not a
+    problem: it was put there before manifests existed (or before a
+    damaged one was started again), and a gzip stream that reads to the
+    end has passed its own CRC, which is the check a recorded checksum
+    would have added. An unlisted bundle stays a problem, because only
+    the manifest says whether a bundle holds every store. Run it while
+    no backup is writing: it takes no lock, and
     a file replaced part-way through the check reads as a mismatch.
     This reads every byte, which on a cloud folder downloads it: it is the
     occasional check a person asks for, never part of a run.
     """
     problems: list[str] = []
+    notes: list[str] = []
     written: Optional[str] = None
     try:
         loaded = json.loads((backup_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
@@ -847,8 +934,15 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
             continue
         checked += 1
         try:
-            if entry is None:
+            if entry is None and _BUNDLE_NAME_RE.match(name):
                 problems.append(f"{name}: no checksum recorded for it")
+            elif entry is None:
+                _read_to_end(path)
+                notes.append(
+                    f"{name}: not in the manifest (no checksum to compare), "
+                    f"reads to the end"
+                )
+                continue
             else:
                 short_of = entry.get("incomplete")
                 if short_of:
@@ -872,4 +966,4 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
             # (an OSError) for one that is not gzip at all, and a bare
             # zlib.error for a damaged deflate stream inside a good header.
             problems.append(f"{name}: unreadable ({type(exc).__name__}: {exc})")
-    return VerifyResult(checked, problems, written)
+    return VerifyResult(checked, problems, written, notes)

@@ -13,6 +13,8 @@ import gzip
 import hashlib
 import json
 import tarfile
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1014,10 +1016,43 @@ def test_verify_reports_an_unrecorded_file_that_is_not_gzip(tmp_path) -> None:
     dst = _backed_up(tmp_path)
     (dst / "cleared_orders_cleaned_2026-03-01.csv.gz").write_bytes(b"not gzip")
 
-    problems = verify_backup(dst).problems
+    result = verify_backup(dst)
 
-    assert any("no checksum recorded" in p for p in problems)
-    assert any("unreadable" in p for p in problems)
+    assert not result.ok and result.notes == []
+    assert len(result.problems) == 1 and "unreadable" in result.problems[0]
+
+
+def test_verify_notes_a_readable_snapshot_from_before_the_manifest(tmp_path) -> None:
+    """
+    A folder that was a backup target before manifests existed holds
+    snapshots the source has since pruned, so no run can ever record a
+    checksum for them. One that reads to the end is said, not failed.
+    """
+    dst = _backed_up(tmp_path)
+    _snapshot(dst, "2026-03-01")
+
+    result = verify_backup(dst)
+
+    assert result.ok and result.problems == []
+    assert result.checked == 4
+    assert result.notes == [
+        "cleared_orders_cleaned_2026-03-01.csv.gz: not in the manifest "
+        "(no checksum to compare), reads to the end"
+    ]
+
+
+def test_verify_still_fails_a_bundle_the_manifest_does_not_list(tmp_path) -> None:
+    """Only the manifest says whether a bundle holds every store."""
+    dst = _backed_up(tmp_path)
+    bundle = next(dst.glob("pipeline_state_*.tar.gz"))
+    (dst / "pipeline_state_2026-03-01.tar.gz").write_bytes(bundle.read_bytes())
+
+    result = verify_backup(dst)
+
+    assert not result.ok
+    assert result.problems == [
+        "pipeline_state_2026-03-01.tar.gz: no checksum recorded for it"
+    ]
 
 
 def test_verify_of_an_empty_or_absent_destination_is_not_ok(tmp_path) -> None:
@@ -1152,6 +1187,162 @@ def test_run_step_survives_a_setting_that_cannot_be_resolved(tmp_path) -> None:
     assert warning.startswith("⚠️ Backup failed unexpectedly: RuntimeError")
 
 
+# --- a destination that stops responding ------------------------------------------
+
+
+@pytest.fixture
+def stuck():
+    """An event a fake blocked call waits on; released when the test ends."""
+    release = threading.Event()
+    yield release
+    release.set()
+
+
+def _hang_copy_to(monkeypatch, target: Path, release: threading.Event) -> None:
+    real = backup_mod.backup_compressed_outputs
+
+    def _copy(results_csv_dir, backup_dir, **kwargs):
+        if backup_dir == target:
+            release.wait(30)
+            return None
+        return real(results_csv_dir, backup_dir, **kwargs)
+
+    monkeypatch.setattr(backup_mod, "backup_compressed_outputs", _copy)
+
+
+def test_destination_that_hangs_is_left_behind_and_the_next_is_served(
+    tmp_path, monkeypatch, stuck
+) -> None:
+    """
+    The fault this guards: a cloud folder blocked a directory listing for
+    88 minutes, and the run waited with its publish still to do.
+    """
+    src = _working_set(tmp_path)
+    hung, good = tmp_path / "hung", tmp_path / "good"
+    _hang_copy_to(monkeypatch, hung, stuck)
+
+    started = time.monotonic()
+    warning = run_backup(
+        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=0.2
+    )
+
+    assert time.monotonic() - started < 10
+    assert warning == (
+        f"⚠️ Backup to {hung} did not finish within 0.2s and was left behind "
+        f"(the folder is not responding); check it with backup --verify."
+    )
+    assert verify_backup(good).ok
+
+
+def test_destination_that_hangs_on_its_first_read_is_asked_only_once(
+    tmp_path, monkeypatch, stuck
+) -> None:
+    """One wait per stuck destination, not one for the manifest and one for the copy."""
+    src = _working_set(tmp_path)
+    hung, good = tmp_path / "hung", tmp_path / "good"
+    real_read = backup_mod.read_manifest
+    copied_to: list[Path] = []
+    real_copy = backup_mod.backup_compressed_outputs
+
+    def _read(backup_dir):
+        if backup_dir == hung:
+            stuck.wait(30)
+        return real_read(backup_dir)
+
+    def _copy(results_csv_dir, backup_dir, **kwargs):
+        copied_to.append(backup_dir)
+        return real_copy(results_csv_dir, backup_dir, **kwargs)
+
+    monkeypatch.setattr(backup_mod, "read_manifest", _read)
+    monkeypatch.setattr(backup_mod, "backup_compressed_outputs", _copy)
+
+    warning = run_backup(
+        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=0.2
+    )
+
+    assert warning is not None and warning.count("did not finish") == 1
+    assert copied_to == [good]
+    assert verify_backup(good).ok
+
+
+def test_without_a_limit_a_slow_destination_is_waited_for(
+    tmp_path, monkeypatch
+) -> None:
+    """The command's case: a person running a first backup to a slow folder."""
+    src = _working_set(tmp_path)
+    dst = tmp_path / "slow"
+    real = backup_mod.backup_compressed_outputs
+
+    def _slow(results_csv_dir, backup_dir, **kwargs):
+        time.sleep(0.3)
+        return real(results_csv_dir, backup_dir, **kwargs)
+
+    monkeypatch.setattr(backup_mod, "backup_compressed_outputs", _slow)
+
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+    assert verify_backup(dst).ok
+
+
+def test_failure_inside_a_limited_destination_is_still_a_warning(
+    tmp_path, monkeypatch
+) -> None:
+    """The limit must not swallow what the copy step would have reported."""
+    src = _working_set(tmp_path)
+
+    def _boom(results_csv_dir, backup_dir, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(backup_mod, "backup_compressed_outputs", _boom)
+
+    warning = run_backup(
+        src, [tmp_path / "cloud"], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=5
+    )
+
+    assert warning == "⚠️ Backup failed unexpectedly: RuntimeError: disk on fire"
+
+
+def test_run_step_limits_each_destination_and_the_command_does_not(
+    tmp_path, monkeypatch
+) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    limits: list[object] = []
+
+    def _record(results_csv_dir, backup_dirs, **kwargs):
+        limits.append(kwargs.get("target_time_limit"))
+        return None
+
+    monkeypatch.setattr(backup_mod, "run_backup", _record)
+    _write_creds(
+        tmp_path, monkeypatch, {"results_csv_dir": str(src), "backup_dirs": [str(dst)]}
+    )
+
+    runner._back_up({"paths": {"backup_dir": str(dst)}}, src, lambda _line: None)
+    assert main(["backup"]) == 0
+
+    assert limits == [runner._BACKUP_TARGET_TIME_LIMIT_SECONDS, None]
+    assert 30 <= runner._BACKUP_TARGET_TIME_LIMIT_SECONDS <= 300
+
+
+def test_backup_command_prints_notes_without_failing(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    _write_creds(
+        tmp_path, monkeypatch, {"results_csv_dir": str(src), "backup_dirs": [str(dst)]}
+    )
+    assert main(["backup"]) == 0
+    _snapshot(dst, "2026-03-01")
+    capsys.readouterr()
+
+    assert main(["backup", "--verify"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"OK: {dst}: 4 file(s) read back" in out
+    assert "note: cleared_orders_cleaned_2026-03-01.csv.gz: not in the manifest" in out
+
+
 # --- the command ------------------------------------------------------------------
 
 
@@ -1173,7 +1364,7 @@ def test_backup_command_backs_up_then_verifies(tmp_path, monkeypatch, capsys) ->
     assert main(["backup"]) == 0
     assert "OK: backed up to 1 destination(s)." in capsys.readouterr().out
     assert main(["backup", "--verify"]) == 0
-    assert f"OK: {dst}: 3 file(s) match" in capsys.readouterr().out
+    assert f"OK: {dst}: 3 file(s) read back" in capsys.readouterr().out
 
 
 def test_backup_command_verify_fails_on_damage(tmp_path, monkeypatch, capsys) -> None:

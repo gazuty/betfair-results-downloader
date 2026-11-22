@@ -789,16 +789,19 @@ def _cmd_backup(args: argparse.Namespace) -> int:
             when = result.written_utc or "never"
             if result.ok:
                 print(
-                    f"OK: {backup_dir}: {result.checked} file(s) match (as of {when})."
+                    f"OK: {backup_dir}: {result.checked} file(s) read back "
+                    f"(as of {when})."
                 )
-                continue
-            failed = True
-            print(
-                f"FAIL: {backup_dir}: {len(result.problems)} problem(s) in "
-                f"{result.checked} file(s) (as of {when})."
-            )
-            for problem in result.problems or ["nothing is backed up there"]:
-                print(f"  {problem}")
+            else:
+                failed = True
+                print(
+                    f"FAIL: {backup_dir}: {len(result.problems)} problem(s) in "
+                    f"{result.checked} file(s) (as of {when})."
+                )
+                for problem in result.problems or ["nothing is backed up there"]:
+                    print(f"  {problem}")
+            for note in result.notes:
+                print(f"  note: {note}")
         return 1 if failed else 0
 
     try:
