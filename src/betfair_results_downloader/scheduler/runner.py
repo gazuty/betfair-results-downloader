@@ -340,6 +340,12 @@ def _refresh_market_commission(
         return warning
 
 
+# Long enough for a first full copy to a slow folder (a normal backup
+# takes a second or two), short enough that a folder which has stopped
+# responding delays the publish and the run's report by minutes at most.
+_BACKUP_TARGET_TIME_LIMIT_SECONDS = 120.0
+
+
 def _back_up(
     creds: dict[str, Any], results_dir: Path, say: Callable[[str], None]
 ) -> Optional[str]:
@@ -350,7 +356,10 @@ def _back_up(
 
     Best-effort by design: a cloud folder being offline or full must never
     fail a run that just succeeded locally, but the warning rides the
-    result message so the ⚠️ reaches Slack.
+    result message so the ⚠️ reaches Slack. Nor may one hold the run up:
+    each directory gets ``_BACKUP_TARGET_TIME_LIMIT_SECONDS`` and is then
+    left behind with a warning, because the publish and the run's own
+    report still come after this step.
     """
     from ..backup import run_backup  # noqa: PLC0415
     from ..paths import (  # noqa: PLC0415
@@ -372,6 +381,7 @@ def _back_up(
             ),
             extra_files=resolve_backup_extra_files(creds),
             status_cb=say,
+            target_time_limit=_BACKUP_TARGET_TIME_LIMIT_SECONDS,
         )
     except Exception as exc:
         # Resolving the settings can raise too ("~nosuchuser/x" has no
