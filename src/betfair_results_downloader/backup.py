@@ -164,6 +164,37 @@ def _is_short(manifest: Optional[dict[str, dict[str, object]]], name: str) -> bo
     return bool(entry and entry.get("incomplete"))
 
 
+def _stores_in(bundle: Path) -> list[str]:
+    """The names of the stores a bundle on local disk holds."""
+    prefix = f"{CACHE_DIRNAME}/"
+    with tarfile.open(bundle, "r:gz") as tar:
+        return sorted(
+            name[len(prefix) :] for name in tar.getnames() if name.startswith(prefix)
+        )
+
+
+def _stores_last_backed_up(backup_dirs: Sequence[Path]) -> set[str]:
+    """
+    The stores in the newest whole bundle on record, over all targets.
+
+    A store the code stops writing would be flagged from then on; that is
+    a code change, which can drop it from here in the same commit. Until
+    then a store that silently stops existing is the case worth catching.
+    """
+    expected: set[str] = set()
+    for backup_dir in backup_dirs:
+        whole = {
+            name: entry
+            for name, entry in read_manifest(backup_dir).items()
+            if _BUNDLE_NAME_RE.match(name)
+            and not entry.get("incomplete")
+            and isinstance(entry.get("stores"), list)
+        }
+        if whole:
+            expected.update(str(store) for store in whole[max(whole)]["stores"])
+    return expected
+
+
 def _remove_stale_staging(results_csv_dir: Path, now_epoch: float) -> None:
     """
     Remove staging directories a killed backup left behind. Only ones old
@@ -199,9 +230,14 @@ def build_state_bundle(
     results_csv_dir: Path,
     extra_files: Sequence[Path],
     bundle_path: Path,
+    expected_stores: Iterable[str] = (),
 ) -> list[str]:
     """
     Write the state bundle for ``results_csv_dir`` to ``bundle_path``.
+
+    ``expected_stores`` names the stores the last whole bundle held. One
+    of them absent now is a problem: a store that has gone missing would
+    otherwise just not be listed, and the bundle would pass for whole.
 
     Holds every regular file directly under ``.cache`` except lock files,
     and each of ``extra_files`` under ``extra/`` with an ``INDEX.json``
@@ -228,6 +264,10 @@ def build_state_bundle(
         stores = []
         problems.append(f"{CACHE_DIRNAME}: {type(exc).__name__}: {exc}")
     members.extend((f, f"{CACHE_DIRNAME}/{f.name}") for f in stores)
+    problems.extend(
+        f"{CACHE_DIRNAME}/{name}: missing, the last whole bundle had it"
+        for name in sorted(set(expected_stores) - {f.name for f in stores})
+    )
 
     origins: dict[str, str] = {}
     for index, extra in enumerate(extra_files):
@@ -379,6 +419,7 @@ def run_backup(
     bundle: Optional[Path] = None
     undelivered: list[str] = []
     bundle_missing: list[str] = []
+    bundle_stores: list[str] = []
     try:
         try:
             # Staged beside the working set (same volume, and never in a
@@ -389,7 +430,13 @@ def run_backup(
             )
             (staging / _STAGING_MARKER).write_text("", encoding="utf-8")
             bundle = staging / f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"
-            missing = build_state_bundle(results_csv_dir, extra_files, bundle)
+            missing = build_state_bundle(
+                results_csv_dir,
+                extra_files,
+                bundle,
+                expected_stores=_stores_last_backed_up(backup_dirs),
+            )
+            bundle_stores = _stores_in(bundle)
             if missing:
                 # Each target's manifest records this against the bundle:
                 # what arrives is a sound archive, so only that record
@@ -416,6 +463,7 @@ def run_backup(
                 bundle=bundle,
                 undelivered=undelivered,
                 bundle_missing=bundle_missing,
+                bundle_stores=bundle_stores,
                 status_cb=status_cb,
                 now_utc=now_utc,
             )
@@ -446,6 +494,7 @@ def backup_compressed_outputs(
     bundle: Optional[Path] = None,
     undelivered: Sequence[str] = (),
     bundle_missing: Sequence[str] = (),
+    bundle_stores: Sequence[str] = (),
     status_cb: Optional[Callable[[str], None]] = None,
     now_utc: Optional[datetime] = None,
 ) -> Optional[str]:
@@ -470,6 +519,7 @@ def backup_compressed_outputs(
             bundle=bundle,
             undelivered=undelivered,
             bundle_missing=bundle_missing,
+            bundle_stores=bundle_stores,
             status_cb=status_cb,
             now_utc=now_utc or datetime.now(timezone.utc),
         )
@@ -486,6 +536,7 @@ def _backup_compressed_outputs_inner(
     bundle: Optional[Path],
     undelivered: Sequence[str],
     bundle_missing: Sequence[str],
+    bundle_stores: Sequence[str],
     status_cb: Optional[Callable[[str], None]],
     now_utc: datetime,
 ) -> Optional[str]:
@@ -620,6 +671,9 @@ def _backup_compressed_outputs_inner(
             shutil.copy2(src, tmp)
             tmp.replace(dst)
             copied += 1
+            if src is bundle:
+                # What the next bundle is checked against.
+                entry["stores"] = list(bundle_stores)
             if short:
                 entry["incomplete"] = list(bundle_missing)
             if manifest is not None:

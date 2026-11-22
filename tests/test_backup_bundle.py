@@ -298,11 +298,14 @@ def test_manifest_records_size_and_checksum_of_what_was_copied(tmp_path) -> None
     assert body["writtenUtc"] == "2026-03-10T22:00:00Z"
     for name, entry in body["files"].items():
         data = (dst / name).read_bytes()
-        assert entry == {
+        expected = {
             "bytes": len(data),
             "mtimeNs": (dst / name).stat().st_mtime_ns,
             "sha256": hashlib.sha256(data).hexdigest(),
-        }, name
+        }
+        if name.startswith("pipeline_state_"):
+            expected["stores"] = ["market_commission.csv", "venue_tracks.csv"]
+        assert entry == expected, name
     assert body["undelivered"] == []
     assert sorted(body["files"]) == [
         "cleared_orders_cleaned_2026-03-09.csv.gz",
@@ -851,6 +854,58 @@ def test_bundles_the_manifest_does_not_list_are_neither_ranked_nor_removed(
     assert "pipeline_state_2026-03-03.tar.gz" in names
     assert "pipeline_state_2026-03-10.tar.gz" in names
     assert any("no checksum recorded" in p for p in verify_backup(dst).problems)
+
+
+def test_store_that_went_missing_before_the_backup_marks_the_bundle_short(
+    tmp_path,
+) -> None:
+    """
+    A store already gone when the directory is listed is simply not
+    there to fail on. Unchecked, the bundle would pass for whole and,
+    with one daily slot, delete the last bundle that held the store.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW - timedelta(days=1)) is None
+    assert read_manifest(dst)["pipeline_state_2026-03-09.tar.gz"]["stores"] == [
+        "market_commission.csv",
+        "venue_tracks.csv",
+    ]
+    (src / ".cache" / "market_commission.csv").unlink()
+
+    warning = run_backup(src, [dst], tiers=tiers, now_utc=NOW)
+
+    assert warning is not None
+    assert ".cache/market_commission.csv: missing, the last whole bundle had it" in (
+        warning
+    )
+    assert (dst / "pipeline_state_2026-03-09.tar.gz").exists()
+    assert not verify_backup(dst).ok
+
+    # It keeps being said, and the whole bundle kept, until the store is back.
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW + timedelta(days=1))
+    assert (dst / "pipeline_state_2026-03-09.tar.gz").exists()
+    (src / ".cache" / "market_commission.csv").write_text("marketId,commission\n")
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW + timedelta(days=2)) is None
+    assert sorted(f.name for f in dst.glob("pipeline_state_*")) == [
+        "pipeline_state_2026-03-12.tar.gz"
+    ]
+
+
+def test_a_new_store_is_not_a_problem(tmp_path) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    assert (
+        run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW - timedelta(days=1)) is None
+    )
+    (src / ".cache" / "racecard.csv").write_text("marketId\n")
+
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+    assert (
+        "racecard.csv"
+        in read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]["stores"]
+    )
 
 
 # --- verify ------------------------------------------------------------------
