@@ -377,9 +377,9 @@ def run_backup(
             bundle = staging / f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"
             missing = build_state_bundle(results_csv_dir, extra_files, bundle)
             if missing:
-                # Kept in the manifest too: the bundle that does arrive is
-                # a good archive, so only this says it is short of members.
-                undelivered.extend(f"{bundle.name} ({item})" for item in missing)
+                # Each target's manifest records this against the bundle:
+                # what arrives is a sound archive, so only that record
+                # says it is short of members.
                 bundle_missing = missing
                 warnings.append(
                     "⚠️ Backup state bundle is incomplete: " + _summarise(missing)
@@ -563,6 +563,15 @@ def _backup_compressed_outputs_inner(
         short = src is bundle and bool(bundle_missing)
         try:
             src_stat = src.stat()
+            if short and manifest is None:
+                # Nowhere to record that it is short, and unrecorded it
+                # would pass for whole from the next run on.
+                problems.append(
+                    f"{src.name}: not copied, it is short of "
+                    f"{len(bundle_missing)} member(s) and the manifest "
+                    f"cannot record that"
+                )
+                continue
             if short and dst.exists() and not _is_short(manifest, src.name):
                 # An earlier run today delivered a whole bundle under this
                 # name. One short of members must not replace it: a few
@@ -571,6 +580,7 @@ def _backup_compressed_outputs_inner(
                     f"{src.name}: kept the earlier complete copy, this "
                     f"run's is short of {len(bundle_missing)} member(s)"
                 )
+                failed.append(f"{src.name} (a copy with every member)")
                 continue
             if dst.exists():
                 dst_stat = dst.stat()
@@ -615,7 +625,15 @@ def _backup_compressed_outputs_inner(
             problems.append(f"prune listing failed: {exc}")
         # Snapshots and bundles are thinned separately: a day that has one
         # but not the other must not cost the other kind a slot.
-        for pattern in (_SNAPSHOT_NAME_RE, _BUNDLE_NAME_RE):
+        patterns = [_SNAPSHOT_NAME_RE]
+        if manifest is not None:
+            patterns.append(_BUNDLE_NAME_RE)
+        else:
+            # Which bundles are short of members is only in the manifest.
+            # Without it a short one would rank as whole and could push
+            # out the last whole one, so bundles wait for a readable one.
+            problems.append("bundles not pruned while the manifest is unreadable")
+        for pattern in patterns:
             mine = {f: d for f, d in dated.items() if d and pattern.match(f.name)}
             # A bundle short of members takes no retention slot: ranked
             # with the rest, today's short one could push out the last
@@ -693,7 +711,8 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
     """
     Read a destination back and check it is restorable.
 
-    Anything the last backup failed to deliver is a problem, and every
+    Anything the last backup failed to deliver is a problem, as is any
+    kept bundle recorded as short of members, and every
     file the manifest lists must be present with the recorded size
     and SHA-256, and must read to the end (a bundle member by member). A
     backup file the manifest does not list is read too and reported as
@@ -740,6 +759,13 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
             if entry is None:
                 problems.append(f"{name}: no checksum recorded for it")
             else:
+                short_of = entry.get("incomplete")
+                if short_of:
+                    # A sound archive that never held everything: it
+                    # stays a problem for as long as it is kept, whatever
+                    # later backups delivered.
+                    members = "; ".join(str(item) for item in short_of)
+                    problems.append(f"{name}: short of member(s): {members}")
                 size = path.stat().st_size
                 if size != entry.get("bytes"):
                     problems.append(

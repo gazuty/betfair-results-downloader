@@ -318,8 +318,8 @@ def test_missing_extra_file_reaches_the_warning(tmp_path) -> None:
     result = verify_backup(tmp_path / "cloud")
     assert not result.ok
     assert result.problems == [
-        f"pipeline_state_2026-03-10.tar.gz (extra file not found: "
-        f"{tmp_path / 'gone.csv'}): the last backup did not deliver it"
+        f"pipeline_state_2026-03-10.tar.gz: short of member(s): "
+        f"extra file not found: {tmp_path / 'gone.csv'}"
     ]
 
 
@@ -339,8 +339,8 @@ def test_store_lost_while_staging_is_recorded_for_verify(tmp_path, monkeypatch) 
 
     assert warning is not None and "venue_tracks.csv: vanished" in warning
     assert verify_backup(dst).problems == [
-        "pipeline_state_2026-03-10.tar.gz (.cache/venue_tracks.csv: vanished): "
-        "the last backup did not deliver it"
+        "pipeline_state_2026-03-10.tar.gz: short of member(s): "
+        ".cache/venue_tracks.csv: vanished"
     ]
 
 
@@ -625,7 +625,11 @@ def test_short_bundle_does_not_replace_a_whole_one_from_earlier_that_day(
     assert warning is not None and "kept the earlier complete copy" in warning
     assert (dst / "pipeline_state_2026-03-10.tar.gz").read_bytes() == whole
     assert "incomplete" not in read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]
-    assert not verify_backup(dst).ok  # the last backup still fell short
+    # The last backup still fell short, and verify says so.
+    assert verify_backup(dst).problems == [
+        "pipeline_state_2026-03-10.tar.gz (a copy with every member): "
+        "the last backup did not deliver it"
+    ]
 
 
 def test_short_bundle_is_replaced_by_a_later_one_the_same_day(tmp_path) -> None:
@@ -648,6 +652,62 @@ def test_short_bundles_are_kept_while_no_whole_one_exists(tmp_path) -> None:
     _short_run(src, dst, tiers, NOW, tmp_path / "gone.csv")
 
     assert len(list(dst.glob("pipeline_state_*"))) == 2
+
+
+def test_bundles_are_not_pruned_while_the_manifest_is_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    """
+    Which bundles are short is only in the manifest. Unreadable, today's
+    short bundle would rank as whole and, with one daily slot, delete
+    yesterday's whole one.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW - timedelta(days=1)) is None
+
+    real_read = Path.read_text
+
+    def _offline(self, *args, **kwargs):
+        if self.name == MANIFEST_NAME:
+            raise OSError("Operation timed out")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _offline)
+    warning = _short_run(src, dst, tiers, NOW, tmp_path / "gone.csv")
+    monkeypatch.undo()
+
+    assert warning is not None
+    assert "bundles not pruned while the manifest is unreadable" in warning
+    assert (dst / "pipeline_state_2026-03-09.tar.gz").exists()
+    # The short bundle is not copied at all: with nowhere to record that
+    # it is short, it would pass for whole from the next run on.
+    assert not (dst / "pipeline_state_2026-03-10.tar.gz").exists()
+    assert "the manifest cannot record that" in warning
+    # Snapshots do not depend on the manifest and are still thinned.
+    assert sorted(f.name for f in dst.glob("cleared_orders_cleaned_*")) == [
+        "cleared_orders_cleaned_2026-03-10.csv.gz"
+    ]
+
+
+def test_verify_keeps_failing_a_kept_short_bundle_after_later_good_backups(
+    tmp_path,
+) -> None:
+    """With no pruning the short bundle stays, and stays a problem."""
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    gone = tmp_path / "gone.csv"
+    _short_run(src, dst, KEEP_ALL, NOW - timedelta(days=1), gone)
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+
+    result = verify_backup(dst)
+
+    assert json.loads((dst / MANIFEST_NAME).read_text())["undelivered"] == []
+    assert result.problems == [
+        f"pipeline_state_2026-03-09.tar.gz: short of member(s): "
+        f"extra file not found: {gone}"
+    ]
 
 
 # --- verify ------------------------------------------------------------------
