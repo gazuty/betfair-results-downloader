@@ -1041,6 +1041,41 @@ def test_verify_notes_a_readable_snapshot_from_before_the_manifest(tmp_path) -> 
     ]
 
 
+@pytest.mark.parametrize(
+    "damaged",
+    ['{"writtenUtc": "2026-03-10T22:00:00Z"}', '{"files": []}', "[]"],
+)
+def test_verify_fails_a_manifest_that_parses_but_has_no_table(
+    tmp_path, damaged
+) -> None:
+    """
+    Read as an empty table, it would turn every snapshot into a file from
+    before manifests and pass the folder with no checksum compared.
+    """
+    dst = _backed_up(tmp_path)
+    for bundle in dst.glob("pipeline_state_*.tar.gz"):
+        bundle.unlink()
+    (dst / MANIFEST_NAME).write_text(damaged)
+
+    result = verify_backup(dst)
+
+    assert not result.ok
+    assert result.problems == [f"{MANIFEST_NAME}: damaged (no table of files)"]
+
+
+def test_verify_fails_a_file_whose_manifest_entry_is_damaged(tmp_path) -> None:
+    dst = _backed_up(tmp_path)
+    name = "cleared_orders_cleaned_2026-03-09.csv.gz"
+    manifest = json.loads((dst / MANIFEST_NAME).read_text())
+    manifest["files"][name] = "oops"
+    (dst / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    result = verify_backup(dst)
+
+    assert not result.ok
+    assert result.problems == [f"{name}: its manifest entry is damaged"]
+
+
 def test_verify_still_fails_a_bundle_the_manifest_does_not_list(tmp_path) -> None:
     """Only the manifest says whether a bundle holds every store."""
     dst = _backed_up(tmp_path)

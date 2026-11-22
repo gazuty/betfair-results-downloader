@@ -925,6 +925,18 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
             problems.extend(
                 f"{name}: the last backup did not deliver it" for name in missed
             )
+        # A manifest that parses but is not one must fail the check: with
+        # its table read as empty, every snapshot here would pass as a
+        # file from before manifests, on no checksum at all.
+        files = loaded.get("files") if isinstance(loaded, dict) else None
+        if not isinstance(files, dict):
+            problems.append(f"{MANIFEST_NAME}: damaged (no table of files)")
+        else:
+            problems.extend(
+                f"{name}: its manifest entry is damaged"
+                for name, entry in sorted(files.items())
+                if not isinstance(entry, dict)
+            )
     except (OSError, ValueError) as exc:
         problems.append(f"{MANIFEST_NAME}: unreadable ({type(exc).__name__}: {exc})")
     manifest = read_manifest(backup_dir)
