@@ -177,6 +177,26 @@ def test_bundle_holds_the_stores_and_the_extra_files(tmp_path) -> None:
     assert members[".cache/market_commission.csv"] == b"marketId,commission\n1.2,0.5\n"
 
 
+def test_writers_temporary_files_are_not_bundled(tmp_path) -> None:
+    """
+    The hourly racecard job, outside the pipeline lock, fills
+    "racecard.csv.<pid>.tmp" and renames it over the store. That file is
+    not a store: half-written it must not be archived, and its rename
+    must not read as a store that vanished.
+    """
+    src = _working_set(tmp_path)
+    (src / ".cache" / "racecard.csv.4242.tmp").write_text("marketId\n1.")
+    (src / ".cache" / "market_commission.csv.tmp").write_text("half")
+
+    problems = build_state_bundle(src, [], tmp_path / "b.tar.gz")
+
+    assert problems == []
+    assert sorted(_bundle_members(tmp_path / "b.tar.gz")) == [
+        ".cache/market_commission.csv",
+        ".cache/venue_tracks.csv",
+    ]
+
+
 def test_missing_extra_file_is_reported_not_fatal(tmp_path) -> None:
     src = _working_set(tmp_path)
     gone = tmp_path / "nowhere" / "Master.csv"
@@ -862,6 +882,33 @@ def test_verify_catches_a_bundle_that_gunzips_but_is_not_an_archive(tmp_path) ->
 
     assert len(problems) == 1
     assert "pipeline_state_2026-03-10.tar.gz: unreadable" in problems[0]
+
+
+def test_verify_reports_a_damaged_deflate_stream_instead_of_crashing(tmp_path) -> None:
+    """
+    A good gzip header around a broken stream raises zlib.error, not an
+    OSError; with a matching checksum (the source was already damaged
+    when backed up) only the read-through finds it.
+    """
+    dst = _backed_up(tmp_path)
+    target = dst / "cleared_orders_cleaned_2026-03-10.csv.gz"
+    data = bytearray(gzip.compress(b"betId\n" + b"123456789\n" * 500))
+    data[10:40] = b"\xff" * 30  # past the 10-byte header, inside the stream
+    target.write_bytes(bytes(data))
+    body = json.loads((dst / MANIFEST_NAME).read_text())
+    body["files"][target.name] = {
+        "bytes": len(data),
+        "mtimeNs": target.stat().st_mtime_ns,
+        "sha256": hashlib.sha256(bytes(data)).hexdigest(),
+    }
+    (dst / MANIFEST_NAME).write_text(json.dumps(body))
+
+    problems = verify_backup(dst).problems
+
+    assert len(problems) == 1
+    assert problems[0].startswith(
+        "cleared_orders_cleaned_2026-03-10.csv.gz: unreadable (error:"
+    )
 
 
 def test_verify_catches_a_missing_file(tmp_path) -> None:

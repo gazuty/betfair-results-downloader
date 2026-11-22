@@ -47,6 +47,7 @@ import shutil
 import tarfile
 import tempfile
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -73,6 +74,10 @@ EXTRA_INDEX_NAME = "INDEX.json"
 # A staging directory this old belongs to a backup that was killed.
 _STALE_STAGING_SECONDS = 3600
 _STAGING_PREFIX = ".backup-"
+# Beside the stores but not stores: lock files, and the "<name>.tmp" or
+# "<name>.<pid>.tmp" a writer fills before renaming it over the store. A
+# half-written one must not be archived, nor its rename read as a loss.
+_NOT_A_STORE_SUFFIXES = frozenset({".lock", ".tmp"})
 _STAGING_MARKER = ".betfair-backup-staging"
 _HASH_CHUNK = 1 << 20
 
@@ -213,7 +218,9 @@ def build_state_bundle(
     cache_dir = results_csv_dir / CACHE_DIRNAME
     try:
         stores = sorted(
-            f for f in cache_dir.iterdir() if f.is_file() and f.suffix != ".lock"
+            f
+            for f in cache_dir.iterdir()
+            if f.is_file() and f.suffix not in _NOT_A_STORE_SUFFIXES
         )
     except OSError as exc:
         # Including a directory that is not there: a bundle with no stores
@@ -792,8 +799,9 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
                     problems.append(f"{name}: checksum differs from the manifest")
                     continue
             _read_to_end(path)
-        except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
+        except (OSError, EOFError, ValueError, tarfile.TarError, zlib.error) as exc:
             # gzip raises EOFError for a truncated file, BadGzipFile
-            # (an OSError) for one that is not gzip at all.
+            # (an OSError) for one that is not gzip at all, and a bare
+            # zlib.error for a damaged deflate stream inside a good header.
             problems.append(f"{name}: unreadable ({type(exc).__name__}: {exc})")
     return VerifyResult(checked, problems, written)
