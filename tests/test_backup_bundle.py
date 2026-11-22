@@ -578,6 +578,78 @@ def test_bundle_that_was_never_built_is_recorded_as_undelivered(
     ]
 
 
+def _short_run(src: Path, dst: Path, tiers: RetentionTiers, now: datetime, gone: Path):
+    return run_backup(src, [dst], tiers=tiers, extra_files=[gone], now_utc=now)
+
+
+def test_short_bundle_does_not_push_out_the_last_whole_one(tmp_path) -> None:
+    """
+    With one daily slot, today's bundle short of a configured file must
+    not cost the target yesterday's whole one: a passing source failure
+    would otherwise destroy the last complete recovery set.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    yesterday = NOW - timedelta(days=1)
+    assert run_backup(src, [dst], tiers=tiers, now_utc=yesterday) is None
+
+    warning = _short_run(src, dst, tiers, NOW, tmp_path / "gone.csv")
+
+    assert warning is not None
+    assert sorted(f.name for f in dst.glob("pipeline_state_*")) == [
+        "pipeline_state_2026-03-09.tar.gz",
+        "pipeline_state_2026-03-10.tar.gz",
+    ]
+    assert read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]["incomplete"] == [
+        f"extra file not found: {tmp_path / 'gone.csv'}"
+    ]
+
+    # A whole bundle the next day replaces both.
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW + timedelta(days=1)) is None
+    assert sorted(f.name for f in dst.glob("pipeline_state_*")) == [
+        "pipeline_state_2026-03-11.tar.gz"
+    ]
+
+
+def test_short_bundle_does_not_replace_a_whole_one_from_earlier_that_day(
+    tmp_path,
+) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+    whole = (dst / "pipeline_state_2026-03-10.tar.gz").read_bytes()
+
+    warning = _short_run(src, dst, KEEP_ALL, NOW, tmp_path / "gone.csv")
+
+    assert warning is not None and "kept the earlier complete copy" in warning
+    assert (dst / "pipeline_state_2026-03-10.tar.gz").read_bytes() == whole
+    assert "incomplete" not in read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]
+    assert not verify_backup(dst).ok  # the last backup still fell short
+
+
+def test_short_bundle_is_replaced_by_a_later_one_the_same_day(tmp_path) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    _short_run(src, dst, KEEP_ALL, NOW, tmp_path / "gone.csv")
+    assert "incomplete" in read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]
+
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+
+    assert "incomplete" not in read_manifest(dst)["pipeline_state_2026-03-10.tar.gz"]
+    assert verify_backup(dst).ok
+
+
+def test_short_bundles_are_kept_while_no_whole_one_exists(tmp_path) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    _short_run(src, dst, tiers, NOW - timedelta(days=1), tmp_path / "gone.csv")
+    _short_run(src, dst, tiers, NOW, tmp_path / "gone.csv")
+
+    assert len(list(dst.glob("pipeline_state_*"))) == 2
+
+
 # --- verify ------------------------------------------------------------------
 
 

@@ -148,6 +148,16 @@ def _entry_matches(entry: Optional[dict[str, object]], stat: os.stat_result) -> 
     )
 
 
+def _is_short(manifest: Optional[dict[str, dict[str, object]]], name: str) -> bool:
+    """
+    Whether the manifest records ``name`` as a bundle short of members.
+    With no manifest to go by, a file counts as whole: the cautious side,
+    since whole files are the ones kept.
+    """
+    entry = (manifest or {}).get(name)
+    return bool(entry and entry.get("incomplete"))
+
+
 def _remove_stale_staging(results_csv_dir: Path, now_epoch: float) -> None:
     """
     Remove staging directories a killed backup left behind. Only ones old
@@ -355,6 +365,7 @@ def run_backup(
     staging: Optional[Path] = None
     bundle: Optional[Path] = None
     undelivered: list[str] = []
+    bundle_missing: list[str] = []
     try:
         try:
             # Staged beside the working set (same volume, and never in a
@@ -369,6 +380,7 @@ def run_backup(
                 # Kept in the manifest too: the bundle that does arrive is
                 # a good archive, so only this says it is short of members.
                 undelivered.extend(f"{bundle.name} ({item})" for item in missing)
+                bundle_missing = missing
                 warnings.append(
                     "⚠️ Backup state bundle is incomplete: " + _summarise(missing)
                 )
@@ -389,6 +401,7 @@ def run_backup(
                 tiers=tiers,
                 bundle=bundle,
                 undelivered=undelivered,
+                bundle_missing=bundle_missing,
                 status_cb=status_cb,
                 now_utc=now_utc,
             )
@@ -418,6 +431,7 @@ def backup_compressed_outputs(
     tiers: Optional[RetentionTiers] = None,
     bundle: Optional[Path] = None,
     undelivered: Sequence[str] = (),
+    bundle_missing: Sequence[str] = (),
     status_cb: Optional[Callable[[str], None]] = None,
     now_utc: Optional[datetime] = None,
 ) -> Optional[str]:
@@ -441,6 +455,7 @@ def backup_compressed_outputs(
             tiers=tiers or RetentionTiers(daily=retention),
             bundle=bundle,
             undelivered=undelivered,
+            bundle_missing=bundle_missing,
             status_cb=status_cb,
             now_utc=now_utc or datetime.now(timezone.utc),
         )
@@ -456,6 +471,7 @@ def _backup_compressed_outputs_inner(
     tiers: RetentionTiers,
     bundle: Optional[Path],
     undelivered: Sequence[str],
+    bundle_missing: Sequence[str],
     status_cb: Optional[Callable[[str], None]],
     now_utc: datetime,
 ) -> Optional[str]:
@@ -544,8 +560,18 @@ def _backup_compressed_outputs_inner(
         # collide -- must not truncate or rename each other's in-progress
         # copy. The final replace() is atomic either way.
         tmp = dst.with_name(f"{dst.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+        short = src is bundle and bool(bundle_missing)
         try:
             src_stat = src.stat()
+            if short and dst.exists() and not _is_short(manifest, src.name):
+                # An earlier run today delivered a whole bundle under this
+                # name. One short of members must not replace it: a few
+                # hours staler is better than missing a store.
+                problems.append(
+                    f"{src.name}: kept the earlier complete copy, this "
+                    f"run's is short of {len(bundle_missing)} member(s)"
+                )
+                continue
             if dst.exists():
                 dst_stat = dst.stat()
                 if (
@@ -569,6 +595,8 @@ def _backup_compressed_outputs_inner(
             shutil.copy2(src, tmp)
             tmp.replace(dst)
             copied += 1
+            if short:
+                entry["incomplete"] = list(bundle_missing)
             if manifest is not None:
                 manifest[src.name] = entry
         except OSError as exc:
@@ -589,9 +617,17 @@ def _backup_compressed_outputs_inner(
         # but not the other must not cost the other kind a slot.
         for pattern in (_SNAPSHOT_NAME_RE, _BUNDLE_NAME_RE):
             mine = {f: d for f, d in dated.items() if d and pattern.match(f.name)}
-            keep = dates_to_keep(mine.values(), tiers)
+            # A bundle short of members takes no retention slot: ranked
+            # with the rest, today's short one could push out the last
+            # whole one. It goes once a newer whole bundle exists.
+            whole = {f: d for f, d in mine.items() if not _is_short(manifest, f.name)}
+            keep = dates_to_keep(whole.values(), tiers)
+            newest_whole = max(whole.values(), default=None)
             for f, day in mine.items():
-                if day in keep:
+                if f in whole:
+                    if day in keep:
+                        continue
+                elif newest_whole is None or day >= newest_whole:
                     continue
                 try:
                     f.unlink()
