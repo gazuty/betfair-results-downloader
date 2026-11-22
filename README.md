@@ -419,7 +419,7 @@ python -m betfair_results_downloader backup            # back up now
 python -m betfair_results_downloader backup --verify   # check what the targets hold
 ```
 
-`--verify` requires every file in the target's manifest to be present with the recorded size and SHA-256 and to decompress to the end, and prints the manifest's timestamp, which is when a backup last reached that folder. It reads every backed-up byte, so on a cloud folder it downloads them.
+`--verify` requires every file in the target's manifest to be present with the recorded size and SHA-256 and to decompress to the end, and prints the manifest's timestamp, which is when a backup last reached that folder. It reads every backed-up byte, so on a cloud folder it downloads them. Run it while no backup is writing: it takes no lock, and a file replaced part-way through reads as a mismatch.
 
 Exit codes: `0` = success · `1` = a target is incomplete or failed its check · `2` = bad configuration (including no target configured).
 
@@ -730,7 +730,7 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | `backup_dir` | string | Optional | One-way disaster-recovery copy target (e.g. a cloud-synced folder). At the end of each successful run it receives the compressed snapshots, the yearly archives, a dated bundle of the stores and a manifest (see [Backups](#backups)). Backup failures warn (to Slack) but never fail the run. A run never reads anything back from it. |
 | `backup_dirs` | list of strings | Optional | Further copy targets, each treated like `backup_dir`. Two folders synced by two different services are two independent copies; one failing does not stop the other. |
 | `backup_extra_files` | list of strings | Optional | Files outside `results_csv_dir` to carry in the state bundle (a spreadsheet or master file another tool keeps, the run history). A listed file that is missing is reported as a ⚠️ warning; the rest is still backed up. |
-| `backup_retention` | object | Optional | How many dated copies each target keeps: `{"daily": 7, "weekly": 8, "monthly": 12}` keeps the newest 7 dates, the last copy of each of the latest 8 weeks and of each of the latest 12 months. Unset keeps the newest `user.snapshot_retention_days` dates only, as before. Yearly archives are never pruned. |
+| `backup_retention` | object | Optional | How many dated copies each target keeps: `{"daily": 7, "weekly": 8, "monthly": 12}` keeps the newest 7 dates, the last copy of each of the latest 8 weeks and of each of the latest 12 months. Unset keeps the newest `user.snapshot_retention_days` dates only, as before. An object with every tier at zero (or `{}`) never prunes. Yearly archives are never pruned. |
 
 ### `schedule` (optional — for scheduled automatic downloads)
 
@@ -808,14 +808,14 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 The working set lives on local disk, and Betfair only answers for recent markets, so a lost disk loses history that cannot be downloaded again. With a backup target configured, each successful run ends by copying to every target:
 
 - **Order snapshots and yearly archives** — the `cleared_orders_cleaned_YYYY-MM-DD.csv.gz` and `cleared_orders_archive_YYYY.csv.gz` files, unchanged.
-- **A state bundle** — `pipeline_state_YYYY-MM-DD.tar.gz`: every store under `.cache/` (settlement status, commission, racecard, venue tracks, catalogue caches) and each `paths.backup_extra_files` file under `extra/`. The stores hold answers Betfair no longer gives for old markets, so the orders alone do not rebuild them.
+- **A state bundle** — `pipeline_state_YYYY-MM-DD.tar.gz`: every store under `.cache/` (settlement status, commission, racecard, venue tracks, catalogue caches) and each `paths.backup_extra_files` file under `extra/`, numbered, with an `extra/INDEX.json` naming the path each came from. It is rebuilt and copied again on every run that backs up, so a sync client uploads it each time. The stores hold answers Betfair no longer gives for old markets, so the orders alone do not rebuild them.
 - **A manifest** — `backup_manifest.json`: the time of the backup and the size and SHA-256 of every file the target holds, taken from the local source as each file is copied.
 
-Dated files are thinned by `paths.backup_retention`. The backup runs last, after the stores have been refreshed, and is best-effort: a target that is offline or full produces a ⚠️ warning in the run message and never fails the run.
+Dated files are thinned by `paths.backup_retention`. The backup runs last, after the stores have been refreshed, and is best-effort: a target that is offline or full produces a ⚠️ warning in the run message and never fails the run. A run that downloads no rows writes no snapshot and does not back up; the stores it refreshed are in the next run's bundle.
 
 **What it cannot tell you.** A backup "succeeds" when the files reach the target folder. Whether a sync client then uploaded them is invisible from here: a client that is signed out or not running leaves a healthy-looking local folder and nothing off the machine. Check the cloud side from time to time (the manifest's `writtenUtc` there should be from today), and run `backup --verify` occasionally.
 
-**Restoring.** Copy the newest snapshot into `results_csv_dir` and decompress it to `cleared_orders_cleaned.csv`, copy the yearly archives beside it, and unpack the newest bundle there (`tar -xzf pipeline_state_YYYY-MM-DD.tar.gz`): the stores land in `.cache/` and the extra files in `extra/`, to be put back where they came from. Then run `export-market-results` to rebuild the feed.
+**Restoring.** Copy the newest snapshot into `results_csv_dir` and decompress it to `cleared_orders_cleaned.csv`, copy the yearly archives beside it, and unpack the newest bundle there (`tar -xzf pipeline_state_YYYY-MM-DD.tar.gz`): the stores land in `.cache/` and the extra files in `extra/`, to be put back at the paths `extra/INDEX.json` lists. Then run `export-market-results` to rebuild the feed.
 
 **Never put credentials in a backup target.** Nothing here copies `credentials.json` or certificates, and `backup_extra_files` should not list them: keep those in a password manager.
 

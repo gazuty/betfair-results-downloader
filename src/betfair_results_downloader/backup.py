@@ -23,7 +23,8 @@ three kinds of file per destination:
   answering for old markets, so these cannot all be rebuilt from the
   orders alone;
 * ``backup_manifest.json``: size and SHA-256 of every file the backup
-  holds, taken from the local source at copy time. It is what
+  holds, taken from the local source at copy time. It is the one file a
+  run reads back from a backup directory (a few kilobytes). It is what
   ``backup --verify`` checks a destination against, and its timestamp is
   the one thing that shows, from the cloud side, when a backup last
   arrived.
@@ -67,6 +68,11 @@ CACHE_DIRNAME = ".cache"
 # Where a bundle keeps the files named in paths.backup_extra_files, apart
 # from the stores so a restore can tell which directory each came from.
 _EXTRA_PREFIX = "extra"
+# In the bundle beside the extras: which path each one was copied from.
+EXTRA_INDEX_NAME = "INDEX.json"
+# A staging directory this old belongs to a backup that was killed.
+_STALE_STAGING_SECONDS = 3600
+_STAGING_PREFIX = ".backup-"
 _HASH_CHUNK = 1 << 20
 
 
@@ -120,6 +126,46 @@ def _dated(name: str) -> Optional[date]:
         return None
 
 
+def _entry(source: Path, source_stat: os.stat_result) -> dict[str, object]:
+    """
+    A manifest entry for ``source``. The mtime is what ties the entry to
+    one version of the file: a same-day rewrite keeps the name and can
+    keep the size.
+    """
+    return {
+        "bytes": source_stat.st_size,
+        "mtimeNs": source_stat.st_mtime_ns,
+        "sha256": _sha256(source),
+    }
+
+
+def _entry_matches(entry: Optional[dict[str, object]], stat: os.stat_result) -> bool:
+    """Whether ``entry`` describes the version of the file ``stat`` is of."""
+    return (
+        entry is not None
+        and entry.get("bytes") == stat.st_size
+        and entry.get("mtimeNs") == stat.st_mtime_ns
+    )
+
+
+def _remove_stale_staging(results_csv_dir: Path, now_epoch: float) -> None:
+    """
+    Remove staging directories a killed backup left behind. Only ones old
+    enough that no live backup can own them; best-effort, since a leftover
+    costs disk and nothing else.
+    """
+    try:
+        leftovers = [
+            d
+            for d in results_csv_dir.glob(f"{_STAGING_PREFIX}*")
+            if d.is_dir() and now_epoch - d.stat().st_mtime > _STALE_STAGING_SECONDS
+        ]
+    except OSError:
+        return
+    for leftover in leftovers:
+        shutil.rmtree(leftover, ignore_errors=True)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -137,7 +183,8 @@ def build_state_bundle(
     Write the state bundle for ``results_csv_dir`` to ``bundle_path``.
 
     Holds every regular file directly under ``.cache`` except lock files,
-    and each of ``extra_files`` under ``extra/``. Returns what could not
+    and each of ``extra_files`` under ``extra/`` with an ``INDEX.json``
+    naming the path each came from. Returns what could not
     be included, one line each; a missing extra file is reported rather
     than fatal, because a bundle without it is still worth having and a
     silent gap would only be found at restore time.
@@ -159,42 +206,96 @@ def build_state_bundle(
         problems.append(f"{CACHE_DIRNAME}: {exc}")
     members.extend((f, f"{CACHE_DIRNAME}/{f.name}") for f in stores)
 
-    used: set[str] = set()
+    origins: dict[str, str] = {}
     for index, extra in enumerate(extra_files):
         if not extra.is_file():
             problems.append(f"extra file not found: {extra}")
             continue
-        # Two extras may share a basename (two masters from two folders).
-        name = extra.name if extra.name not in used else f"{index}_{extra.name}"
-        used.add(name)
-        members.append((extra, f"{_EXTRA_PREFIX}/{name}"))
+        # Numbered, so two extras sharing a basename (two masters from two
+        # folders) both fit; the index below says where each came from.
+        arcname = f"{_EXTRA_PREFIX}/{index}_{extra.name}"
+        origins[arcname] = str(extra)
+        members.append((extra, arcname))
 
-    with tarfile.open(bundle_path, "w:gz") as tar:
-        for source, arcname in members:
+    # Each file is copied to local staging first and the copies are what
+    # the archive reads. tarfile sizes a member from one stat and then
+    # reads the path again: a store replaced in between (the hourly
+    # racecard job writes outside the pipeline lock) would leave a short
+    # member and misalign every one after it. A plain copy reads whichever
+    # whole file it opened.
+    with tempfile.TemporaryDirectory(
+        prefix="members-", dir=bundle_path.parent
+    ) as staged_dir:
+        staged: list[tuple[Path, str]] = []
+        for number, (source, arcname) in enumerate(members):
+            copy = Path(staged_dir) / f"{number}"
             try:
-                tar.add(source, arcname=arcname, recursive=False)
+                shutil.copy2(source, copy)
             except OSError as exc:
-                # A store replaced or removed between listing and reading.
+                # Removed between listing and reading, or unreadable.
                 problems.append(f"{arcname}: {exc}")
+                origins.pop(arcname, None)
+                continue
+            staged.append((copy, arcname))
+        if origins:
+            index_file = Path(staged_dir) / "index"
+            index_file.write_text(
+                json.dumps(origins, indent=2) + "\n", encoding="utf-8"
+            )
+            staged.append((index_file, f"{_EXTRA_PREFIX}/{EXTRA_INDEX_NAME}"))
+        # Any failure from here is the archive itself going wrong, and a
+        # half-written archive must not be mistaken for a bundle: raise.
+        with tarfile.open(bundle_path, "w:gz") as tar:
+            for copy, arcname in staged:
+                tar.add(copy, arcname=arcname, recursive=False)
     return problems
+
+
+class ManifestUnreadable(OSError):
+    """A manifest exists at the destination but could not be read."""
+
+
+def _load_manifest(backup_dir: Path) -> tuple[dict[str, dict[str, object]], bool]:
+    """
+    A destination's ``files`` table and whether it was damaged.
+
+    No manifest is a first backup: an empty table, not damaged. One that
+    is there but cannot be read raises :class:`ManifestUnreadable`,
+    because rewriting it from this run's files alone would throw away the
+    checksums of every older copy the destination holds. One that reads
+    but is not a manifest is damaged: nothing in it can be trusted, so the
+    table starts again and the caller says so.
+    """
+    path = backup_dir / MANIFEST_NAME
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, False
+    except OSError as exc:
+        raise ManifestUnreadable(f"{type(exc).__name__}: {exc}") from exc
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        return {}, True
+    files = loaded.get("files") if isinstance(loaded, dict) else None
+    if not isinstance(files, dict):
+        return {}, True
+    return (
+        {str(name): entry for name, entry in files.items() if isinstance(entry, dict)},
+        False,
+    )
 
 
 def read_manifest(backup_dir: Path) -> dict[str, dict[str, object]]:
     """
-    The ``files`` table of a destination's manifest; empty when there is
-    none or it cannot be read (a first backup, or a damaged file, which the
-    next write replaces).
+    The ``files`` table of a destination's manifest, for reporting; empty
+    when there is none or it cannot be read. A backup uses
+    :func:`_load_manifest`, which tells those cases apart.
     """
     try:
-        loaded = json.loads((backup_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return _load_manifest(backup_dir)[0]
+    except ManifestUnreadable:
         return {}
-    files = loaded.get("files") if isinstance(loaded, dict) else None
-    if not isinstance(files, dict):
-        return {}
-    return {
-        str(name): entry for name, entry in files.items() if isinstance(entry, dict)
-    }
 
 
 def _write_manifest(
@@ -247,7 +348,10 @@ def run_backup(
         try:
             # Staged beside the working set (same volume, and never in a
             # cloud folder), under a dot-name no pattern here matches.
-            staging = Path(tempfile.mkdtemp(prefix=".backup-", dir=results_csv_dir))
+            _remove_stale_staging(results_csv_dir, now_utc.timestamp())
+            staging = Path(
+                tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=results_csv_dir)
+            )
             bundle = staging / f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"
             missing = build_state_bundle(results_csv_dir, extra_files, bundle)
             if missing:
@@ -395,7 +499,23 @@ def _backup_compressed_outputs_inner(
     if bundle is not None:
         candidates.append(bundle)
 
-    manifest = read_manifest(backup_dir)
+    # The one read a run makes of a backup directory: the manifest is a
+    # few kilobytes, and without it the checksums of copies that no longer
+    # exist locally could not be carried forward.
+    manifest: Optional[dict[str, dict[str, object]]]
+    try:
+        manifest, damaged = _load_manifest(backup_dir)
+        if damaged:
+            problems.append(
+                f"{MANIFEST_NAME} was damaged and has been started again; "
+                f"older copies have no recorded checksum"
+            )
+    except ManifestUnreadable as exc:
+        manifest = None
+        problems.append(
+            f"{MANIFEST_NAME} could not be read ({exc}), so it was left as it "
+            f"is; this run's checksums are not recorded"
+        )
     copied = 0
     for src in candidates:
         dst = backup_dir / src.name
@@ -412,23 +532,25 @@ def _backup_compressed_outputs_inner(
                     dst_stat.st_size == src_stat.st_size
                     and dst_stat.st_mtime_ns == src_stat.st_mtime_ns
                 ):
-                    if src.name not in manifest:
-                        # Copied before manifests existed: record it now,
-                        # from the source it was judged identical to.
-                        manifest[src.name] = {
-                            "bytes": src_stat.st_size,
-                            "sha256": _sha256(src),
-                        }
+                    if manifest is not None and not _entry_matches(
+                        manifest.get(src.name), src_stat
+                    ):
+                        # No entry (copied before manifests existed), or
+                        # one for an earlier version of the file (its
+                        # manifest write failed): take it from the source
+                        # this copy was judged identical to.
+                        manifest[src.name] = _entry(src, src_stat)
                     continue
             # tmp + rename: an interrupted copy must not leave a truncated
             # file under a name the retention logic would treat as good.
             # copy2 preserves the source mtime, which is what makes the
             # skip check above safe on the next run.
-            checksum = _sha256(src)
+            entry = _entry(src, src_stat)
             shutil.copy2(src, tmp)
             tmp.replace(dst)
             copied += 1
-            manifest[src.name] = {"bytes": src_stat.st_size, "sha256": checksum}
+            if manifest is not None:
+                manifest[src.name] = entry
         except OSError as exc:
             problems.append(f"{src.name}: {exc}")
             try:
@@ -458,21 +580,42 @@ def _backup_compressed_outputs_inner(
     # The manifest describes what the destination holds now: entries for
     # pruned files go, and a file with no recorded checksum (copied before
     # manifests existed) is simply absent from it.
-    try:
-        present = {f.name for f in backup_dir.iterdir()}
-        _write_manifest(
-            backup_dir,
-            {name: entry for name, entry in manifest.items() if name in present},
-            now_utc,
-        )
-    except OSError as exc:
-        problems.append(f"manifest: {exc}")
+    if manifest is not None:
+        try:
+            present = {f.name for f in backup_dir.iterdir()}
+            _write_manifest(
+                backup_dir,
+                {name: entry for name, entry in manifest.items() if name in present},
+                now_utc,
+            )
+        except OSError as exc:
+            problems.append(f"manifest not written: {exc}")
 
     if copied and status_cb:
         status_cb(f"Backup: copied {copied} file(s) to {backup_dir}.")
     if problems:
         return f"⚠️ Backup to {backup_dir} incomplete: {_summarise(problems)}"
     return None
+
+
+def _read_to_end(path: Path) -> None:
+    """
+    Read a backup file as a restore would: a bundle member by member, any
+    other file as one gzip stream. Raises on the first thing unreadable.
+    A bundle that merely gunzips can still be a broken archive.
+    """
+    if _BUNDLE_NAME_RE.match(path.name):
+        with tarfile.open(path, "r:gz") as tar:
+            for member in tar:
+                handle = tar.extractfile(member)
+                if handle is None:
+                    continue
+                while handle.read(_HASH_CHUNK):
+                    pass
+        return
+    with gzip.open(path, "rb") as fh:
+        while fh.read(_HASH_CHUNK):
+            pass
 
 
 @dataclass(frozen=True)
@@ -493,8 +636,10 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
     Read a destination back and check it is restorable.
 
     Every file the manifest lists must be present with the recorded size
-    and SHA-256, and must decompress to the end. A backup file the
-    manifest does not list is decompressed too and reported as unrecorded.
+    and SHA-256, and must read to the end (a bundle member by member). A
+    backup file the manifest does not list is read too and reported as
+    unrecorded. Run it while no backup is writing: it takes no lock, and
+    a file replaced part-way through the check reads as a mismatch.
     This reads every byte, which on a cloud folder downloads it: it is the
     occasional check a person asks for, never part of a run.
     """
@@ -540,10 +685,8 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
                 if _sha256(path) != entry.get("sha256"):
                     problems.append(f"{name}: checksum differs from the manifest")
                     continue
-            with gzip.open(path, "rb") as fh:
-                while fh.read(_HASH_CHUNK):
-                    pass
-        except (OSError, EOFError, ValueError) as exc:
+            _read_to_end(path)
+        except (OSError, EOFError, ValueError, tarfile.TarError) as exc:
             # gzip raises EOFError for a truncated file, BadGzipFile
             # (an OSError) for one that is not gzip at all.
             problems.append(f"{name}: unreadable ({type(exc).__name__}: {exc})")

@@ -761,13 +761,23 @@ def _cmd_backup(args: argparse.Namespace) -> int:
         resolve_results_dir,
     )
     from .run_lock import PipelineBusy, pipeline_lock
+    from .secrets import validate_credentials
 
-    try:
-        results_dir = resolve_results_dir(creds)
-    except (ResultsDirNotConfigured, AttributeError):
-        print("FAIL: paths.results_csv_dir is not configured in credentials.json")
+    # Only the paths settings: a backup needs no Betfair login, but a
+    # mistyped retention tier resolves to zero and would thin the copies.
+    bad_paths = [e for e in validate_credentials(creds).errors if "paths" in e]
+    if bad_paths:
+        print("FAIL: invalid backup configuration:")
+        for error in bad_paths:
+            print(f"  - {error}")
         return 2
-    backup_dirs = resolve_backup_dirs(creds)
+    try:
+        backup_dirs = resolve_backup_dirs(creds)
+        extra_files = resolve_backup_extra_files(creds)
+    except RuntimeError as exc:
+        # A "~user" entry for a user that does not exist.
+        print(f"FAIL: invalid backup configuration: {exc}")
+        return 2
     if not backup_dirs:
         print("FAIL: no backup destination; set paths.backup_dir or paths.backup_dirs")
         return 2
@@ -791,18 +801,25 @@ def _cmd_backup(args: argparse.Namespace) -> int:
                 print(f"  {problem}")
         return 1 if failed else 0
 
-    user = creds.get("user", {}) or {}
     try:
-        # Under the lock so the bundle never holds a store that a run is
-        # half-way through replacing alongside its neighbours.
+        results_dir = resolve_results_dir(creds)
+        user = creds.get("user", {}) or {}
+        tiers = resolve_backup_retention(
+            creds, int(user.get("snapshot_retention_days", 14))
+        )
+    except (ResultsDirNotConfigured, AttributeError, TypeError, ValueError) as exc:
+        print(f"FAIL: invalid backup configuration: {exc}")
+        return 2
+    try:
+        # Under the lock so the bundle is not built while a run is
+        # rewriting the stores. (The hourly racecard job is outside this
+        # lock; the bundle copies each store whole, so it does not matter.)
         with pipeline_lock(results_dir, command="backup"):
             warning = run_backup(
                 results_dir,
                 backup_dirs,
-                tiers=resolve_backup_retention(
-                    creds, int(user.get("snapshot_retention_days", 14))
-                ),
-                extra_files=resolve_backup_extra_files(creds),
+                tiers=tiers,
+                extra_files=extra_files,
                 status_cb=print,
             )
     except PipelineBusy as exc:

@@ -166,9 +166,14 @@ def test_bundle_holds_the_stores_and_the_extra_files(tmp_path) -> None:
     assert sorted(members) == [
         ".cache/market_commission.csv",
         ".cache/venue_tracks.csv",
-        "extra/Master.csv",
+        "extra/0_Master.csv",
+        "extra/INDEX.json",
     ]
-    assert members["extra/Master.csv"] == master.read_bytes()
+    assert members["extra/0_Master.csv"] == master.read_bytes()
+    # A restore needs to know where each extra goes back to.
+    assert json.loads(members["extra/INDEX.json"]) == {
+        "extra/0_Master.csv": str(master)
+    }
     assert members[".cache/market_commission.csv"] == b"marketId,commission\n1.2,0.5\n"
 
 
@@ -191,8 +196,12 @@ def test_extras_sharing_a_name_are_both_kept(tmp_path) -> None:
 
     assert build_state_bundle(src, [one, two], tmp_path / "b.tar.gz") == []
     members = _bundle_members(tmp_path / "b.tar.gz")
-    assert members["extra/Master.csv"] == b"first"
+    assert members["extra/0_Master.csv"] == b"first"
     assert members["extra/1_Master.csv"] == b"second"
+    assert json.loads(members["extra/INDEX.json"]) == {
+        "extra/0_Master.csv": str(one),
+        "extra/1_Master.csv": str(two),
+    }
 
 
 def test_no_cache_directory_still_bundles_the_extras(tmp_path) -> None:
@@ -202,7 +211,10 @@ def test_no_cache_directory_still_bundles_the_extras(tmp_path) -> None:
     extra.write_text("a\n")
 
     assert build_state_bundle(src, [extra], tmp_path / "b.tar.gz") == []
-    assert sorted(_bundle_members(tmp_path / "b.tar.gz")) == ["extra/notes.csv"]
+    assert sorted(_bundle_members(tmp_path / "b.tar.gz")) == [
+        "extra/0_notes.csv",
+        "extra/INDEX.json",
+    ]
 
 
 # --- run_backup: destinations, manifest -------------------------------------
@@ -243,6 +255,7 @@ def test_manifest_records_size_and_checksum_of_what_was_copied(tmp_path) -> None
         data = (dst / name).read_bytes()
         assert entry == {
             "bytes": len(data),
+            "mtimeNs": (dst / name).stat().st_mtime_ns,
             "sha256": hashlib.sha256(data).hexdigest(),
         }, name
     assert sorted(body["files"]) == [
@@ -334,14 +347,149 @@ def test_manifest_drops_entries_for_pruned_files(tmp_path) -> None:
     assert not (dst / "cleared_orders_cleaned_2026-03-09.csv.gz").exists()
 
 
-def test_damaged_manifest_is_replaced_not_fatal(tmp_path) -> None:
+def test_damaged_manifest_is_started_again_and_announced(tmp_path) -> None:
     src = _working_set(tmp_path)
     dst = tmp_path / "cloud"
     dst.mkdir()
     (dst / MANIFEST_NAME).write_text("{not json")
 
-    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+    warning = run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+
+    assert warning is not None and "was damaged and has been started again" in warning
     assert verify_backup(dst).ok
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+
+
+def test_unreadable_manifest_is_left_alone_so_old_checksums_survive(
+    tmp_path, monkeypatch
+) -> None:
+    """
+    With weekly and monthly tiers a target holds copies that no longer
+    exist locally. If the manifest cannot be read (a cloud file evicted
+    with the client offline), rewriting it from this run's files would
+    lose those copies' checksums for good.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    (src / "cleared_orders_cleaned_2026-03-09.csv.gz").unlink()  # pruned locally
+    before = (dst / MANIFEST_NAME).read_text()
+
+    real_read = Path.read_text
+
+    def _offline(self, *args, **kwargs):
+        if self.name == MANIFEST_NAME:
+            raise OSError("Operation timed out")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _offline)
+    warning = run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    monkeypatch.undo()
+
+    assert warning is not None
+    assert "could not be read" in warning and "Operation timed out" in warning
+    assert (dst / MANIFEST_NAME).read_text() == before
+    assert "cleared_orders_cleaned_2026-03-09.csv.gz" in read_manifest(dst)
+
+
+def test_entry_is_refreshed_when_an_earlier_manifest_write_failed(
+    tmp_path, monkeypatch
+) -> None:
+    """
+    A same-day rewrite is copied but its manifest write fails. The next
+    run finds the copy identical and skips it; it must not keep the entry
+    for the earlier version, or verify reports a mismatch from then on.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    _snapshot(src, "2026-03-10", body="betId\n1\n2\n")
+
+    def _fail(*_args, **_kwargs):
+        raise OSError("quota exceeded")
+
+    monkeypatch.setattr(backup_mod, "_write_manifest", _fail)
+    warning = run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    assert warning is not None and "manifest not written: quota exceeded" in warning
+    monkeypatch.undo()
+    assert not verify_backup(dst).ok  # the manifest is one version behind
+
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+
+    assert verify_backup(dst).ok
+
+
+def test_a_store_that_cannot_be_copied_is_named_and_the_bundle_stays_valid(
+    tmp_path, monkeypatch
+) -> None:
+    src = _working_set(tmp_path)
+    real_copy = backup_mod.shutil.copy2
+
+    def _copy(source, target, **kwargs):
+        if Path(source).name == "venue_tracks.csv":
+            raise OSError("vanished")
+        return real_copy(source, target, **kwargs)
+
+    monkeypatch.setattr(backup_mod.shutil, "copy2", _copy)
+
+    problems = build_state_bundle(src, [], tmp_path / "b.tar.gz")
+
+    assert problems == [".cache/venue_tracks.csv: vanished"]
+    assert sorted(_bundle_members(tmp_path / "b.tar.gz")) == [
+        ".cache/market_commission.csv"
+    ]
+
+
+def test_bundle_is_built_from_copies_not_the_live_stores(tmp_path, monkeypatch) -> None:
+    """
+    The racecard job replaces its stores outside the pipeline lock. The
+    archive must read a copy taken in one piece, never the live path.
+    """
+    src = _working_set(tmp_path)
+    added: list[Path] = []
+    real_add = tarfile.TarFile.add
+
+    def _add(self, name, *args, **kwargs):
+        added.append(Path(name))
+        return real_add(self, name, *args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarFile, "add", _add)
+
+    build_state_bundle(src, [], tmp_path / "b.tar.gz")
+
+    assert added and all(src not in path.parents for path in added)
+
+
+def test_archive_failure_raises_rather_than_leaving_half_a_bundle(
+    tmp_path, monkeypatch
+) -> None:
+    src = _working_set(tmp_path)
+
+    def _add(self, *_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(tarfile.TarFile, "add", _add)
+
+    with pytest.raises(OSError, match="No space left"):
+        build_state_bundle(src, [], tmp_path / "b.tar.gz")
+
+
+def test_staging_left_by_a_killed_backup_is_removed_once_old(tmp_path) -> None:
+    import os
+
+    src = _working_set(tmp_path)
+    old, recent = src / ".backup-killed", src / ".backup-running"
+    for leftover in (old, recent):
+        leftover.mkdir()
+        (leftover / "pipeline_state_2026-03-01.tar.gz").write_bytes(b"x")
+    two_hours_ago = NOW.timestamp() - 7200
+    os.utime(old, (two_hours_ago, two_hours_ago))
+    os.utime(recent, (NOW.timestamp() - 60, NOW.timestamp() - 60))
+
+    run_backup(src, [tmp_path / "cloud"], tiers=KEEP_ALL, now_utc=NOW)
+
+    assert not old.exists()
+    assert recent.exists()  # may belong to a backup still running
 
 
 # --- verify ------------------------------------------------------------------
@@ -385,6 +533,29 @@ def test_verify_catches_a_truncated_file(tmp_path) -> None:
 
     assert len(problems) == 1 and "pipeline_state_2026-03-10.tar.gz" in problems[0]
     assert "manifest says" in problems[0]
+
+
+def test_verify_catches_a_bundle_that_gunzips_but_is_not_an_archive(tmp_path) -> None:
+    """A valid gzip stream of the right size and checksum, but a broken tar."""
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    target = dst / "pipeline_state_2026-03-10.tar.gz"
+    with gzip.open(target, "wb") as fh:
+        fh.write(b"these bytes are not a tar archive" * 40)
+    data = target.read_bytes()
+    body = json.loads((dst / MANIFEST_NAME).read_text())
+    body["files"][target.name] = {
+        "bytes": len(data),
+        "mtimeNs": target.stat().st_mtime_ns,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    (dst / MANIFEST_NAME).write_text(json.dumps(body))
+
+    problems = verify_backup(dst).problems
+
+    assert len(problems) == 1
+    assert "pipeline_state_2026-03-10.tar.gz: unreadable" in problems[0]
 
 
 def test_verify_catches_a_missing_file(tmp_path) -> None:
@@ -506,7 +677,7 @@ def test_run_step_backs_up_with_the_configured_settings(tmp_path) -> None:
 
     for name in ("one", "two"):
         bundle = next((tmp_path / name).glob("pipeline_state_*.tar.gz"))
-        assert "extra/Master.csv" in _bundle_members(bundle)
+        assert "extra/0_Master.csv" in _bundle_members(bundle)
     assert len(said) == 2 and all("copied 3 file(s)" in line for line in said)
 
 
@@ -525,6 +696,17 @@ def test_run_step_returns_the_warning_and_never_raises(tmp_path) -> None:
     warning = runner._back_up(creds, src, lambda _line: None)
 
     assert warning is not None and warning.startswith("⚠️")
+
+
+def test_run_step_survives_a_setting_that_cannot_be_resolved(tmp_path) -> None:
+    """ "~nosuchuser" has no home to expand to; the run's data is already written."""
+    src = _working_set(tmp_path)
+    creds = {"paths": {"backup_dirs": ["~no-such-user-here/backups"]}}
+
+    warning = runner._back_up(creds, src, lambda _line: None)
+
+    assert warning is not None
+    assert warning.startswith("⚠️ Backup failed unexpectedly: RuntimeError")
 
 
 # --- the command ------------------------------------------------------------------
@@ -591,3 +773,30 @@ def test_backup_command_reports_an_incomplete_backup(
 
     assert main(["backup"]) == 1
     assert "⚠️ Backup skipped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "retention", [{"dayly": 7, "weekly": 8}, {"daily": "7", "weekly": 8}]
+)
+def test_backup_command_refuses_malformed_retention_before_pruning(
+    tmp_path, monkeypatch, capsys, retention
+) -> None:
+    """A mistyped tier resolves to zero and would thin the copies at once."""
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    dst.mkdir()
+    for day in ("2026-03-02", "2026-03-03", "2026-03-04"):
+        _snapshot(dst, day)
+    _write_creds(
+        tmp_path,
+        monkeypatch,
+        {
+            "results_csv_dir": str(src),
+            "backup_dirs": [str(dst)],
+            "backup_retention": retention,
+        },
+    )
+
+    assert main(["backup"]) == 2
+    assert "invalid backup configuration" in capsys.readouterr().out
+    assert len(list(dst.glob("cleared_orders_cleaned_*.csv.gz"))) == 3

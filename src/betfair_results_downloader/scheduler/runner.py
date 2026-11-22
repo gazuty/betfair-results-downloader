@@ -359,19 +359,24 @@ def _back_up(
         resolve_backup_retention,
     )
 
-    backup_dirs = resolve_backup_dirs(creds)
-    if not backup_dirs:
-        return None
-    user = creds.get("user", {}) or {}
-    warning = run_backup(
-        results_dir,
-        backup_dirs,
-        tiers=resolve_backup_retention(
-            creds, int(user.get("snapshot_retention_days", 14))
-        ),
-        extra_files=resolve_backup_extra_files(creds),
-        status_cb=say,
-    )
+    try:
+        backup_dirs = resolve_backup_dirs(creds)
+        if not backup_dirs:
+            return None
+        user = creds.get("user", {}) or {}
+        warning = run_backup(
+            results_dir,
+            backup_dirs,
+            tiers=resolve_backup_retention(
+                creds, int(user.get("snapshot_retention_days", 14))
+            ),
+            extra_files=resolve_backup_extra_files(creds),
+            status_cb=say,
+        )
+    except Exception as exc:
+        # Resolving the settings can raise too ("~nosuchuser/x" has no
+        # home to expand to), and by now the run's data is already written.
+        warning = f"⚠️ Backup failed unexpectedly: {type(exc).__name__}: {exc}"
     if warning:
         logger.warning(warning)
     return warning

@@ -8,7 +8,7 @@
   - `paths.backup_dirs` adds further targets beside `paths.backup_dir`; each is independent.
   - Every target also receives a dated state bundle (`pipeline_state_YYYY-MM-DD.tar.gz`) holding the stores and any `paths.backup_extra_files`.
   - `paths.backup_retention` (`daily`, `weekly`, `monthly`) thins dated copies in tiers. Unset keeps the old newest-N rule.
-  - Each target holds a `backup_manifest.json` with the backup time and the size and SHA-256 of every file, taken from the local source so a run still never reads a cloud folder.
+  - Each target holds a `backup_manifest.json` with the backup time and the size and SHA-256 of every file, taken from the local source. The manifest itself, a few kilobytes, is the only thing a run reads back from a backup folder.
   - A new `backup` command backs up on demand, and `backup --verify` reads a target back against its manifest.
 
   The backup now runs at the end of the run instead of straight after the CSV write, so the bundle holds the stores as the run left them. It stays best-effort: a failing target or a missing extra file is a ⚠️ warning, never a failed run. A backup still cannot see whether a sync client uploaded the folder; the README says how to check that from the cloud side.
