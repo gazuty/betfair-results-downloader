@@ -73,6 +73,7 @@ EXTRA_INDEX_NAME = "INDEX.json"
 # A staging directory this old belongs to a backup that was killed.
 _STALE_STAGING_SECONDS = 3600
 _STAGING_PREFIX = ".backup-"
+_STAGING_MARKER = ".betfair-backup-staging"
 _HASH_CHUNK = 1 << 20
 
 
@@ -161,14 +162,19 @@ def _is_short(manifest: Optional[dict[str, dict[str, object]]], name: str) -> bo
 def _remove_stale_staging(results_csv_dir: Path, now_epoch: float) -> None:
     """
     Remove staging directories a killed backup left behind. Only ones old
-    enough that no live backup can own them; best-effort, since a leftover
-    costs disk and nothing else.
+    enough that no live backup can own them, and only ones holding the
+    marker a backup writes on creating its staging: the name alone could
+    be anyone's directory, even a backup target placed under the results
+    directory. Best-effort, since a leftover costs disk and nothing else.
     """
     try:
         leftovers = [
             d
             for d in results_csv_dir.glob(f"{_STAGING_PREFIX}*")
-            if d.is_dir() and now_epoch - d.stat().st_mtime > _STALE_STAGING_SECONDS
+            if d.is_dir()
+            and not d.is_symlink()
+            and (d / _STAGING_MARKER).is_file()
+            and now_epoch - d.stat().st_mtime > _STALE_STAGING_SECONDS
         ]
     except OSError:
         return
@@ -209,11 +215,11 @@ def build_state_bundle(
         stores = sorted(
             f for f in cache_dir.iterdir() if f.is_file() and f.suffix != ".lock"
         )
-    except FileNotFoundError:
-        stores = []
     except OSError as exc:
+        # Including a directory that is not there: a bundle with no stores
+        # in it must not pass for a whole one.
         stores = []
-        problems.append(f"{CACHE_DIRNAME}: {exc}")
+        problems.append(f"{CACHE_DIRNAME}: {type(exc).__name__}: {exc}")
     members.extend((f, f"{CACHE_DIRNAME}/{f.name}") for f in stores)
 
     origins: dict[str, str] = {}
@@ -374,6 +380,7 @@ def run_backup(
             staging = Path(
                 tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=results_csv_dir)
             )
+            (staging / _STAGING_MARKER).write_text("", encoding="utf-8")
             bundle = staging / f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"
             missing = build_state_bundle(results_csv_dir, extra_files, bundle)
             if missing:
@@ -538,6 +545,7 @@ def _backup_compressed_outputs_inner(
     # few kilobytes, and without it the checksums of copies that no longer
     # exist locally could not be carried forward.
     manifest: Optional[dict[str, dict[str, object]]]
+    damaged = False
     try:
         manifest, damaged = _load_manifest(backup_dir)
         if damaged:
@@ -626,13 +634,21 @@ def _backup_compressed_outputs_inner(
         # Snapshots and bundles are thinned separately: a day that has one
         # but not the other must not cost the other kind a slot.
         patterns = [_SNAPSHOT_NAME_RE]
-        if manifest is not None:
+        # Bundles are thinned only by a run that has just put a whole one
+        # here and can trust the record of which older ones are short. So
+        # the newest bundle after a prune is always whole, and a short one
+        # is never ranked as whole on the strength of a manifest that was
+        # unreadable or had to be started again.
+        delivered_whole = (
+            bundle is not None
+            and not bundle_missing
+            and bundle.name not in failed
+            and (backup_dir / bundle.name).is_file()
+        )
+        if manifest is None or damaged:
+            problems.append("bundles not pruned without a trustworthy manifest")
+        elif delivered_whole:
             patterns.append(_BUNDLE_NAME_RE)
-        else:
-            # Which bundles are short of members is only in the manifest.
-            # Without it a short one would rank as whole and could push
-            # out the last whole one, so bundles wait for a readable one.
-            problems.append("bundles not pruned while the manifest is unreadable")
         for pattern in patterns:
             mine = {f: d for f, d in dated.items() if d and pattern.match(f.name)}
             # A bundle short of members takes no retention slot: ranked

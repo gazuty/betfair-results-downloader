@@ -204,17 +204,36 @@ def test_extras_sharing_a_name_are_both_kept(tmp_path) -> None:
     }
 
 
-def test_no_cache_directory_still_bundles_the_extras(tmp_path) -> None:
+def test_missing_cache_directory_is_a_problem_not_an_empty_bundle(tmp_path) -> None:
+    """A bundle with no stores in it must not pass for a whole one."""
     src = tmp_path / "results"
     src.mkdir()
     extra = tmp_path / "notes.csv"
     extra.write_text("a\n")
 
-    assert build_state_bundle(src, [extra], tmp_path / "b.tar.gz") == []
+    problems = build_state_bundle(src, [extra], tmp_path / "b.tar.gz")
+
+    assert len(problems) == 1 and problems[0].startswith(".cache: FileNotFoundError")
     assert sorted(_bundle_members(tmp_path / "b.tar.gz")) == [
         "extra/0_notes.csv",
         "extra/INDEX.json",
     ]
+
+
+def test_bundle_without_stores_cannot_displace_one_that_has_them(tmp_path) -> None:
+    import shutil
+
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW - timedelta(days=1)) is None
+    shutil.rmtree(src / ".cache")
+
+    warning = run_backup(src, [dst], tiers=tiers, now_utc=NOW)
+
+    assert warning is not None and ".cache" in warning
+    assert (dst / "pipeline_state_2026-03-09.tar.gz").exists()
+    assert not verify_backup(dst).ok
 
 
 # --- run_backup: destinations, manifest -------------------------------------
@@ -511,6 +530,7 @@ def test_staging_left_by_a_killed_backup_is_removed_once_old(tmp_path) -> None:
     old, recent = src / ".backup-killed", src / ".backup-running"
     for leftover in (old, recent):
         leftover.mkdir()
+        (leftover / backup_mod._STAGING_MARKER).write_text("")
         (leftover / "pipeline_state_2026-03-01.tar.gz").write_bytes(b"x")
     two_hours_ago = NOW.timestamp() - 7200
     os.utime(old, (two_hours_ago, two_hours_ago))
@@ -679,7 +699,7 @@ def test_bundles_are_not_pruned_while_the_manifest_is_unreadable(
     monkeypatch.undo()
 
     assert warning is not None
-    assert "bundles not pruned while the manifest is unreadable" in warning
+    assert "bundles not pruned without a trustworthy manifest" in warning
     assert (dst / "pipeline_state_2026-03-09.tar.gz").exists()
     # The short bundle is not copied at all: with nowhere to record that
     # it is short, it would pass for whole from the next run on.
@@ -708,6 +728,74 @@ def test_verify_keeps_failing_a_kept_short_bundle_after_later_good_backups(
         f"pipeline_state_2026-03-09.tar.gz: short of member(s): "
         f"extra file not found: {gone}"
     ]
+
+
+def test_bundles_are_not_pruned_when_the_manifest_had_to_be_started_again(
+    tmp_path,
+) -> None:
+    """
+    A damaged manifest has lost which bundles were short. Ranked as whole,
+    a short one could take the slot of the last whole one.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW - timedelta(days=2)) is None
+    _short_run(src, dst, tiers, NOW - timedelta(days=1), tmp_path / "gone.csv")
+    (dst / MANIFEST_NAME).write_text("{not json")
+
+    warning = _short_run(src, dst, tiers, NOW, tmp_path / "gone.csv")
+
+    assert warning is not None
+    assert "bundles not pruned without a trustworthy manifest" in warning
+    assert (dst / "pipeline_state_2026-03-08.tar.gz").exists()
+
+
+def test_bundles_are_only_pruned_by_a_run_that_delivered_a_whole_one(
+    tmp_path, monkeypatch
+) -> None:
+    """No bundle built today: yesterday's is all there is, so it stays."""
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1)
+    for back in (3, 2):
+        assert (
+            run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW - timedelta(days=back))
+            is None
+        )
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(backup_mod, "build_state_bundle", _boom)
+    run_backup(src, [dst], tiers=tiers, now_utc=NOW)
+    monkeypatch.undo()
+    assert len(list(dst.glob("pipeline_state_*"))) == 2
+
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW) is None
+    assert sorted(f.name for f in dst.glob("pipeline_state_*")) == [
+        "pipeline_state_2026-03-10.tar.gz"
+    ]
+
+
+def test_stale_cleanup_leaves_directories_that_are_not_staging(tmp_path) -> None:
+    """
+    A directory merely named like staging (it could be a backup target
+    placed under the results directory) is someone's data.
+    """
+    import os
+
+    src = _working_set(tmp_path)
+    target = src / ".backup-cloud"
+    target.mkdir()
+    (target / "keep.txt").write_text("mine")
+    old = NOW.timestamp() - 7200
+    os.utime(target, (old, old))
+
+    assert run_backup(src, [target], tiers=KEEP_ALL, now_utc=NOW) is None
+
+    assert (target / "keep.txt").read_text() == "mine"
+    assert (target / "pipeline_state_2026-03-10.tar.gz").exists()
 
 
 # --- verify ------------------------------------------------------------------
