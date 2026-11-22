@@ -125,6 +125,12 @@ def test_destination_is_thinned_by_tier_and_archives_stay(tmp_path) -> None:
         (dst / f"pipeline_state_{day.isoformat()}.tar.gz").write_bytes(b"x")
     with gzip.open(dst / "cleared_orders_archive_2024.csv.gz", "wb") as fh:
         fh.write(b"betId\nold\n")
+    # The bundles are on record as whole; the snapshots predate manifests.
+    recorded = {
+        f.name: {"bytes": 1, "mtimeNs": 0, "sha256": "0"}
+        for f in dst.glob("pipeline_state_*.tar.gz")
+    }
+    (dst / MANIFEST_NAME).write_text(json.dumps({"files": recorded}))
 
     warning = run_backup(
         src, [dst], tiers=RetentionTiers(daily=3, weekly=2, monthly=2), now_utc=NOW
@@ -816,6 +822,35 @@ def test_stale_cleanup_leaves_directories_that_are_not_staging(tmp_path) -> None
 
     assert (target / "keep.txt").read_text() == "mine"
     assert (target / "pipeline_state_2026-03-10.tar.gz").exists()
+
+
+def test_bundles_the_manifest_does_not_list_are_neither_ranked_nor_removed(
+    tmp_path,
+) -> None:
+    """
+    After a damaged manifest is started again, older bundles have no
+    record: one of them may be short. Ranked as whole it could take a
+    weekly slot from a whole bundle of the same week, so it is left out of
+    the ranking, and kept, until someone decides.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    tiers = RetentionTiers(daily=1, weekly=2)
+    # Monday whole, Tuesday short (same ISO week), then the record is lost.
+    monday = datetime(2026, 3, 2, 22, 0, tzinfo=timezone.utc)
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=monday) is None
+    _short_run(src, dst, KEEP_ALL, monday + timedelta(days=1), tmp_path / "gone.csv")
+    (dst / MANIFEST_NAME).write_text("{not json")
+    run_backup(src, [dst], tiers=tiers, now_utc=NOW - timedelta(days=1))
+
+    # The first run after the reset: the manifest reads cleanly again.
+    assert run_backup(src, [dst], tiers=tiers, now_utc=NOW) is None
+
+    names = sorted(f.name for f in dst.glob("pipeline_state_*"))
+    assert "pipeline_state_2026-03-02.tar.gz" in names  # the whole one survives
+    assert "pipeline_state_2026-03-03.tar.gz" in names
+    assert "pipeline_state_2026-03-10.tar.gz" in names
+    assert any("no checksum recorded" in p for p in verify_backup(dst).problems)
 
 
 # --- verify ------------------------------------------------------------------

@@ -660,11 +660,25 @@ def _backup_compressed_outputs_inner(
             mine = {f: d for f, d in dated.items() if d and pattern.match(f.name)}
             # A bundle short of members takes no retention slot: ranked
             # with the rest, today's short one could push out the last
-            # whole one. It goes once a newer whole bundle exists.
-            whole = {f: d for f, d in mine.items() if not _is_short(manifest, f.name)}
+            # whole one. It goes once a newer whole bundle exists. A
+            # bundle the manifest does not list (its record lost with a
+            # damaged manifest) may be either, so it is neither ranked
+            # nor removed; verify reports it until someone decides.
+            unknown = (
+                {f for f in mine if f.name not in (manifest or {})}
+                if pattern is _BUNDLE_NAME_RE
+                else set()
+            )
+            whole = {
+                f: d
+                for f, d in mine.items()
+                if f not in unknown and not _is_short(manifest, f.name)
+            }
             keep = dates_to_keep(whole.values(), tiers)
             newest_whole = max(whole.values(), default=None)
             for f, day in mine.items():
+                if f in unknown:
+                    continue
                 if f in whole:
                     if day in keep:
                         continue
