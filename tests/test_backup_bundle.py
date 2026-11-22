@@ -258,6 +258,7 @@ def test_manifest_records_size_and_checksum_of_what_was_copied(tmp_path) -> None
             "mtimeNs": (dst / name).stat().st_mtime_ns,
             "sha256": hashlib.sha256(data).hexdigest(),
         }, name
+    assert body["undelivered"] == []
     assert sorted(body["files"]) == [
         "cleared_orders_cleaned_2026-03-09.csv.gz",
         "cleared_orders_cleaned_2026-03-10.csv.gz",
@@ -490,6 +491,62 @@ def test_staging_left_by_a_killed_backup_is_removed_once_old(tmp_path) -> None:
 
     assert not old.exists()
     assert recent.exists()  # may belong to a backup still running
+
+
+def test_failed_copy_is_recorded_so_verify_cannot_pass_a_backup_with_a_hole(
+    tmp_path, monkeypatch
+) -> None:
+    """
+    The bundle does not reach a target that has no older one. The manifest
+    is still written, with a fresh time; it must say what is missing, or
+    verify would report a current, complete backup with no stores in it.
+    """
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    real_copy = backup_mod.shutil.copy2
+
+    def _copy(source, target, **kwargs):
+        if (
+            Path(target).name.startswith("pipeline_state_")
+            and dst in Path(target).parents
+        ):
+            raise OSError("quota exceeded")
+        return real_copy(source, target, **kwargs)
+
+    monkeypatch.setattr(backup_mod.shutil, "copy2", _copy)
+    warning = run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    monkeypatch.undo()
+
+    assert warning is not None and "quota exceeded" in warning
+    body = json.loads((dst / MANIFEST_NAME).read_text())
+    assert body["undelivered"] == ["pipeline_state_2026-03-10.tar.gz"]
+    result = verify_backup(dst)
+    assert not result.ok
+    assert result.problems == [
+        "pipeline_state_2026-03-10.tar.gz: the last backup did not deliver it"
+    ]
+
+    # The next complete backup clears it.
+    assert run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW) is None
+    assert json.loads((dst / MANIFEST_NAME).read_text())["undelivered"] == []
+    assert verify_backup(dst).ok
+
+
+def test_bundle_that_was_never_built_is_recorded_as_undelivered(
+    tmp_path, monkeypatch
+) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(backup_mod, "build_state_bundle", _boom)
+    run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+
+    assert verify_backup(dst).problems == [
+        "pipeline_state_2026-03-10.tar.gz: the last backup did not deliver it"
+    ]
 
 
 # --- verify ------------------------------------------------------------------

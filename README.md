@@ -419,7 +419,7 @@ python -m betfair_results_downloader backup            # back up now
 python -m betfair_results_downloader backup --verify   # check what the targets hold
 ```
 
-`--verify` requires every file in the target's manifest to be present with the recorded size and SHA-256 and to decompress to the end, and prints the manifest's timestamp, which is when a backup last reached that folder. It reads every backed-up byte, so on a cloud folder it downloads them. Run it while no backup is writing: it takes no lock, and a file replaced part-way through reads as a mismatch.
+`--verify` fails a target whose last backup left something undelivered, and requires every file in the target's manifest to be present with the recorded size and SHA-256 and to decompress to the end, and prints the manifest's timestamp, which is when a backup last reached that folder. It reads every backed-up byte, so on a cloud folder it downloads them. Run it while no backup is writing: it takes no lock, and a file replaced part-way through reads as a mismatch.
 
 Exit codes: `0` = success · `1` = a target is incomplete or failed its check · `2` = bad configuration (including no target configured).
 
@@ -809,7 +809,7 @@ The working set lives on local disk, and Betfair only answers for recent markets
 
 - **Order snapshots and yearly archives** — the `cleared_orders_cleaned_YYYY-MM-DD.csv.gz` and `cleared_orders_archive_YYYY.csv.gz` files, unchanged.
 - **A state bundle** — `pipeline_state_YYYY-MM-DD.tar.gz`: every store under `.cache/` (settlement status, commission, racecard, venue tracks, catalogue caches) and each `paths.backup_extra_files` file under `extra/`, numbered, with an `extra/INDEX.json` naming the path each came from. It is rebuilt and copied again on every run that backs up, so a sync client uploads it each time. The stores hold answers Betfair no longer gives for old markets, so the orders alone do not rebuild them.
-- **A manifest** — `backup_manifest.json`: the time of the backup and the size and SHA-256 of every file the target holds, taken from the local source as each file is copied.
+- **A manifest** — `backup_manifest.json`: the time of the backup, anything that backup failed to deliver (`undelivered`), and the size and SHA-256 of every file the target holds, taken from the local source as each file is copied.
 
 Dated files are thinned by `paths.backup_retention`. The backup runs last, after the stores have been refreshed, and is best-effort: a target that is offline or full produces a ⚠️ warning in the run message and never fails the run. A run that downloads no rows writes no snapshot and does not back up; the stores it refreshed are in the next run's bundle.
 

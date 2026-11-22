@@ -22,8 +22,8 @@ three kinds of file per destination:
   catalogue caches) plus any ``paths.backup_extra_files``. Betfair stops
   answering for old markets, so these cannot all be rebuilt from the
   orders alone;
-* ``backup_manifest.json``: size and SHA-256 of every file the backup
-  holds, taken from the local source at copy time. It is the one file a
+* ``backup_manifest.json``: what the last backup failed to deliver, and
+  the size and SHA-256 of every file the backup holds, taken from the local source at copy time. It is the one file a
   run reads back from a backup directory (a few kilobytes). It is what
   ``backup --verify`` checks a destination against, and its timestamp is
   the one thing that shows, from the cloud side, when a backup last
@@ -299,10 +299,20 @@ def read_manifest(backup_dir: Path) -> dict[str, dict[str, object]]:
 
 
 def _write_manifest(
-    backup_dir: Path, files: dict[str, dict[str, object]], now_utc: datetime
+    backup_dir: Path,
+    files: dict[str, dict[str, object]],
+    now_utc: datetime,
+    undelivered: Sequence[str] = (),
 ) -> None:
+    """
+    ``undelivered`` names what this backup should have put here and did
+    not. Without it a manifest written after a failed copy would list only
+    what arrived, and a later verify would pass a backup with a hole in it
+    under a fresh timestamp.
+    """
     body = {
         "writtenUtc": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "undelivered": sorted(undelivered),
         "files": dict(sorted(files.items())),
     }
     target = backup_dir / MANIFEST_NAME
@@ -344,6 +354,7 @@ def run_backup(
     warnings: list[str] = []
     staging: Optional[Path] = None
     bundle: Optional[Path] = None
+    undelivered: list[str] = []
     try:
         try:
             # Staged beside the working set (same volume, and never in a
@@ -362,6 +373,7 @@ def run_backup(
             # The orders are the larger loss: still back those up, and say
             # that the stores did not go with them.
             bundle = None
+            undelivered = [f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"]
             logger.warning("State bundle not built: %s: %s", type(exc).__name__, exc)
             warnings.append(
                 f"⚠️ Backup state bundle not built ({type(exc).__name__}: {exc}); "
@@ -373,6 +385,7 @@ def run_backup(
                 backup_dir,
                 tiers=tiers,
                 bundle=bundle,
+                undelivered=undelivered,
                 status_cb=status_cb,
                 now_utc=now_utc,
             )
@@ -401,6 +414,7 @@ def backup_compressed_outputs(
     retention: int = 14,
     tiers: Optional[RetentionTiers] = None,
     bundle: Optional[Path] = None,
+    undelivered: Sequence[str] = (),
     status_cb: Optional[Callable[[str], None]] = None,
     now_utc: Optional[datetime] = None,
 ) -> Optional[str]:
@@ -423,6 +437,7 @@ def backup_compressed_outputs(
             backup_dir,
             tiers=tiers or RetentionTiers(daily=retention),
             bundle=bundle,
+            undelivered=undelivered,
             status_cb=status_cb,
             now_utc=now_utc or datetime.now(timezone.utc),
         )
@@ -437,6 +452,7 @@ def _backup_compressed_outputs_inner(
     *,
     tiers: RetentionTiers,
     bundle: Optional[Path],
+    undelivered: Sequence[str],
     status_cb: Optional[Callable[[str], None]],
     now_utc: datetime,
 ) -> Optional[str]:
@@ -517,6 +533,7 @@ def _backup_compressed_outputs_inner(
             f"is; this run's checksums are not recorded"
         )
     copied = 0
+    failed = list(undelivered)
     for src in candidates:
         dst = backup_dir / src.name
         # Globally unique temp name: overlapping runs sharing one backup
@@ -553,6 +570,7 @@ def _backup_compressed_outputs_inner(
                 manifest[src.name] = entry
         except OSError as exc:
             problems.append(f"{src.name}: {exc}")
+            failed.append(src.name)
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
@@ -587,6 +605,7 @@ def _backup_compressed_outputs_inner(
                 backup_dir,
                 {name: entry for name, entry in manifest.items() if name in present},
                 now_utc,
+                failed,
             )
         except OSError as exc:
             problems.append(f"manifest not written: {exc}")
@@ -635,7 +654,8 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
     """
     Read a destination back and check it is restorable.
 
-    Every file the manifest lists must be present with the recorded size
+    Anything the last backup failed to deliver is a problem, and every
+    file the manifest lists must be present with the recorded size
     and SHA-256, and must read to the end (a bundle member by member). A
     backup file the manifest does not list is read too and reported as
     unrecorded. Run it while no backup is writing: it takes no lock, and
@@ -649,6 +669,11 @@ def verify_backup(backup_dir: Path) -> VerifyResult:
         loaded = json.loads((backup_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
         if isinstance(loaded, dict) and isinstance(loaded.get("writtenUtc"), str):
             written = loaded["writtenUtc"]
+        missed = loaded.get("undelivered") if isinstance(loaded, dict) else None
+        if isinstance(missed, list):
+            problems.extend(
+                f"{name}: the last backup did not deliver it" for name in missed
+            )
     except (OSError, ValueError) as exc:
         problems.append(f"{MANIFEST_NAME}: unreadable ({type(exc).__name__}: {exc})")
     manifest = read_manifest(backup_dir)
