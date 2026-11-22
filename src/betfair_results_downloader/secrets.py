@@ -244,6 +244,33 @@ def validate_credentials(creds: dict[str, Any]) -> CredentialValidation:
                 f"paths.backup_dir must be a string when present, "
                 f"got {type(bdir).__name__}"
             )
+        for key in ("backup_dirs", "backup_extra_files"):
+            listed = paths_cfg.get(key)
+            if listed is not None and not (
+                isinstance(listed, list)
+                and all(isinstance(item, str) for item in listed)
+            ):
+                errors.append(f"paths.{key} must be a list of strings when present")
+        tiers = paths_cfg.get("backup_retention")
+        if tiers is not None:
+            if not isinstance(tiers, dict):
+                errors.append("paths.backup_retention must be an object when present")
+            else:
+                for key, value in tiers.items():
+                    if key not in ("daily", "weekly", "monthly"):
+                        errors.append(
+                            f"paths.backup_retention.{key} is not a tier "
+                            f"(use daily, weekly, monthly)"
+                        )
+                    elif (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value < 0
+                    ):
+                        errors.append(
+                            f"paths.backup_retention.{key} must be a whole "
+                            f"number of copies, zero or more"
+                        )
 
     # Schedule validation (no-op when schedule.enabled=false)
     sched_errors, sched_warnings = _validate_schedule_section(creds)

@@ -10,6 +10,7 @@ Subcommands:
   racecard      — capture the forward racing card (full racing market names)
   export-market-results — rebuild the dashboard results feed from disk
   seed-venues   — teach the venue store track countries from website names
+  backup        — back the working set up now, or verify the backups
   audit         — report missing settled-date gaps in the canonical CSV
   schedule      — install/uninstall/status/logs for the platform scheduled jobs
   dm-report     — render the OpenClaw daily DM report from local CSV results
@@ -735,6 +736,102 @@ def _cmd_seed_venues(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_backup(args: argparse.Namespace) -> int:
+    """
+    Back the working set up to every ``paths.backup_dir(s)`` now, or with
+    ``--verify`` read each destination back and check it against its
+    manifest.
+
+    Every run backs up already; the command is for a first backup to a
+    new destination and for the occasional restore check. Makes no
+    Betfair calls. ``--verify`` reads every backed-up byte, which on a
+    cloud folder downloads it.
+
+    Exit codes: 0=success, 1=a destination is incomplete or failed its
+    check, 2=bad configuration (including no destination configured).
+    """
+    creds, _schedule_cfg = _load_creds_and_schedule(validate=False)
+
+    from .backup import run_backup, verify_backup
+    from .paths import (
+        ResultsDirNotConfigured,
+        resolve_backup_dirs,
+        resolve_backup_extra_files,
+        resolve_backup_retention,
+        resolve_results_dir,
+    )
+    from .run_lock import PipelineBusy, pipeline_lock
+    from .secrets import validate_credentials
+
+    # Only the paths settings: a backup needs no Betfair login, but a
+    # mistyped retention tier resolves to zero and would thin the copies.
+    bad_paths = [e for e in validate_credentials(creds).errors if "paths" in e]
+    if bad_paths:
+        print("FAIL: invalid backup configuration:")
+        for error in bad_paths:
+            print(f"  - {error}")
+        return 2
+    try:
+        backup_dirs = resolve_backup_dirs(creds)
+        extra_files = resolve_backup_extra_files(creds)
+    except RuntimeError as exc:
+        # A "~user" entry for a user that does not exist.
+        print(f"FAIL: invalid backup configuration: {exc}")
+        return 2
+    if not backup_dirs:
+        print("FAIL: no backup destination; set paths.backup_dir or paths.backup_dirs")
+        return 2
+
+    if args.verify:
+        failed = False
+        for backup_dir in backup_dirs:
+            result = verify_backup(backup_dir)
+            when = result.written_utc or "never"
+            if result.ok:
+                print(
+                    f"OK: {backup_dir}: {result.checked} file(s) match (as of {when})."
+                )
+                continue
+            failed = True
+            print(
+                f"FAIL: {backup_dir}: {len(result.problems)} problem(s) in "
+                f"{result.checked} file(s) (as of {when})."
+            )
+            for problem in result.problems or ["nothing is backed up there"]:
+                print(f"  {problem}")
+        return 1 if failed else 0
+
+    try:
+        results_dir = resolve_results_dir(creds)
+        user = creds.get("user", {}) or {}
+        tiers = resolve_backup_retention(
+            creds, int(user.get("snapshot_retention_days", 14))
+        )
+    except (ResultsDirNotConfigured, AttributeError, TypeError, ValueError) as exc:
+        print(f"FAIL: invalid backup configuration: {exc}")
+        return 2
+    try:
+        # Under the lock so the bundle is not built while a run is
+        # rewriting the stores. (The hourly racecard job is outside this
+        # lock; the bundle copies each store whole, so it does not matter.)
+        with pipeline_lock(results_dir, command="backup"):
+            warning = run_backup(
+                results_dir,
+                backup_dirs,
+                tiers=tiers,
+                extra_files=extra_files,
+                status_cb=print,
+            )
+    except PipelineBusy as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    if warning:
+        print(warning)
+        return 1
+    print(f"OK: backed up to {len(backup_dirs)} destination(s).")
+    return 0
+
+
 def _cmd_export_market_results(_args: argparse.Namespace) -> int:
     """
     Rebuild the dashboard's results feed from the files on disk.
@@ -1270,6 +1367,17 @@ def _build_parser() -> argparse.ArgumentParser:
         default="Market",
         help="The column holding the names (default: Market).",
     )
+    bk = sub.add_parser(
+        "backup",
+        help="Back the working set up to the configured destinations now "
+        "(no API calls), or verify what they hold.",
+    )
+    bk.add_argument(
+        "--verify",
+        action="store_true",
+        help="Read each destination back and check every file against its "
+        "manifest instead of backing up.",
+    )
     au = sub.add_parser(
         "audit",
         help="Report missing settled-date gaps in the canonical CSV.",
@@ -1362,6 +1470,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_export_market_results(args)
     if args.command == "seed-venues":
         return _cmd_seed_venues(args)
+    if args.command == "backup":
+        return _cmd_backup(args)
     if args.command == "audit":
         return _cmd_audit(args)
     if args.command == "dm-report":

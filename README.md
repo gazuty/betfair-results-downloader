@@ -408,6 +408,21 @@ python -m betfair_results_downloader schedule install-racecard   # hourly at :30
 
 A failure exits `1` and prints the reason. It does not post to Slack: each run captures as well and announces its own failure.
 
+### `backup`
+
+**Status:** ✅ Implemented
+
+Backs the working set up to every `paths.backup_dir` / `paths.backup_dirs` target now, or with `--verify` reads each target back and checks it. Every run backs up already; the command is for the first backup to a new target and for an occasional restore check. It makes no Betfair calls.
+
+```bash
+python -m betfair_results_downloader backup            # back up now
+python -m betfair_results_downloader backup --verify   # check what the targets hold
+```
+
+`--verify` fails a target whose last backup left something undelivered, and requires every file in the target's manifest to be present with the recorded size and SHA-256 and to decompress to the end, and prints the manifest's timestamp, which is when a backup last reached that folder. It reads every backed-up byte, so on a cloud folder it downloads them. Run it while no backup is writing: it takes no lock, and a file replaced part-way through reads as a mismatch.
+
+Exit codes: `0` = success · `1` = a target is incomplete or failed its check · `2` = bad configuration (including no target configured).
+
 ### `seed-venues`
 
 **Status:** ✅ Implemented
@@ -712,7 +727,10 @@ Full annotated `credentials.json` schema. Fields marked **required** are mandato
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `results_csv_dir` | string | **Required** | Path to where canonical and snapshot CSVs are written (`~` is expanded). Use a **local, non-cloud-synced** directory such as `~/BetfairData` — cloud sync eviction corrupted reads of the canonical twice. When empty, the run fails loudly; the old OneDrive-guessing fallback was removed. |
-| `backup_dir` | string | Optional | One-way disaster-recovery copy target (e.g. an OneDrive folder). After each successful CSV write, compressed snapshots and yearly archives are copied there and dated snapshots pruned to `user.snapshot_retention_days`. Backup failures warn (to Slack) but never fail the run. Nothing is ever read back from it. |
+| `backup_dir` | string | Optional | One-way disaster-recovery copy target (e.g. a cloud-synced folder). At the end of each successful run it receives the compressed snapshots, the yearly archives, a dated bundle of the stores and a manifest (see [Backups](#backups)). Backup failures warn (to Slack) but never fail the run. A run never reads anything back from it. |
+| `backup_dirs` | list of strings | Optional | Further copy targets, each treated like `backup_dir`. Two folders synced by two different services are two independent copies; one failing does not stop the other. |
+| `backup_extra_files` | list of strings | Optional | Files outside `results_csv_dir` to carry in the state bundle (a spreadsheet or master file another tool keeps, the run history). A listed file that is missing is reported as a ⚠️ warning; the rest is still backed up. |
+| `backup_retention` | object | Optional | How many dated copies each target keeps: `{"daily": 7, "weekly": 8, "monthly": 12}` keeps the newest 7 dates, the last copy of each of the latest 8 weeks and of each of the latest 12 months. Unset keeps the newest `user.snapshot_retention_days` dates only, as before. An object with every tier at zero (or `{}`) never prunes. Yearly archives are never pruned. |
 
 ### `schedule` (optional — for scheduled automatic downloads)
 
@@ -764,7 +782,10 @@ When `schedule.enabled` is `false` (default), this entire block is ignored and a
   },
   "paths": {
     "results_csv_dir": "~/BetfairData",
-    "backup_dir": "/Users/me/OneDrive/BF/Results Database"
+    "backup_dir": "/Users/me/OneDrive/BF/Results Database",
+    "backup_dirs": ["/Users/me/Google Drive/My Drive/BF/Backups"],
+    "backup_extra_files": ["/Users/me/reports/master.csv"],
+    "backup_retention": {"daily": 7, "weekly": 8, "monthly": 12}
   },
   "azure_sql": {
     "server": "myserver.database.windows.net",
@@ -782,9 +803,25 @@ The tracked template lives at [`secrets/credentials.template.json`](secrets/cred
 
 ## Outputs
 
+### Backups
+
+The working set lives on local disk, and Betfair only answers for recent markets, so a lost disk loses history that cannot be downloaded again. With a backup target configured, each successful run ends by copying to every target:
+
+- **Order snapshots and yearly archives** — the `cleared_orders_cleaned_YYYY-MM-DD.csv.gz` and `cleared_orders_archive_YYYY.csv.gz` files, unchanged.
+- **A state bundle** — `pipeline_state_YYYY-MM-DD.tar.gz`: every store under `.cache/` (settlement status, commission, racecard, venue tracks, catalogue caches) and each `paths.backup_extra_files` file under `extra/`, numbered, with an `extra/INDEX.json` naming the path each came from. It is rebuilt and copied again on every run that backs up, so a sync client uploads it each time. The stores hold answers Betfair no longer gives for old markets, so the orders alone do not rebuild them.
+- **A manifest** — `backup_manifest.json`: the time of the backup, anything that backup failed to deliver (`undelivered`), and the size and SHA-256 of every file the target holds, taken from the local source as each file is copied.
+
+Dated files are thinned by `paths.backup_retention`. A bundle recorded as short of members (a missing extra file, a store that could not be read) never takes a retention slot or replaces a whole one, and bundles are only thinned by a run that has just delivered a whole one. A bundle the manifest has no record of is left alone and reported by `backup --verify`; delete it by hand once you have decided it is not needed. The backup runs last, after the stores have been refreshed, and is best-effort: a target that is offline or full produces a ⚠️ warning in the run message and never fails the run. A run that downloads no rows writes no snapshot and does not back up; the stores it refreshed are in the next run's bundle.
+
+**What it cannot tell you.** A backup "succeeds" when the files reach the target folder. Whether a sync client then uploaded them is invisible from here: a client that is signed out or not running leaves a healthy-looking local folder and nothing off the machine. Check the cloud side from time to time (the manifest's `writtenUtc` there should be from today), and run `backup --verify` occasionally.
+
+**Restoring.** Copy the newest snapshot into `results_csv_dir` and decompress it to `cleared_orders_cleaned.csv`, copy the yearly archives beside it, and unpack the newest bundle there (`tar -xzf pipeline_state_YYYY-MM-DD.tar.gz`): the stores land in `.cache/` and the extra files in `extra/`, to be put back at the paths `extra/INDEX.json` lists. Then run `export-market-results` to rebuild the feed.
+
+**Never put credentials in a backup target.** Nothing here copies `credentials.json` or certificates, and `backup_extra_files` should not list them: keep those in a password manager.
+
 ### CSV outputs (`paths.results_csv_dir`)
 
-`results_csv_dir` should be **local disk** (default layout: `~/BetfairData`). If `paths.backup_dir` is set, compressed snapshots and yearly archives are also copied there after each successful run as a one-way disaster-recovery backup.
+`results_csv_dir` should be **local disk** (default layout: `~/BetfairData`). If `paths.backup_dir` or `paths.backup_dirs` is set, each run ends with a one-way disaster-recovery backup to every target; see [Backups](#backups).
 
 - **Canonical CSV** — `cleared_orders_cleaned.csv`. Stable filename, always reflects the rolling dataset (last `user.canonical_archive_months` months, default 12). Idempotent updates via `betId` dedupe.
 - **Snapshot CSVs** — `cleared_orders_cleaned_YYYY-MM-DD.csv.gz`. Dated gzip copies of the canonical for short-term rollback; only the newest `user.snapshot_retention_days` (default 14) are kept, older ones are deleted after each run.
@@ -856,7 +893,7 @@ src/betfair_results_downloader/
   azure_publish.py        # Azure SQL incremental sync plan + apply
   azure_common.py         # Shared Azure ODBC connection-string builder
   slack_notify.py         # Slack delivery with retry (dm-report --post-slack, run failure alerts)
-  backup.py               # One-way compressed backup to paths.backup_dir
+  backup.py               # One-way backup (snapshots, state bundle, manifest) and its verify
   audit.py                # Settled-date gap analysis (backs the `audit` command)
   secrets.py              # Credentials resolver + validator
   config.py               # ScheduleConfig dataclass + event type constants
