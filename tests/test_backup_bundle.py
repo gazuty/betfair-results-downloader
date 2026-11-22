@@ -313,6 +313,35 @@ def test_missing_extra_file_reaches_the_warning(tmp_path) -> None:
 
     assert warning is not None and "gone.csv" in warning
     assert (tmp_path / "cloud" / "pipeline_state_2026-03-10.tar.gz").exists()
+    # And it outlives the run's warning: verify must not certify a bundle
+    # that is a sound archive but short of a configured file.
+    result = verify_backup(tmp_path / "cloud")
+    assert not result.ok
+    assert result.problems == [
+        f"pipeline_state_2026-03-10.tar.gz (extra file not found: "
+        f"{tmp_path / 'gone.csv'}): the last backup did not deliver it"
+    ]
+
+
+def test_store_lost_while_staging_is_recorded_for_verify(tmp_path, monkeypatch) -> None:
+    src = _working_set(tmp_path)
+    dst = tmp_path / "cloud"
+    real_copy = backup_mod.shutil.copy2
+
+    def _copy(source, target, **kwargs):
+        if Path(source).name == "venue_tracks.csv":
+            raise OSError("vanished")
+        return real_copy(source, target, **kwargs)
+
+    monkeypatch.setattr(backup_mod.shutil, "copy2", _copy)
+    warning = run_backup(src, [dst], tiers=KEEP_ALL, now_utc=NOW)
+    monkeypatch.undo()
+
+    assert warning is not None and "venue_tracks.csv: vanished" in warning
+    assert verify_backup(dst).problems == [
+        "pipeline_state_2026-03-10.tar.gz (.cache/venue_tracks.csv: vanished): "
+        "the last backup did not deliver it"
+    ]
 
 
 def test_no_destination_is_a_clean_no_op(tmp_path) -> None:

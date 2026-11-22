@@ -366,6 +366,9 @@ def run_backup(
             bundle = staging / f"pipeline_state_{now_utc:%Y-%m-%d}.tar.gz"
             missing = build_state_bundle(results_csv_dir, extra_files, bundle)
             if missing:
+                # Kept in the manifest too: the bundle that does arrive is
+                # a good archive, so only this says it is short of members.
+                undelivered.extend(f"{bundle.name} ({item})" for item in missing)
                 warnings.append(
                     "⚠️ Backup state bundle is incomplete: " + _summarise(missing)
                 )
