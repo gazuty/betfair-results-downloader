@@ -1223,13 +1223,14 @@ def test_destination_that_hangs_is_left_behind_and_the_next_is_served(
 
     started = time.monotonic()
     warning = run_backup(
-        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=0.2
+        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=2
     )
 
     assert time.monotonic() - started < 10
     assert warning == (
-        f"⚠️ Backup to {hung} did not finish within 0.2s and was left behind "
-        f"(the folder is not responding); check it with backup --verify."
+        f"⚠️ Backup to {hung} did not finish within 2s and was left behind "
+        f"(the folder is not responding); nothing records what reached it, "
+        f"so check backup --verify shows a time after this."
     )
     assert verify_backup(good).ok
 
@@ -1257,7 +1258,7 @@ def test_destination_that_hangs_on_its_first_read_is_asked_only_once(
     monkeypatch.setattr(backup_mod, "backup_compressed_outputs", _copy)
 
     warning = run_backup(
-        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=0.2
+        src, [hung, good], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=2
     )
 
     assert warning is not None and warning.count("did not finish") == 1

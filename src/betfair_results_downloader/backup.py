@@ -215,6 +215,10 @@ def _within(seconds: Optional[float], work: Callable[[], object]) -> object:
     thread that is left behind when time is up. It may still finish
     later, or it dies with the process; every write it makes is a
     temp-file-then-rename, so a half-done copy never takes a real name.
+    Until the process exits it can outlive the caller's pipeline lock: in
+    that window it is a second writer on its folder, and the manifest
+    written last wins. The run's process exits seconds after its backup,
+    which is what keeps that window small.
     An exception in ``work`` is re-raised here.
     """
     if seconds is None:
@@ -239,8 +243,8 @@ def _within(seconds: Optional[float], work: Callable[[], object]) -> object:
 def _not_responding(backup_dir: Path, seconds: float) -> str:
     return (
         f"⚠️ Backup to {backup_dir} did not finish within {seconds:g}s and "
-        f"was left behind (the folder is not responding); check it with "
-        f"backup --verify."
+        f"was left behind (the folder is not responding); nothing records "
+        f"what reached it, so check backup --verify shows a time after this."
     )
 
 
