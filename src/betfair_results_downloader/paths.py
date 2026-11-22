@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from .backup import RetentionTiers
+
 
 class ResultsDirNotConfigured(RuntimeError):
     """Raised when ``paths.results_csv_dir`` is missing from credentials."""
@@ -56,3 +58,73 @@ def resolve_backup_dir(creds: dict[str, Any]) -> Optional[Path]:
         return None
     raw = raw.strip()
     return Path(raw).expanduser() if raw else None
+
+
+def _string_list(value: object) -> list[str]:
+    """The non-empty strings of a list setting; anything else gives none."""
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def resolve_backup_dirs(creds: dict[str, Any]) -> list[Path]:
+    """
+    Every backup destination: ``paths.backup_dir`` (the original single
+    setting) followed by ``paths.backup_dirs``, without repeats.
+
+    Two destinations on two cloud services are two independent copies; a
+    list rather than a second named setting so a third costs nothing.
+    Forgiving like :func:`resolve_backup_dir`: a malformed value yields no
+    destination here and is rejected by ``validate_credentials`` up front.
+    """
+    paths_cfg = creds.get("paths")
+    if not isinstance(paths_cfg, dict):
+        return []
+    found: list[Path] = []
+    first = resolve_backup_dir(creds)
+    if first is not None:
+        found.append(first)
+    for raw in _string_list(paths_cfg.get("backup_dirs")):
+        candidate = Path(raw).expanduser()
+        if candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def resolve_backup_extra_files(creds: dict[str, Any]) -> list[Path]:
+    """Files outside the results directory that ride in the state bundle."""
+    paths_cfg = creds.get("paths")
+    if not isinstance(paths_cfg, dict):
+        return []
+    return [
+        Path(raw).expanduser()
+        for raw in _string_list(paths_cfg.get("backup_extra_files"))
+    ]
+
+
+def resolve_backup_retention(
+    creds: dict[str, Any], snapshot_retention: int
+) -> RetentionTiers:
+    """
+    How long destinations keep dated copies, from ``paths.backup_retention``
+    (``{"daily": 7, "weekly": 8, "monthly": 12}``).
+
+    Unset keeps the original rule, the newest ``snapshot_retention`` dates,
+    so an existing install behaves as before until it opts in. A tier left
+    out of the object is zero.
+    """
+    paths_cfg = creds.get("paths")
+    raw = paths_cfg.get("backup_retention") if isinstance(paths_cfg, dict) else None
+    if not isinstance(raw, dict):
+        return RetentionTiers(daily=snapshot_retention)
+
+    def _count(key: str) -> int:
+        value = raw.get(key, 0)
+        # bool is an int: `true` must not quietly mean "keep one".
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
+    return RetentionTiers(
+        daily=_count("daily"), weekly=_count("weekly"), monthly=_count("monthly")
+    )

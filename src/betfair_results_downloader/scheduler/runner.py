@@ -340,6 +340,43 @@ def _refresh_market_commission(
         return warning
 
 
+def _back_up(
+    creds: dict[str, Any], results_dir: Path, say: Callable[[str], None]
+) -> Optional[str]:
+    """
+    Copy the order snapshots, yearly archives and a bundle of the stores
+    to every configured backup directory; None when there is none, or all
+    of them are complete.
+
+    Best-effort by design: a cloud folder being offline or full must never
+    fail a run that just succeeded locally, but the warning rides the
+    result message so the ⚠️ reaches Slack.
+    """
+    from ..backup import run_backup  # noqa: PLC0415
+    from ..paths import (  # noqa: PLC0415
+        resolve_backup_dirs,
+        resolve_backup_extra_files,
+        resolve_backup_retention,
+    )
+
+    backup_dirs = resolve_backup_dirs(creds)
+    if not backup_dirs:
+        return None
+    user = creds.get("user", {}) or {}
+    warning = run_backup(
+        results_dir,
+        backup_dirs,
+        tiers=resolve_backup_retention(
+            creds, int(user.get("snapshot_retention_days", 14))
+        ),
+        extra_files=resolve_backup_extra_files(creds),
+        status_cb=say,
+    )
+    if warning:
+        logger.warning(warning)
+    return warning
+
+
 def _refresh_racecard(
     client: Any,
     results_dir: Path,
@@ -646,24 +683,6 @@ def _run_pipeline_inner(
         )
         logger.info("CSV result: %s", csvr.message)
 
-        # One-way backup of the compressed outputs, after the local write
-        # succeeded. Best-effort by design: OneDrive being offline or full
-        # must never fail a run that just succeeded locally, but the
-        # warning rides the result message so the ⚠️ reaches Slack.
-        from ..backup import backup_compressed_outputs  # noqa: PLC0415
-        from ..paths import resolve_backup_dir  # noqa: PLC0415
-
-        backup_warning: Optional[str] = None
-        backup_dir = resolve_backup_dir(creds)
-        if backup_dir is not None:
-            backup_warning = backup_compressed_outputs(
-                results_dir,
-                backup_dir,
-                retention=int(user.get("snapshot_retention_days", 14)),
-                status_cb=_say,
-            )
-            if backup_warning:
-                logger.warning(backup_warning)
         # Settlement status for every market this window touched, recorded
         # while Betfair still answers for them. This is what lets the daily
         # report hold back partially settled outrights; see market_status.
@@ -687,6 +706,10 @@ def _run_pipeline_inner(
         feed_warnings, feed_rebuilt = _publish_market_results(
             results_dir, _say, status_failed=status_warning is not None
         )
+
+        # One-way backup, last: the state bundle must hold the stores as
+        # this run left them, and the feed step is the last to read them.
+        backup_warning = _back_up(creds, results_dir, _say)
 
         run_warnings = [
             w

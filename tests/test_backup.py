@@ -137,15 +137,27 @@ def test_resolve_backup_dir_expands_tilde() -> None:
     assert got == Path("~/OneDriveBackup").expanduser()
 
 
-def test_pipeline_calls_the_backup_after_the_csv_write() -> None:
-    """The wiring, asserted at source level like the login-retry test."""
+def test_pipeline_backs_up_after_the_stores_are_refreshed() -> None:
+    """
+    The wiring, asserted at source level like the login-retry test. The
+    backup used to follow the CSV write directly; it now comes after the
+    feed step, the last to touch the stores, so the state bundle holds
+    them as this run left them.
+    """
     from betfair_results_downloader.scheduler import runner
 
     source = inspect.getsource(runner._run_pipeline_inner)
-    assert "backup_compressed_outputs(" in source
-    assert source.index("write_csv_outputs(") < source.index(
-        "backup_compressed_outputs("
-    )
+    assert source.count("_back_up(") == 1
+    for earlier in (
+        "write_csv_outputs(",
+        "_refresh_market_status(",
+        "_refresh_market_commission(",
+        "_refresh_racecard(",
+        "_publish_market_results(",
+    ):
+        assert source.index(earlier) < source.index("_back_up("), earlier
+    # And its warning still reaches the run message.
+    assert source.index("_back_up(") < source.index("run_warnings = [")
 
 
 def test_same_size_rewrite_is_still_recopied(tmp_path) -> None:
