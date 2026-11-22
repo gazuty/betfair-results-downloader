@@ -1266,6 +1266,39 @@ def test_destination_that_hangs_on_its_first_read_is_asked_only_once(
     assert verify_backup(good).ok
 
 
+def test_time_limit_covers_the_first_read_and_the_copy_together(
+    tmp_path, monkeypatch, stuck
+) -> None:
+    """
+    A destination slow to answer its first read has that much less for
+    the copy: slow twice over must not cost the run two limits.
+    """
+    src = _working_set(tmp_path)
+    slow = tmp_path / "slow"
+    real_read = backup_mod.read_manifest
+    waits: list[object] = []
+    real_within = backup_mod._within
+
+    def _read(backup_dir):
+        time.sleep(0.5)
+        return real_read(backup_dir)
+
+    def _within(seconds, work):
+        waits.append(seconds)
+        return real_within(seconds, work)
+
+    monkeypatch.setattr(backup_mod, "read_manifest", _read)
+    monkeypatch.setattr(backup_mod, "_within", _within)
+    _hang_copy_to(monkeypatch, slow, stuck)
+
+    started = time.monotonic()
+    warning = run_backup(src, [slow], tiers=KEEP_ALL, now_utc=NOW, target_time_limit=2)
+
+    assert warning is not None and "did not finish within 2s" in warning
+    assert waits[0] == 2 and 1.0 < waits[1] <= 1.5
+    assert time.monotonic() - started < 3.5
+
+
 def test_without_a_limit_a_slow_destination_is_waited_for(
     tmp_path, monkeypatch
 ) -> None:

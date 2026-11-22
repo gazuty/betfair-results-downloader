@@ -38,7 +38,6 @@ directory and nothing off the machine; only looking at the cloud side
 from __future__ import annotations
 
 import gzip
-import threading
 import hashlib
 import json
 import logging
@@ -47,6 +46,8 @@ import re
 import shutil
 import tarfile
 import tempfile
+import threading
+import time
 import uuid
 import zlib
 from dataclasses import dataclass, field
@@ -478,14 +479,19 @@ def run_backup(
     warnings: list[str] = []
     # The first touch of each destination, under the same limit as the
     # copy: one that does not answer here is not asked again this run, so
-    # it costs the run one wait and not two.
+    # it costs the run one wait and not two. The time this read takes
+    # comes out of what the copy may use: the limit is on the destination,
+    # not on each call into it.
     manifests: dict[Path, dict[str, dict[str, object]]] = {}
+    spent: dict[Path, float] = {}
     for backup_dir in backup_dirs:
+        began = time.monotonic()
         try:
             read = _within(target_time_limit, lambda d=backup_dir: read_manifest(d))
         except Exception:
             # The copy step reads it again and reports what is wrong.
             read = {}
+        spent[backup_dir] = time.monotonic() - began
         if read is _UNFINISHED:
             assert target_time_limit is not None
             warnings.append(_not_responding(backup_dir, target_time_limit))
@@ -532,8 +538,13 @@ def run_backup(
                 f"only the order snapshots were backed up."
             )
         for backup_dir in manifests:
+            remaining = (
+                None
+                if target_time_limit is None
+                else max(0.0, target_time_limit - spent[backup_dir])
+            )
             warning = _within(
-                target_time_limit,
+                remaining,
                 lambda d=backup_dir: backup_compressed_outputs(
                     results_csv_dir,
                     d,
